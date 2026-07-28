@@ -1,0 +1,44 @@
+min_version = "2026.2.2"
+
+[tools]
+rust = "1.93.0"
+
+[env]
+CARGO_TERM_COLOR = "always"
+
+[tasks.build]
+description = "Build git-ar"
+run = "cargo build --locked"
+
+[tasks.check]
+description = "Type-check the workspace"
+run = "cargo check --locked"
+
+[tasks."fmt:check"]
+description = "Check Rust formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.test]
+description = "Run tests"
+run = "cargo test --locked"
+
+[tasks.clippy]
+description = "Run clippy with warnings denied"
+run = "cargo clippy --locked --all-targets -- -D warnings"
+
+[tasks.verify]
+description = "Run every local and CI quality gate"
+depends = ["fmt:check", "check", "test", "clippy"]
+
+[tasks.setup]
+description = "Install git-ar and activate repository-managed hooks"
+depends = ["verify"]
+run = """
+cargo install --path . --locked --force
+git config core.hooksPath .githooks
+git ar doctor
+"""
+
+[tasks.ar]
+description = "Run git-ar from source"
+run = "cargo run --quiet --"

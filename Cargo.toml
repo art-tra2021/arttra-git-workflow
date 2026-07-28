@@ -1,0 +1,24 @@
+[package]
+name = "git-ar"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Human-friendly, AI-ready Git workflow assistant"
+license = "UNLICENSED"
+publish = false
+
+[[bin]]
+name = "git-ar"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.4", features = ["derive"] }
+inquire = "0.9.4"
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.3"
+
+[lints.rust]
+unsafe_code = "forbid"

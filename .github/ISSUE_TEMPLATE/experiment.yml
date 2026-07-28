@@ -1,0 +1,35 @@
+name: Git運用実験
+description: 仮説を試し、実際の不都合を記録する
+title: "[Experiment] "
+labels:
+  - experiment
+body:
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: 仮説
+      description: 何を良くできると考えていますか。
+    validations:
+      required: true
+
+  - type: textarea
+    id: procedure
+    attributes:
+      label: 試すこと
+      description: 誰が何をするかを短く書いてください。
+    validations:
+      required: true
+
+  - type: textarea
+    id: observation
+    attributes:
+      label: 観測すること
+      description: 時間、迷い、修正、回避など、記録する事実を書いてください。
+    validations:
+      required: true
+
+  - type: textarea
+    id: result
+    attributes:
+      label: 結果
+      description: 実験後に追記します。開始時は空欄で構いません。

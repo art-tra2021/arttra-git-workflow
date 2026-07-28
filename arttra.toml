@@ -1,0 +1,22 @@
+version = 1
+
+[commit]
+# Start by observing friction. Change to "block" only after the team agrees.
+mode = "warn"
+max_subject_length = 72
+allowed_types = [
+  "feat",
+  "fix",
+  "docs",
+  "refactor",
+  "test",
+  "build",
+  "ci",
+  "chore",
+  "revert",
+]
+
+[issue]
+require_background = true
+require_goal = true
+require_done = true
