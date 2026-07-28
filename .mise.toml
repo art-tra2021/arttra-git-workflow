@@ -1,7 +1,7 @@
 min_version = "2026.2.2"
 
 [tools]
-rust = "1.93.0"
+rust = { version = "1.93.0", components = "clippy,rustfmt" }
 
 [env]
 CARGO_TERM_COLOR = "always"
