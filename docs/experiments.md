@@ -14,6 +14,7 @@
 - 操作: `arttra.toml`の`commit.mode = "warn"`で実際のcommitを行う。
 - 観測: 警告件数、無視された理由、誤検知。
 - 成功条件: blockへ移行できる規則と、補助が必要な規則を分離できる。
+- 結果: `git ar commit`がtrailerを付与する方式でblockへ移行した。Git生成messageは例外にした。
 
 ## E-003: 変更ファイルpresence
 
@@ -27,6 +28,11 @@
 ## 未決定
 
 - AIプロバイダーと認証方法
-- Issue・PR用JSON Schemaの確定
-- Rulesetsで必須にするCI
 - Organizationへ移管する条件
+
+## E-004: active Rulesetと本人マージ
+
+- 仮説: Rulesetのapproval数を0にし、Issueの`merge/*`を`policy` checkで評価すれば、保護を外さず変更ごとにレビュー強度を選べる。
+- 操作: `merge/self` IssueからPRを作り、`verify`と`policy`を必須にしたactive Ruleset下でsquash mergeする。
+- 観測: required check、merge可否、Rule suiteを記録する。
+- 成功条件: 管理者bypassなしで本人マージでき、Rulesetの評価記録をAPIから取得できる。

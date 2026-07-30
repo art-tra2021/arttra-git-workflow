@@ -317,6 +317,7 @@ impl std::fmt::Display for IssueKind {
 #[serde(rename_all = "lowercase")]
 enum MergeMode {
     Review,
+    #[value(name = "self")]
     SelfMerge,
     Emergency,
 }
