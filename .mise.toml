@@ -30,15 +30,64 @@ run = "cargo clippy --locked --all-targets -- -D warnings"
 description = "Run every local and CI quality gate"
 depends = ["fmt:check", "check", "test", "clippy"]
 
+[tasks.quick]
+description = "Run fast checks while editing"
+depends = ["fmt:check", "check"]
+
 [tasks.setup]
 description = "Install git-ar and activate repository-managed hooks"
 depends = ["verify"]
 run = """
 cargo install --path . --locked --force
 git config core.hooksPath .githooks
+git ar setup
 git ar doctor
 """
 
 [tasks.ar]
 description = "Run git-ar from source"
 run = "cargo run --quiet --"
+
+[tasks.doctor]
+description = "Check the local ART-TRA development environment"
+run = "git ar doctor"
+
+[tasks.context]
+description = "Show the current repository and worktree context"
+run = "git ar context"
+
+[tasks.policy]
+description = "Show the effective ART-TRA policy"
+run = "git ar policy"
+
+[tasks."ai:setup"]
+description = "Refresh local, untracked Claude and Codex integrations"
+run = "git ar setup"
+
+[tasks."presence:snapshot"]
+description = "Preview the changed-file metadata shared with teammates"
+run = "git ar presence snapshot"
+
+[tasks."presence:publish"]
+description = "Publish changed-file metadata once"
+run = "git ar presence publish --yes"
+
+[tasks."presence:check"]
+description = "Check active worktrees for overlapping files"
+run = "git ar presence check"
+
+[tasks."presence:watch"]
+description = "Publish changed-file metadata periodically"
+run = "git ar presence watch --yes"
+
+[tasks."presence:install"]
+description = "Install periodic presence publishing for this repository"
+run = "git ar presence install --yes"
+
+[tasks."presence:status"]
+description = "Show periodic presence publisher status"
+run = "git ar presence status"
+
+[tasks."presence:uninstall"]
+description = "Remove periodic presence publishing for this repository"
+run = "git ar presence uninstall --yes"

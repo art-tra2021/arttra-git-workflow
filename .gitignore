@@ -3,3 +3,9 @@
 /.vscode/
 .DS_Store
 *.swp
+
+# Per-machine AI integration and privacy-safe local telemetry.
+/.arttra/local/
+/.claude/settings.local.json
+/.codex/hooks.json
+/CLAUDE.md

@@ -20,3 +20,40 @@ allowed_types = [
 require_background = true
 require_goal = true
 require_done = true
+
+[command_guard]
+# AIが誤ったパッケージ管理コマンドを実行する前に止める。
+mode = "block"
+javascript_package_manager = "bun"
+python_package_manager = "uv"
+runtime_manager = "mise"
+
+[telemetry]
+# コマンド本文やdiffは保存せず、規則IDと判断だけをローカルに記録する。
+mode = "local"
+path = ".arttra/local/events.jsonl"
+
+[presence]
+# 共有するのはファイルパス、状態、branch、時刻だけ。diff本文は送らない。
+# この実験リポジトリでは有効。新規テンプレートでは導入時に明示選択させる。
+enabled = true
+remote = "origin"
+ref_prefix = "ar-presence"
+interval_seconds = 300
+max_age_minutes = 30
+
+[branch]
+# 新規リポジトリでは最初からblock。既存リポジトリだけwarn期間を設ける。
+mode = "block"
+allowed_types = [
+  "feature",
+  "fix",
+  "hotfix",
+  "chore",
+  "docs",
+  "refactor",
+  "test",
+  "release",
+]
+protected_branches = ["main"]
+bypass_prefixes = ["dependabot/", "renovate/", "ar-presence/"]

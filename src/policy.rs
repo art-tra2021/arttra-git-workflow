@@ -11,6 +11,14 @@ pub struct Policy {
     pub version: u32,
     pub commit: CommitPolicy,
     pub issue: IssuePolicy,
+    #[serde(default)]
+    pub command_guard: CommandGuardPolicy,
+    #[serde(default)]
+    pub telemetry: TelemetryPolicy,
+    #[serde(default)]
+    pub presence: PresencePolicy,
+    #[serde(default)]
+    pub branch: BranchPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,9 +35,97 @@ pub struct IssuePolicy {
     pub require_done: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandGuardPolicy {
+    pub mode: ValidationMode,
+    pub javascript_package_manager: String,
+    pub python_package_manager: String,
+    pub runtime_manager: String,
+}
+
+impl Default for CommandGuardPolicy {
+    fn default() -> Self {
+        Self {
+            mode: ValidationMode::Warn,
+            javascript_package_manager: "bun".into(),
+            python_package_manager: "uv".into(),
+            runtime_manager: "mise".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryPolicy {
+    pub mode: TelemetryMode,
+    pub path: String,
+}
+
+impl Default for TelemetryPolicy {
+    fn default() -> Self {
+        Self {
+            mode: TelemetryMode::Off,
+            path: ".arttra/local/events.jsonl".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresencePolicy {
+    pub enabled: bool,
+    pub remote: String,
+    pub ref_prefix: String,
+    pub interval_seconds: u64,
+    pub max_age_minutes: u64,
+}
+
+impl Default for PresencePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            remote: "origin".into(),
+            ref_prefix: "ar-presence".into(),
+            interval_seconds: 300,
+            max_age_minutes: 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchPolicy {
+    pub mode: ValidationMode,
+    pub allowed_types: Vec<String>,
+    pub protected_branches: Vec<String>,
+    pub bypass_prefixes: Vec<String>,
+}
+
+impl Default for BranchPolicy {
+    fn default() -> Self {
+        Self {
+            mode: ValidationMode::Warn,
+            allowed_types: vec![
+                "feature".into(),
+                "fix".into(),
+                "hotfix".into(),
+                "chore".into(),
+                "docs".into(),
+                "refactor".into(),
+                "test".into(),
+                "release".into(),
+            ],
+            protected_branches: vec!["main".into()],
+            bypass_prefixes: vec![
+                "dependabot/".into(),
+                "renovate/".into(),
+                "ar-presence/".into(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValidationMode {
+    Off,
     Warn,
     Block,
 }
@@ -37,10 +133,18 @@ pub enum ValidationMode {
 impl fmt::Display for ValidationMode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Off => formatter.write_str("off"),
             Self::Warn => formatter.write_str("warn"),
             Self::Block => formatter.write_str("block"),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TelemetryMode {
+    Off,
+    Local,
 }
 
 impl Policy {
@@ -91,7 +195,7 @@ impl CommitPolicy {
 
     pub fn validate_or_report(&self, subject: &str) -> Result<()> {
         let violations = self.violations(subject);
-        if violations.is_empty() {
+        if violations.is_empty() || matches!(self.mode, ValidationMode::Off) {
             return Ok(());
         }
 

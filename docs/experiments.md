@@ -15,6 +15,15 @@
 - 観測: 警告件数、無視された理由、誤検知。
 - 成功条件: blockへ移行できる規則と、補助が必要な規則を分離できる。
 
+## E-003: 変更ファイルpresence
+
+- 仮説: diff本文を共有しなくても、branchと変更ファイルパスだけで作業衝突を早期発見できる。
+- 操作: 2つのworktreeを別actor/deviceとして共有し、同じファイルのbranch差分・unstaged差分と、片側だけのuntracked fileを作る。
+- 観測: unstagedとuntrackedを正しく区別し、同じファイルだけを重複として検出できた。
+- 改善: branch全体の重複は件数が多くなるため、未commitを先、branch差分を後に表示する。
+- OS実行: macOSのlaunchdは保護外cloneで終了コード0を確認した。Desktop配下ではmacOSのbackground accessで停止するため、登録を拒否する。
+- 成功条件: 人間向け表示とAI向けJSONが同じsnapshotを使用し、期限切れ端末を自動的に無視する。
+
 ## 未決定
 
 - AIプロバイダーと認証方法
