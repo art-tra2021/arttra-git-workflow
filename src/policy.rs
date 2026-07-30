@@ -172,7 +172,7 @@ impl CommitPolicy {
         let mut violations = Vec::new();
         if subject.chars().count() > self.max_subject_length {
             violations.push(format!(
-                "subject is longer than {} characters",
+                "commitの先頭行は{}文字以内にしてください",
                 self.max_subject_length
             ));
         }
@@ -184,13 +184,15 @@ impl CommitPolicy {
                 let kind = &captures["kind"];
                 if !self.allowed_types.iter().any(|allowed| allowed == kind) {
                     violations.push(format!(
-                        "type `{kind}` is not allowed; use one of: {}",
+                        "type `{kind}` は使用できません。次のいずれかを使ってください: {}",
                         self.allowed_types.join(", ")
                     ));
                 }
             }
-            None => violations
-                .push("subject must match `type(scope): summary` or `type: summary`".into()),
+            None => violations.push(
+                "commitの先頭行は `type(scope): summary` または `type: summary` にしてください"
+                    .into(),
+            ),
         }
         violations
     }
@@ -205,9 +207,9 @@ impl CommitPolicy {
             eprintln!("arttra: {violation}");
         }
         if matches!(self.mode, ValidationMode::Block) {
-            bail!("commit message rejected by arttra policy");
+            bail!("commit messageはART-TRAの規則により拒否されました");
         }
-        eprintln!("arttra: warning only; operation continues");
+        eprintln!("arttra: 警告のみのためcommitを続行します");
         Ok(())
     }
 }
@@ -248,7 +250,7 @@ mod tests {
     fn reports_unknown_type() {
         let violations = policy().violations("docs: explain usage");
         assert_eq!(violations.len(), 1);
-        assert!(violations[0].contains("not allowed"));
+        assert!(violations[0].contains("使用できません"));
     }
 
     #[test]
@@ -256,7 +258,7 @@ mod tests {
         let violations = policy().violations("add a feature");
         assert_eq!(
             violations,
-            vec!["subject must match `type(scope): summary` or `type: summary`"]
+            vec!["commitの先頭行は `type(scope): summary` または `type: summary` にしてください"]
         );
     }
 

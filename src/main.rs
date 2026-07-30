@@ -221,6 +221,9 @@ struct CommitArgs {
     /// Commit without an interactive confirmation.
     #[arg(long)]
     yes: bool,
+    /// Replace the current HEAD commit while preserving the same guided input.
+    #[arg(long)]
+    amend: bool,
 }
 
 #[derive(Debug, Args, Default)]
@@ -557,7 +560,11 @@ fn commit(mut args: CommitArgs) -> Result<()> {
     }
 
     let mut command = Command::new("git");
-    command.args(["commit", "-m", &draft.subject]);
+    command.arg("commit");
+    if args.amend {
+        command.arg("--amend");
+    }
+    command.args(["-m", &draft.subject]);
     if let Some(body) = &draft.body {
         command.args(["-m", body]);
     }
@@ -987,10 +994,10 @@ fn validate_commit_file(path: &Path) -> Result<()> {
     match policy.commit.mode {
         ValidationMode::Off => Ok(()),
         ValidationMode::Warn => {
-            eprintln!("arttra: warning only; commit is allowed");
+            eprintln!("arttra: 警告のみのためcommitを続行します");
             Ok(())
         }
-        ValidationMode::Block => bail!("commit message rejected by arttra policy"),
+        ValidationMode::Block => bail!("commit messageはART-TRAの規則により拒否されました"),
     }
 }
 
