@@ -60,6 +60,14 @@ run = "git ar context"
 description = "Show the effective ART-TRA policy"
 run = "git ar policy"
 
+[tasks.tasks]
+description = "Show Issues assigned to the current GitHub user"
+run = "git ar tasks"
+
+[tasks.telemetry]
+description = "Summarize local privacy-safe policy events"
+run = "git ar telemetry"
+
 [tasks."ai:setup"]
 description = "Refresh local, untracked Claude and Codex integrations"
 run = "git ar setup"

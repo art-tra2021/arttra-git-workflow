@@ -1,8 +1,9 @@
 version = 1
 
 [commit]
-# Start by observing friction. Change to "block" only after the team agrees.
-mode = "warn"
+# 新規リポジトリではgit ar commitへ統一する。生成済みGitメッセージは許可する。
+mode = "block"
+require_ar_trailer = true
 max_subject_length = 72
 allowed_types = [
   "feat",

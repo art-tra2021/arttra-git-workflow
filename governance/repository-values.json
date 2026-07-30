@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "repository": "rozwer/arttra-git-lab",
+  "values": {
+    "repo_kind": "workflow-lab",
+    "owner_team": "git-platform",
+    "risk_level": "low",
+    "ci_profile": "rust",
+    "review_policy": "flexible",
+    "ai_ready": "true"
+  }
+}

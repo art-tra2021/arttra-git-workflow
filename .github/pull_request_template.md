@@ -15,3 +15,18 @@
 - [ ] `mise run verify`
 - [ ] TUI経由を確認した
 - [ ] 非対話引数またはJSON経由を確認した
+
+## Issueとマージ方針
+
+Closes #
+
+<!--
+関連Issueに次のいずれか一つを付けます。
+- merge/review: 作成者以外の承認が1件必要（既定）
+- merge/self: 承認なしで本人マージ可
+- merge/emergency: hotfix branch限定。事後レビューIssueを自動作成
+-->
+
+## 競合しそうな変更
+
+<!-- 同時に触られているPR・branch・ファイルがあれば記載 -->

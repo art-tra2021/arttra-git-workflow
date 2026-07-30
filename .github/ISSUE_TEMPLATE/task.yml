@@ -1,0 +1,25 @@
+name: 小タスク
+description: 作業チケットを分解した、単独PRにしない小さな行動
+title: "[Task] "
+labels: ["type/task", "status/todo"]
+body:
+  - type: input
+    id: parent
+    attributes:
+      label: 親の作業チケット
+      description: 例：#123
+    validations:
+      required: true
+  - type: textarea
+    id: action
+    attributes:
+      label: やること
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: 完了条件
+      value: "- [ ] "
+    validations:
+      required: true

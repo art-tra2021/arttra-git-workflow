@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "properties": [
+    {
+      "property_name": "repo_kind",
+      "value_type": "single_select",
+      "required": true,
+      "default_value": "product",
+      "allowed_values": ["product", "business", "platform", "workflow-lab"]
+    },
+    {
+      "property_name": "owner_team",
+      "value_type": "string",
+      "required": true
+    },
+    {
+      "property_name": "risk_level",
+      "value_type": "single_select",
+      "required": true,
+      "default_value": "standard",
+      "allowed_values": ["low", "standard", "high", "critical"]
+    },
+    {
+      "property_name": "ci_profile",
+      "value_type": "single_select",
+      "required": true,
+      "allowed_values": ["python", "typescript", "rust", "mixed", "documents"]
+    },
+    {
+      "property_name": "review_policy",
+      "value_type": "single_select",
+      "required": true,
+      "default_value": "flexible",
+      "allowed_values": ["flexible", "standard", "strict"]
+    },
+    {
+      "property_name": "ai_ready",
+      "value_type": "true_false",
+      "required": true,
+      "default_value": "true"
+    }
+  ]
+}

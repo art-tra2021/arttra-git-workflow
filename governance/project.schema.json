@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "title": "ART-TRA Work",
+  "source_of_truth": "github_projects_v2",
+  "views": ["My work", "Urgent", "Blocked", "Schedule", "Review"],
+  "fields": {
+    "Status": [
+      "Intake",
+      "Ready",
+      "Urgent (unstarted)",
+      "In progress",
+      "Blocked",
+      "In review",
+      "Done"
+    ],
+    "Priority": ["P0", "P1", "P2", "P3"],
+    "Size": ["S", "M", "L", "XL"],
+    "Start date": "date",
+    "Target date": "date"
+  },
+  "relationships": {
+    "parent_child": "GitHub sub-issues",
+    "blocked_by": "GitHub issue dependencies"
+  },
+  "integrations": {
+    "slack": "notification-adapter",
+    "calendar": "target-date-adapter"
+  }
+}

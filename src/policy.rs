@@ -26,6 +26,8 @@ pub struct CommitPolicy {
     pub mode: ValidationMode,
     pub max_subject_length: usize,
     pub allowed_types: Vec<String>,
+    #[serde(default)]
+    pub require_ar_trailer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +234,7 @@ mod tests {
             mode: ValidationMode::Warn,
             max_subject_length: 72,
             allowed_types: vec!["feat".into(), "fix".into()],
+            require_ar_trailer: false,
         }
     }
 

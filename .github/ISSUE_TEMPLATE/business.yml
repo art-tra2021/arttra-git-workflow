@@ -1,0 +1,28 @@
+name: 営業・業務変更
+description: コード以外もPRで変更履歴を残すための作業
+title: "[Business] "
+labels: ["type/business", "status/todo", "merge/review"]
+body:
+  - type: textarea
+    id: current
+    attributes:
+      label: 現状
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: 変更する文書・条件・運用
+    validations:
+      required: true
+  - type: textarea
+    id: approval
+    attributes:
+      label: 誰が何を確認すればよいか
+    validations:
+      required: true
+  - type: input
+    id: target_date
+    attributes:
+      label: 目標日
+      description: 例：2026-08-15

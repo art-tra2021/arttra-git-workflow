@@ -40,6 +40,8 @@ TUIを操作する必要はありません。
 git ar context --json
 git ar presence check --json
 git ar presence publish --yes
+git ar tasks --json
+git ar telemetry --json
 git ar branch \
   --type feature \
   --issue 123 \
@@ -83,6 +85,8 @@ mise run presence:watch
 mise run presence:install
 mise run presence:status
 mise run presence:uninstall
+mise run tasks
+mise run telemetry
 ```
 
 共有refは`refs/heads/ar-presence/<actor>/<device>`です。
@@ -129,8 +133,10 @@ mise run presence:uninstall
 ```
 
 miseはruntimeと短い入口を管理します。
-Issue、Task、PR、担当、期限等の正本はGitHub Projectsとし、一覧TUIは`git ar tasks`として追加します。
-将来`mise run tasks`をその薄いaliasとして提供します。
+Issue、Task、PR、担当、期限等の正本はGitHub Projectsとし、`git ar tasks`は担当IssueをTUIまたはJSONで表示します。
+Projectsを読むにはGitHub CLIへ`read:project` scopeが必要です。
 
 設計原則と実験記録は[`docs/architecture.md`](docs/architecture.md)と
 [`docs/experiments.md`](docs/experiments.md)にあります。
+運用の正本は[`docs/workflow-v2.md`](docs/workflow-v2.md)、新規リポジトリへの展開は
+[`docs/repository-template.md`](docs/repository-template.md)です。

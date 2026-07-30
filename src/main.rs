@@ -4,6 +4,8 @@ mod policy;
 mod presence;
 mod scheduler;
 mod setup;
+mod tasks;
+mod telemetry;
 
 use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
@@ -59,6 +61,21 @@ enum Commands {
     Guard(GuardArgs),
     /// Share changed file metadata and detect work overlaps.
     Presence(PresenceArgs),
+    /// Show your GitHub tasks in a small human/AI-friendly view.
+    Tasks {
+        /// Return machine-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Select an Issue and open it in the browser.
+        #[arg(long)]
+        open: bool,
+    },
+    /// Summarize privacy-safe local policy telemetry.
+    Telemetry {
+        /// Return machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Install local, untracked integrations.
     Setup,
     /// Validate the commit message stored at PATH. Intended for commit-msg hooks.
@@ -233,6 +250,12 @@ struct BranchArgs {
 
 #[derive(Debug, Args, Default)]
 struct IssueArgs {
+    /// Issue class: intake, work, task, or business.
+    #[arg(long, value_enum)]
+    kind: Option<IssueKind>,
+    /// Merge policy for work and business Issues.
+    #[arg(long, value_enum)]
+    merge: Option<MergeMode>,
     #[arg(long)]
     title: Option<String>,
     #[arg(long)]
@@ -241,12 +264,81 @@ struct IssueArgs {
     goal: Option<String>,
     #[arg(long)]
     done: Option<String>,
+    /// Blocking Issue number. May be repeated.
+    #[arg(long)]
+    blocked_by: Vec<u64>,
+    /// Target date written to the Issue for Projects ingestion.
+    #[arg(long)]
+    target_date: Option<String>,
     /// Create the Issue with GitHub CLI. Otherwise only preview it.
     #[arg(long)]
     create: bool,
     /// Return the draft as JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum IssueKind {
+    Intake,
+    Work,
+    Task,
+    Business,
+}
+
+impl IssueKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Intake => "type/intake",
+            Self::Work => "type/work",
+            Self::Task => "type/task",
+            Self::Business => "type/business",
+        }
+    }
+
+    fn needs_merge_policy(self) -> bool {
+        matches!(self, Self::Work | Self::Business)
+    }
+}
+
+impl std::fmt::Display for IssueKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Intake => "相談・受付",
+            Self::Work => "作業チケット",
+            Self::Task => "小タスク",
+            Self::Business => "営業・業務変更",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum MergeMode {
+    Review,
+    SelfMerge,
+    Emergency,
+}
+
+impl MergeMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Review => "merge/review",
+            Self::SelfMerge => "merge/self",
+            Self::Emergency => "merge/emergency",
+        }
+    }
+}
+
+impl std::fmt::Display for MergeMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Review => "通常レビュー",
+            Self::SelfMerge => "本人マージ可",
+            Self::Emergency => "緊急マージ（事後レビュー）",
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -257,18 +349,38 @@ struct CommitDraft {
 
 #[derive(Debug, Serialize)]
 struct IssueDraft {
+    kind: IssueKind,
+    merge: Option<MergeMode>,
     title: String,
     background: String,
     goal: String,
     done: String,
+    blocked_by: Vec<u64>,
+    target_date: Option<String>,
 }
 
 impl IssueDraft {
     fn body(&self) -> String {
-        format!(
+        let mut body = format!(
             "## 背景\n\n{}\n\n## 目的\n\n{}\n\n## 完了条件\n\n- [ ] {}\n",
             self.background, self.goal, self.done
-        )
+        );
+        if let Some(merge) = self.merge {
+            body.push_str(&format!("\n## マージ方針\n\n`{}`\n", merge.label()));
+        }
+        if !self.blocked_by.is_empty() {
+            let issues = self
+                .blocked_by
+                .iter()
+                .map(|number| format!("#{number}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            body.push_str(&format!("\n## ブロック元\n\n{issues}\n"));
+        }
+        if let Some(target_date) = &self.target_date {
+            body.push_str(&format!("\n## 目標日\n\n{target_date}\n"));
+        }
+        body
     }
 }
 
@@ -329,6 +441,11 @@ fn run() -> Result<()> {
         Some(Commands::Policy { json }) => show_policy(json),
         Some(Commands::Guard(args)) => guard(args),
         Some(Commands::Presence(args)) => presence(args),
+        Some(Commands::Tasks { json, open }) => tasks::show(json, open),
+        Some(Commands::Telemetry { json }) => {
+            let root = guard::repository_root()?;
+            telemetry::report(&Policy::load()?, &root, json)
+        }
         Some(Commands::Setup) => setup::install_ai_hooks(&guard::repository_root()?),
         Some(Commands::ValidateCommitFile { path }) => validate_commit_file(&path),
         Some(Commands::ValidateBranch { branch, json }) => {
@@ -349,6 +466,7 @@ fn tui() -> Result<()> {
             "branchを作る",
             "Issueを作る",
             "作業ファイルの重複を確認する",
+            "自分のタスクを見る",
             "環境を診断する",
             "AI向けコンテキストを見る",
             "終了する",
@@ -364,6 +482,7 @@ fn tui() -> Result<()> {
             let policy = Policy::load()?;
             presence::check(&policy.presence, false)
         }
+        "自分のタスクを見る" => tasks::show(false, true),
         "環境を診断する" => doctor(false),
         "AI向けコンテキストを見る" => context(false),
         _ => Ok(()),
@@ -411,7 +530,10 @@ fn commit(mut args: CommitArgs) -> Result<()> {
     };
     let draft = CommitDraft {
         subject,
-        body: args.issue.map(|number| format!("Refs #{number}")),
+        body: Some(match args.issue {
+            Some(number) => format!("Refs #{number}\n\nAR-Commit: git-ar/v1"),
+            None => "AR-Commit: git-ar/v1".into(),
+        }),
     };
     policy.commit.validate_or_report(&draft.subject)?;
 
@@ -500,6 +622,38 @@ fn branch_command(mut args: BranchArgs) -> Result<()> {
 }
 
 fn issue(mut args: IssueArgs) -> Result<()> {
+    let interactive = io::stdin().is_terminal();
+    if args.kind.is_none() && interactive {
+        args.kind = Some(
+            Select::new(
+                "Issueの種類",
+                vec![
+                    IssueKind::Intake,
+                    IssueKind::Work,
+                    IssueKind::Task,
+                    IssueKind::Business,
+                ],
+            )
+            .prompt()?,
+        );
+    }
+    let kind = args.kind.unwrap_or(IssueKind::Work);
+    if kind.needs_merge_policy() && args.merge.is_none() && interactive {
+        args.merge = Some(
+            Select::new(
+                "マージ方針",
+                vec![
+                    MergeMode::Review,
+                    MergeMode::SelfMerge,
+                    MergeMode::Emergency,
+                ],
+            )
+            .prompt()?,
+        );
+    }
+    let merge = kind
+        .needs_merge_policy()
+        .then_some(args.merge.unwrap_or(MergeMode::Review));
     if args.title.is_none() {
         ensure_interactive()?;
         args.title = Some(Text::new("Issueタイトル").prompt()?);
@@ -518,10 +672,14 @@ fn issue(mut args: IssueArgs) -> Result<()> {
     }
 
     let draft = IssueDraft {
+        kind,
+        merge,
         title: required(args.title, "--title")?,
         background: required(args.background, "--background")?,
         goal: required(args.goal, "--goal")?,
         done: required(args.done, "--done")?,
+        blocked_by: args.blocked_by,
+        target_date: args.target_date,
     };
 
     if args.json {
@@ -534,15 +692,24 @@ fn issue(mut args: IssueArgs) -> Result<()> {
         return Ok(());
     }
 
-    let output = Command::new("gh")
-        .args([
-            "issue",
-            "create",
-            "--title",
-            &draft.title,
-            "--body",
-            &draft.body(),
-        ])
+    let mut command = Command::new("gh");
+    command.args([
+        "issue",
+        "create",
+        "--title",
+        &draft.title,
+        "--body",
+        &draft.body(),
+        "--label",
+        draft.kind.label(),
+    ]);
+    if let Some(merge) = draft.merge {
+        command.args(["--label", merge.label()]);
+    }
+    if !matches!(draft.kind, IssueKind::Intake) {
+        command.args(["--assignee", "@me"]);
+    }
+    let output = command
         .output()
         .context("gh issue createを起動できませんでした")?;
     ensure_success(&output, "gh issue create")?;
@@ -792,7 +959,23 @@ fn validate_commit_file(path: &Path) -> Result<()> {
         .with_context(|| format!("{}を読み込めませんでした", path.display()))?;
     let subject = message.lines().next().unwrap_or_default();
     let policy = Policy::load()?;
-    let violations = policy.commit.violations(subject);
+    let mut violations = policy.commit.violations(subject);
+    let generated = subject.starts_with("Merge ")
+        || subject.starts_with("Revert ")
+        || subject.starts_with("fixup! ")
+        || subject.starts_with("squash! ");
+    if policy.commit.require_ar_trailer
+        && !generated
+        && !message
+            .lines()
+            .any(|line| line.trim() == "AR-Commit: git-ar/v1")
+    {
+        violations.push(
+            "このリポジトリでは `git ar commit` を使ってください。\
+             既に入力済みなら `git ar commit --type ... --summary ...` で作り直せます。"
+                .into(),
+        );
+    }
     if violations.is_empty() || matches!(policy.commit.mode, ValidationMode::Off) {
         return Ok(());
     }
@@ -908,19 +1091,23 @@ fn lines(value: String) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::IssueDraft;
+    use super::{IssueDraft, IssueKind, MergeMode};
 
     #[test]
     fn issue_body_has_stable_sections() {
         let draft = IssueDraft {
+            kind: IssueKind::Work,
+            merge: Some(MergeMode::Review),
             title: "title".into(),
             background: "background".into(),
             goal: "goal".into(),
             done: "done".into(),
+            blocked_by: Vec::new(),
+            target_date: None,
         };
         assert_eq!(
             draft.body(),
-            "## 背景\n\nbackground\n\n## 目的\n\ngoal\n\n## 完了条件\n\n- [ ] done\n"
+            "## 背景\n\nbackground\n\n## 目的\n\ngoal\n\n## 完了条件\n\n- [ ] done\n\n## マージ方針\n\n`merge/review`\n"
         );
     }
 }

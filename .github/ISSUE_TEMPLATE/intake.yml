@@ -1,0 +1,22 @@
+name: 相談・受付
+description: 思いつき、営業相談、不具合らしきものをまず置く
+title: "[Intake] "
+labels: ["type/intake", "status/triage"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: 何がありましたか
+      description: 分かる範囲だけで構いません。タスク化は整理する人が行います。
+    validations:
+      required: true
+  - type: dropdown
+    id: urgency
+    attributes:
+      label: 急ぎですか
+      options:
+        - 通常
+        - 急ぎ・まだ誰も着手していない
+        - 判断できない
+    validations:
+      required: true

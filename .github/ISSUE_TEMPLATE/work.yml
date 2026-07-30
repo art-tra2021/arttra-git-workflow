@@ -1,0 +1,46 @@
+name: 作業チケット
+description: 成果と完了条件を持つ、PRに対応する作業
+title: "[Work] "
+labels: ["type/work", "status/todo", "merge/review"]
+body:
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 完成するとどうなるか
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: 完了条件
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: dropdown
+    id: merge
+    attributes:
+      label: マージ方式
+      description: ラベルが正本です。作成後に必要なら merge/self または merge/emergency へ変更します。
+      options:
+        - 通常レビュー（既定）
+        - 自分でマージ可
+        - 緊急マージ（事後レビュー必須）
+    validations:
+      required: true
+  - type: input
+    id: blocked_by
+    attributes:
+      label: ブロック元
+      description: なければ空欄。例：#123
+  - type: input
+    id: target_date
+    attributes:
+      label: 目標日
+      description: Projectsへ登録する日付。例：2026-08-15
