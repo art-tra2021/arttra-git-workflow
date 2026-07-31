@@ -44,6 +44,8 @@ TUIは便利な入力手段であり、正本ではありません。
 - Python profileは`uv + ruff`、TypeScript profileは`bun + Biome + tsc`、Rust profileはCargoを使う。
 - GitHub extensionはGitHubによる検証済みとは限らないため、自動setupから外し、repositoryとversionをallowlistする。
 - AIには各toolのJSON/SARIFと決定的なexit codeを渡し、人間には`git ar`が日本語の修正案を表示する。
+- `git ar check --json`は検査task、exit code、stdout、stderrをschema version付きで集約する。
+- Windows runnerではsetup、hk、doctor、quick check、Issue/Task JSON contractを実行して移植性を継続確認する。
 
 ## Presence
 

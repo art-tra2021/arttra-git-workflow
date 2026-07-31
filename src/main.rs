@@ -39,6 +39,15 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Run repository checks with human or machine-readable output.
+    Check {
+        /// Run the editing-time quick checks instead of every required gate.
+        #[arg(long)]
+        quick: bool,
+        /// Return the result and captured diagnostics as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Build and optionally create a commit.
     Commit(CommitArgs),
     /// Build and optionally create a policy-compliant branch.
@@ -273,9 +282,15 @@ struct IssueArgs {
     goal: Option<String>,
     #[arg(long)]
     done: Option<String>,
+    /// Parent Issue number.
+    #[arg(long)]
+    parent: Option<u64>,
     /// Blocking Issue number. May be repeated.
     #[arg(long)]
     blocked_by: Vec<u64>,
+    /// Issue number that the new Issue blocks. May be repeated.
+    #[arg(long)]
+    blocking: Vec<u64>,
     /// Target date written to the Issue for Projects ingestion.
     #[arg(long)]
     target_date: Option<String>,
@@ -365,7 +380,9 @@ struct IssueDraft {
     background: String,
     goal: String,
     done: String,
+    parent: Option<u64>,
     blocked_by: Vec<u64>,
+    blocking: Vec<u64>,
     target_date: Option<String>,
 }
 
@@ -378,6 +395,9 @@ impl IssueDraft {
         if let Some(merge) = self.merge {
             body.push_str(&format!("\n## マージ方針\n\n`{}`\n", merge.label()));
         }
+        if let Some(parent) = self.parent {
+            body.push_str(&format!("\n## 親Issue\n\n#{parent}\n"));
+        }
         if !self.blocked_by.is_empty() {
             let issues = self
                 .blocked_by
@@ -386,6 +406,15 @@ impl IssueDraft {
                 .collect::<Vec<_>>()
                 .join(", ");
             body.push_str(&format!("\n## ブロック元\n\n{issues}\n"));
+        }
+        if !self.blocking.is_empty() {
+            let issues = self
+                .blocking
+                .iter()
+                .map(|number| format!("#{number}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            body.push_str(&format!("\n## ブロック対象\n\n{issues}\n"));
         }
         if let Some(target_date) = &self.target_date {
             body.push_str(&format!("\n## 目標日\n\n{target_date}\n"));
@@ -407,6 +436,17 @@ struct DoctorReport {
 struct Check {
     ok: bool,
     detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct VerificationReport {
+    schema_version: u32,
+    task: &'static str,
+    ok: bool,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    fix_command: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -444,6 +484,7 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Doctor { json }) => doctor(json),
+        Some(Commands::Check { quick, json }) => check(quick, json),
         Some(Commands::Commit(args)) => commit(args),
         Some(Commands::Branch(args)) => branch_command(args),
         Some(Commands::Issue(args)) => issue(args),
@@ -489,6 +530,7 @@ fn tui() -> Result<()> {
             "Issueを作る",
             "作業ファイルの重複を確認する",
             "自分のタスクを見る",
+            "一括チェックする",
             "環境を診断する",
             "AI向けコンテキストを見る",
             "終了する",
@@ -505,6 +547,7 @@ fn tui() -> Result<()> {
             presence::check(&policy.presence, false)
         }
         "自分のタスクを見る" => tasks::show(false, false, true),
+        "一括チェックする" => check(false, false),
         "環境を診断する" => doctor(false),
         "AI向けコンテキストを見る" => context(false),
         _ => Ok(()),
@@ -696,6 +739,34 @@ fn issue(mut args: IssueArgs) -> Result<()> {
         ensure_interactive()?;
         args.done = Some(Text::new("完了条件").prompt()?);
     }
+    if interactive
+        && args.parent.is_none()
+        && args.blocked_by.is_empty()
+        && args.blocking.is_empty()
+        && args.target_date.is_none()
+        && Confirm::new("依存関係や目標日も設定しますか？")
+            .with_default(false)
+            .prompt()?
+    {
+        let parent = Text::new("親Issue番号（任意）").prompt()?;
+        if !parent.trim().is_empty() {
+            args.parent = Some(
+                parent
+                    .trim()
+                    .parse()
+                    .context("親Issue番号は整数で指定してください")?,
+            );
+        }
+        args.blocked_by =
+            parse_issue_numbers(&Text::new("ブロック元Issue番号（任意、カンマ区切り）").prompt()?)?;
+        args.blocking = parse_issue_numbers(
+            &Text::new("このIssueがブロックするIssue番号（任意、カンマ区切り）").prompt()?,
+        )?;
+        let target_date = Text::new("目標日 YYYY-MM-DD（任意）").prompt()?;
+        if !target_date.trim().is_empty() {
+            args.target_date = Some(target_date.trim().to_owned());
+        }
+    }
 
     let draft = IssueDraft {
         kind,
@@ -704,7 +775,9 @@ fn issue(mut args: IssueArgs) -> Result<()> {
         background: required(args.background, "--background")?,
         goal: required(args.goal, "--goal")?,
         done: required(args.done, "--done")?,
+        parent: args.parent,
         blocked_by: args.blocked_by,
+        blocking: args.blocking,
         target_date: args.target_date,
     };
 
@@ -732,6 +805,9 @@ fn issue(mut args: IssueArgs) -> Result<()> {
     if let Some(merge) = draft.merge {
         command.args(["--label", merge.label()]);
     }
+    if let Some(parent) = draft.parent {
+        command.args(["--parent", &parent.to_string()]);
+    }
     if !draft.blocked_by.is_empty() {
         let blocked_by = draft
             .blocked_by
@@ -740,6 +816,15 @@ fn issue(mut args: IssueArgs) -> Result<()> {
             .collect::<Vec<_>>()
             .join(",");
         command.args(["--blocked-by", &blocked_by]);
+    }
+    if !draft.blocking.is_empty() {
+        let blocking = draft
+            .blocking
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        command.args(["--blocking", &blocking]);
     }
     if !matches!(draft.kind, IssueKind::Intake) {
         command.args(["--assignee", "@me"]);
@@ -796,7 +881,58 @@ fn doctor(json: bool) -> Result<()> {
     }
 }
 
+fn check(quick: bool, json: bool) -> Result<()> {
+    let task = if quick { "quick" } else { "verify" };
+    let fix_command = if quick {
+        "mise run quick"
+    } else {
+        "mise run verify"
+    };
+    if json {
+        let output = Command::new("mise")
+            .args(["run", task])
+            .env("NO_COLOR", "1")
+            .env("CARGO_TERM_COLOR", "never")
+            .output()
+            .context("miseを起動できませんでした")?;
+        let report = VerificationReport {
+            schema_version: 1,
+            task,
+            ok: output.status.success(),
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            fix_command,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !report.ok {
+            bail!("検査に失敗しました。JSONのdiagnosticsを確認してください");
+        }
+        return Ok(());
+    }
+
+    let status = Command::new("mise")
+        .args(["run", task])
+        .status()
+        .context("miseを起動できませんでした")?;
+    if status.success() {
+        println!("✓ 検査に合格しました: {fix_command}");
+        Ok(())
+    } else {
+        bail!("検査に失敗しました。修正後に次を再実行してください: {fix_command}")
+    }
+}
+
 fn hook_check() -> Check {
+    if let Ok(command) = git_output(["config", "--get", "hook.hk-commit-msg.command"])
+        && is_hk_commit_msg_command(&command)
+    {
+        return Check {
+            ok: true,
+            detail: "hk-managed config hooks are installed".into(),
+        };
+    }
+
     if let Ok(value) = git_output(["config", "--local", "--get", "core.hooksPath"])
         && !value.trim().is_empty()
     {
@@ -824,6 +960,10 @@ fn hook_check() -> Check {
             detail: "hk hook is not installed; run `mise run setup`".into(),
         },
     }
+}
+
+fn is_hk_commit_msg_command(command: &str) -> bool {
+    command.contains("hk") && command.contains("run commit-msg --from-hook")
 }
 
 fn context(json: bool) -> Result<()> {
@@ -1058,6 +1198,24 @@ fn required(value: Option<String>, flag: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{flag} is required"))
 }
 
+fn parse_issue_numbers(value: &str) -> Result<Vec<u64>> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let number = value
+                .trim_start_matches('#')
+                .parse::<u64>()
+                .with_context(|| format!("Issue番号`{value}`は整数ではありません"))?;
+            if number == 0 {
+                bail!("Issue番号は1以上で指定してください");
+            }
+            Ok(number)
+        })
+        .collect()
+}
+
 fn git_output<const N: usize>(args: [&str; N]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
@@ -1142,7 +1300,7 @@ fn lines(value: String) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{IssueDraft, IssueKind, MergeMode};
+    use super::{IssueDraft, IssueKind, MergeMode, is_hk_commit_msg_command, parse_issue_numbers};
 
     #[test]
     fn issue_body_has_stable_sections() {
@@ -1153,12 +1311,38 @@ mod tests {
             background: "background".into(),
             goal: "goal".into(),
             done: "done".into(),
+            parent: None,
             blocked_by: Vec::new(),
+            blocking: Vec::new(),
             target_date: None,
         };
         assert_eq!(
             draft.body(),
             "## 背景\n\nbackground\n\n## 目的\n\ngoal\n\n## 完了条件\n\n- [ ] done\n\n## マージ方針\n\n`merge/review`\n"
         );
+    }
+
+    #[test]
+    fn parses_comma_separated_issue_relationships() {
+        assert_eq!(
+            parse_issue_numbers("#12, 34,56").expect("valid issue numbers"),
+            vec![12, 34, 56]
+        );
+        assert!(parse_issue_numbers("0").is_err());
+        assert!(parse_issue_numbers("issue").is_err());
+    }
+
+    #[test]
+    fn recognizes_hk_legacy_and_git_2_54_config_commands() {
+        assert!(is_hk_commit_msg_command(
+            r#"test "${HK:-1}" = "0" || mise x -- hk run commit-msg --from-hook"#
+        ));
+        assert!(is_hk_commit_msg_command(
+            "exec mise x -- hk run commit-msg --from-hook \"$@\""
+        ));
+        assert!(!is_hk_commit_msg_command(
+            "mise x -- hk run pre-commit --from-hook"
+        ));
+        assert!(!is_hk_commit_msg_command("some-unrelated-command"));
     }
 }

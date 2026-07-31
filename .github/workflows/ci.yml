@@ -32,3 +32,41 @@ jobs:
 
       - name: Verify
         run: mise run verify
+
+  windows-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install locked shared tools from mise
+        uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
+        with:
+          cache: true
+          install_args: >-
+            gh hk jq yq actionlint gitleaks rumdl shellcheck shfmt taplo typos
+            zizmor osv-scanner
+
+      - name: Install pinned Rust toolchain
+        run: mise install rust
+
+      - name: Install and validate git-ar integrations
+        shell: pwsh
+        run: |
+          cargo install --path . --locked --force
+          git ar setup
+          hk validate
+          git ar doctor --json | jq -e '.repository.ok and .hooks.ok and .git_ar.ok and .mise.ok and .gh.ok'
+
+      - name: Validate human and AI entrypoints
+        shell: pwsh
+        run: |
+          git ar check --quick --json | jq -e '.schema_version == 1 and .task == "quick" and .ok == true'
+          git ar tasks --json | jq -e 'type == "array"'
+          git ar issue --kind task --title smoke --background smoke --goal smoke --done smoke --parent 12 --blocked-by 10 --blocking 12 --json |
+            jq -e '.parent == 12 and .blocked_by == [10] and .blocking == [12]'

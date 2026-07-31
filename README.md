@@ -47,6 +47,7 @@ TUIを操作する必要はありません。
 
 ```console
 git ar context --json
+git ar check --json
 git ar presence check --json
 git ar presence publish --yes
 git ar tasks --json
@@ -74,8 +75,14 @@ ClaudeとCodexは、shell commandの実行前に同じ`arttra.toml`を評価し�
 たとえば`npm install`は日本語の修正案付きで拒否され、`bun install`へ誘導されます。
 判定結果には安定したerror codeが含まれます。
 
+`git ar check`は全検査を実行し、人間には通常の診断と日本語の再実行コマンドを表示します。
+`git ar check --json`は同じ検査のexit code、stdout、stderrを一つのschemaで返します。
+編集途中は`--quick`を付けて短い検査だけを実行できます。
+
 GitHub CLI 2.94以降を固定しているため、Issueの親子・blocked-by関係はGitHub本体の構造として扱えます。
 `git ar issue --blocked-by 123 --create`は本文だけでなくnative relationshipも登録します。
+`--parent`は1件、`--blocked-by`と`--blocking`は繰り返し可能な非対話入力として利用でき、
+TUIでは「依存関係や目標日も設定する」を選んだ場合だけ表示されます。
 
 ## 共通toolchain
 
@@ -155,6 +162,8 @@ git ar branch \
 ```console
 mise run quick
 mise run verify
+git ar check
+git ar check --json
 mise run lint
 mise run security
 mise run doctor

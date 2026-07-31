@@ -57,6 +57,7 @@ Project scopeがある環境では、将来同じ出力へProjectsの日程と�
 
 Issueの親子、blocked-by、blockingはGitHub CLI 2.94以降のnative relationshipを使います。
 本文の自由記述から依存を推測せず、`git ar issue --blocked-by`またはcore `gh issue create/edit`で登録します。
+TUIでは任意の詳細設定、AIでは`--parent`、`--blocked-by`、`--blocking`を使います。
 
 ## 段階導入
 

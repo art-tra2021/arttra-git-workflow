@@ -89,6 +89,14 @@ git ar doctor
 description = "Run git-ar from source"
 run = "cargo run --quiet --"
 
+[tasks."ar:check"]
+description = "Run every gate through the human-friendly git-ar entrypoint"
+run = "git ar check"
+
+[tasks."ar:check-json"]
+description = "Run every gate and return captured diagnostics as JSON"
+run = "git ar check --json"
+
 [tasks.doctor]
 description = "Check the local ART-TRA development environment"
 run = "git ar doctor"

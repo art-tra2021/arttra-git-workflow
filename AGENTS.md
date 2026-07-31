@@ -27,6 +27,7 @@
 - `mise run ar -- <args>`: インストール前のCLI実行
 - `git ar`: 人間向けTUI
 - `git ar branch`: Issue、種別、内容、担当者から規則準拠branchを作成
+- `git ar check --json`: AI向けに検査結果とdiagnosticsを一括取得
 - `git ar context --json`: AI向けの安全なリポジトリ状態
 - `git ar presence check --json`: 他の作業branchと変更ファイルの重複を確認
 - `git ar presence publish --yes`: diff本文を含まない変更ファイル情報を共有
