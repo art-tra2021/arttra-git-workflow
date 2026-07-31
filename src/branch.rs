@@ -61,16 +61,39 @@ pub fn draft(
 }
 
 pub fn create(draft: &BranchDraft, from: Option<&str>) -> Result<()> {
-    let mut command = Command::new("git");
-    command.args(["switch", "-c", &draft.name]);
+    let mut command = Command::new("gh");
+    command.args([
+        "issue",
+        "develop",
+        &draft.issue.to_string(),
+        "--name",
+        &draft.name,
+        "--checkout",
+    ]);
     if let Some(from) = from.filter(|value| !value.trim().is_empty()) {
-        command.arg(from);
+        command.args(["--base", from]);
     }
     let output = command
         .output()
-        .context("git switchを起動できませんでした")?;
-    ensure_success(&output, "branch作成")?;
-    println!("✓ branchを作成しました: {}", draft.name);
+        .context("gh issue developを起動できませんでした")?;
+    ensure_success(&output, "Issueに紐づくbranch作成")?;
+    println!(
+        "✓ Issue #{}に紐づくbranchを作成しました: {}",
+        draft.issue, draft.name
+    );
+    Ok(())
+}
+
+pub fn validate_push_input(input: &str, policy: &BranchPolicy) -> Result<()> {
+    for line in input.lines().filter(|line| !line.trim().is_empty()) {
+        let Some(local_ref) = line.split_whitespace().next() else {
+            continue;
+        };
+        let Some(branch) = local_ref.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        validate_or_report(branch, policy, false)?;
+    }
     Ok(())
 }
 
@@ -233,7 +256,7 @@ fn ensure_success(output: &Output, action: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{draft, validate};
+    use super::{draft, validate, validate_push_input};
     use crate::policy::{BranchPolicy, ValidationMode};
 
     fn policy(mode: ValidationMode) -> BranchPolicy {
@@ -256,6 +279,21 @@ mod tests {
         )
         .expect("draft");
         assert_eq!(branch.name, "feature/42-login-screen-roz");
+    }
+
+    #[test]
+    fn validates_every_branch_and_ignores_tags_from_pre_push() {
+        let input = concat!(
+            "refs/heads/feature/42-login-screen-roz abc refs/heads/feature/42-login-screen-roz def\n",
+            "refs/tags/v1.0.0 abc refs/tags/v1.0.0 def\n",
+        );
+        validate_push_input(input, &policy(ValidationMode::Block)).expect("valid push input");
+    }
+
+    #[test]
+    fn rejects_invalid_branch_from_pre_push() {
+        let input = "refs/heads/bad-name abc refs/heads/bad-name def\n";
+        assert!(validate_push_input(input, &policy(ValidationMode::Block)).is_err());
     }
 
     #[test]

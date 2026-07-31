@@ -1,0 +1,106 @@
+[[tools.actionlint]]
+version = "1.7.12"
+backend = "aqua:rhysd/actionlint"
+"platforms.linux-x64" = { checksum = "sha256:8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8", url = "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz"}
+"platforms.macos-arm64" = { checksum = "sha256:aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f", url = "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_darwin_arm64.tar.gz"}
+"platforms.windows-arm64" = { checksum = "sha256:cadcf7ea4efe3a68728893813643cebe1185e5b1d4be5b96245f65c9a4d5ea41", url = "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_windows_arm64.zip"}
+"platforms.windows-x64" = { checksum = "sha256:6e7241b51e6817ea6a047693d8e6fed13b31819c9a0dd6c5a726e1592d22f6e9", url = "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_windows_amd64.zip"}
+
+[[tools.gh]]
+version = "2.97.0"
+backend = "aqua:cli/cli"
+"platforms.linux-x64" = { checksum = "sha256:a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112", url = "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_amd64.tar.gz"}
+"platforms.macos-arm64" = { checksum = "sha256:a58b8fd77b417a38f47a0b54d1370c59b0fcdb324ccc9ca002b0998f7c4c999e", url = "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_macOS_arm64.zip"}
+"platforms.windows-arm64" = { checksum = "sha256:3e2d4a166da4ee5020c592737b65eec0e724946d5d5b962f5fe59d99116dc4bf", url = "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_windows_arm64.zip"}
+"platforms.windows-x64" = { checksum = "sha256:35d7fe05c4dd1411ffda1e73dfc7c6f44b75c936ca51fa6595c657fdc0350cec", url = "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_windows_amd64.zip"}
+
+[[tools.gitleaks]]
+version = "8.30.1"
+backend = "aqua:gitleaks/gitleaks"
+"platforms.linux-x64" = { checksum = "sha256:551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb", url = "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz"}
+"platforms.macos-arm64" = { checksum = "sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5", url = "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz"}
+"platforms.windows-arm64" = { checksum = "sha256:d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e", url = "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_windows_x64.zip"}
+"platforms.windows-x64" = { checksum = "sha256:d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e", url = "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_windows_x64.zip"}
+
+[[tools.hk]]
+version = "1.54.0"
+backend = "aqua:jdx/hk"
+"platforms.linux-x64" = { checksum = "sha256:467f691713b1afbeada4df662bd44696405cd987a5c7f64fee0fe71399628d0c", url = "https://github.com/jdx/hk/releases/download/v1.54.0/hk-x86_64-unknown-linux-gnu.tar.gz"}
+"platforms.macos-arm64" = { checksum = "sha256:54e47c56f64916e63004b68ae848637e3e90d06f89e3ae8de985ebc35fd9f7e7", url = "https://github.com/jdx/hk/releases/download/v1.54.0/hk-aarch64-apple-darwin.tar.gz"}
+"platforms.windows-arm64" = { checksum = "sha256:aeaf26c5a5b96d4b7d46369ba217c47116e36ce0eb733cdde6e851108781dc5b", url = "https://github.com/jdx/hk/releases/download/v1.54.0/hk-aarch64-pc-windows-msvc.zip"}
+"platforms.windows-x64" = { checksum = "sha256:ab0f65942c89c72b322c700bf427926f54db84fd2827121eab03287144d2ec64", url = "https://github.com/jdx/hk/releases/download/v1.54.0/hk-x86_64-pc-windows-msvc.zip"}
+
+[[tools.jq]]
+version = "1.8.2"
+backend = "aqua:jqlang/jq"
+"platforms.linux-x64" = { checksum = "sha256:b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f", url = "https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64"}
+"platforms.macos-arm64" = { checksum = "sha256:2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e", url = "https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-macos-arm64"}
+"platforms.windows-arm64" = { checksum = "sha256:a6fc67fedaf9128a3309a1e2ebb8b986aeccf70122ee46d2cb4849e423f0c627", url = "https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-windows-amd64.exe"}
+"platforms.windows-x64" = { checksum = "sha256:a6fc67fedaf9128a3309a1e2ebb8b986aeccf70122ee46d2cb4849e423f0c627", url = "https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-windows-amd64.exe"}
+
+[[tools.osv-scanner]]
+version = "2.4.0"
+backend = "aqua:google/osv-scanner"
+"platforms.linux-x64" = { checksum = "sha256:15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0", url = "https://github.com/google/osv-scanner/releases/download/v2.4.0/osv-scanner_linux_amd64"}
+"platforms.macos-arm64" = { checksum = "sha256:9ca3185ad63e9ab54f7cb90f46a7362be02d80e37f0123d095a54355ea202f5d", url = "https://github.com/google/osv-scanner/releases/download/v2.4.0/osv-scanner_darwin_arm64"}
+"platforms.windows-arm64" = { checksum = "sha256:1ce89d7d8ef083634648ef0f193fe1254f36f46f4bdc93d61178adacc2e60da0", url = "https://github.com/google/osv-scanner/releases/download/v2.4.0/osv-scanner_windows_arm64.exe"}
+"platforms.windows-x64" = { checksum = "sha256:0cdd113610126d5dfd5e12ad0e0b4f3e879291ff19bb43b0c52ed2f2c2df1a37", url = "https://github.com/google/osv-scanner/releases/download/v2.4.0/osv-scanner_windows_amd64.exe"}
+
+[[tools.rumdl]]
+version = "0.2.47"
+backend = "github:rvben/rumdl"
+"platforms.linux-x64" = { checksum = "sha256:55d8eebb1d0f77157de374def175b1ae7db395c36d62fa08f0503311c58cbe5d", url = "https://github.com/rvben/rumdl/releases/download/v0.2.47/rumdl-v0.2.47-x86_64-unknown-linux-gnu.tar.gz", url_api = "https://api.github.com/repos/rvben/rumdl/releases/assets/496024306"}
+"platforms.macos-arm64" = { checksum = "sha256:10dc23e994327ecc6e98d285802fcad1174608f203062cb18bac55b51976e0cb", url = "https://github.com/rvben/rumdl/releases/download/v0.2.47/rumdl-v0.2.47-aarch64-apple-darwin.tar.gz", url_api = "https://api.github.com/repos/rvben/rumdl/releases/assets/496024317"}
+"platforms.windows-x64" = { checksum = "sha256:a8811da5a7d1ab12b7d4c9adaeb2daae6a6a8c9a96d8ad44cbb67bc3394eafa1", url = "https://github.com/rvben/rumdl/releases/download/v0.2.47/rumdl-v0.2.47-x86_64-pc-windows-msvc.zip", url_api = "https://api.github.com/repos/rvben/rumdl/releases/assets/496024315"}
+
+[[tools.rust]]
+version = "1.93.0"
+backend = "core:rust"
+
+[[tools.shellcheck]]
+version = "0.11.0"
+backend = "aqua:koalaman/shellcheck"
+"platforms.linux-x64" = { checksum = "sha256:8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198", url = "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz"}
+"platforms.macos-arm64" = { checksum = "sha256:56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79", url = "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.darwin.aarch64.tar.xz"}
+"platforms.windows-arm64" = { checksum = "sha256:8a4e35ab0b331c85d73567b12f2a444df187f483e5079ceffa6bda1faa2e740e", url = "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.zip"}
+"platforms.windows-x64" = { checksum = "sha256:8a4e35ab0b331c85d73567b12f2a444df187f483e5079ceffa6bda1faa2e740e", url = "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.zip"}
+
+[[tools.shfmt]]
+version = "3.13.1"
+backend = "aqua:mvdan/sh"
+"platforms.linux-x64" = { checksum = "sha256:fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1", url = "https://github.com/mvdan/sh/releases/download/v3.13.1/shfmt_v3.13.1_linux_amd64"}
+"platforms.macos-arm64" = { checksum = "sha256:9680526be4a66ea1ffe988ed08af58e1400fe1e4f4aef5bd88b20bb9b3da33f8", url = "https://github.com/mvdan/sh/releases/download/v3.13.1/shfmt_v3.13.1_darwin_arm64"}
+"platforms.windows-arm64" = { checksum = "sha256:60cd368533d0ad73fa86d93d5bbf95ef40587245ce684ed138c1b31557b5fe97", url = "https://github.com/mvdan/sh/releases/download/v3.13.1/shfmt_v3.13.1_windows_amd64.exe"}
+"platforms.windows-x64" = { checksum = "sha256:60cd368533d0ad73fa86d93d5bbf95ef40587245ce684ed138c1b31557b5fe97", url = "https://github.com/mvdan/sh/releases/download/v3.13.1/shfmt_v3.13.1_windows_amd64.exe"}
+
+[[tools.taplo]]
+version = "0.10.0"
+backend = "aqua:tamasfe/taplo"
+"platforms.linux-x64" = { url = "https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-linux-x86_64.gz"}
+"platforms.macos-arm64" = { url = "https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-darwin-aarch64.gz"}
+"platforms.windows-arm64" = { url = "https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-windows-aarch64.zip"}
+"platforms.windows-x64" = { url = "https://github.com/tamasfe/taplo/releases/download/0.10.0/taplo-windows-x86_64.zip"}
+
+[[tools.typos]]
+version = "1.48.0"
+backend = "aqua:crate-ci/typos"
+"platforms.linux-x64" = { checksum = "sha256:72a930c9a94fc3914aa56835c5b859c892a797d40c1c42638b98d93f16ff519c", url = "https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-unknown-linux-musl.tar.gz"}
+"platforms.macos-arm64" = { checksum = "sha256:7dcaf386ec255995dcbaf629641f961574b7e8785203921115eab75cbf1ca107", url = "https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-aarch64-apple-darwin.tar.gz"}
+"platforms.windows-arm64" = { checksum = "sha256:ce018a2352da7c1b23bd2684019ee279d2080dc063087020e80c1247d11b0743", url = "https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-pc-windows-msvc.zip"}
+"platforms.windows-x64" = { checksum = "sha256:ce018a2352da7c1b23bd2684019ee279d2080dc063087020e80c1247d11b0743", url = "https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-pc-windows-msvc.zip"}
+
+[[tools.yq]]
+version = "4.53.3"
+backend = "aqua:mikefarah/yq"
+"platforms.linux-x64" = { checksum = "sha256:fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4", url = "https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64"}
+"platforms.macos-arm64" = { checksum = "sha256:877de31753a4dd2401aa048937aa9a7fc4d5f6ce858cf31508c5802954297213", url = "https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_darwin_arm64"}
+"platforms.windows-arm64" = { checksum = "sha256:c80ac96ff2a8d77d452d91304e11feef8fb23239900b3d1d88f47c2ec93be970", url = "https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_windows_arm64.exe"}
+"platforms.windows-x64" = { checksum = "sha256:e279bc506a452eeafcdf364f91a025455e402a8001169083caf01f4b64a544e2", url = "https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_windows_amd64.exe"}
+
+[[tools.zizmor]]
+version = "1.28.0"
+backend = "aqua:zizmorcore/zizmor"
+"platforms.linux-x64" = { checksum = "sha256:e87b67160194884e375a46a12c57ccc904f762b53845f254fab7f17d98809c09", url = "https://github.com/zizmorcore/zizmor/releases/download/v1.28.0/zizmor-x86_64-unknown-linux-gnu.tar.gz"}
+"platforms.macos-arm64" = { checksum = "sha256:54949bbd6b4c8527046bb8990bac9e0dab3eec787640f4e6199ae121dd1040be", url = "https://github.com/zizmorcore/zizmor/releases/download/v1.28.0/zizmor-aarch64-apple-darwin.tar.gz"}
+"platforms.windows-arm64" = { checksum = "sha256:06e5b2345323201ed4c55897651862fee3b43f79ddced799f1236f0f0d1c1c0f", url = "https://github.com/zizmorcore/zizmor/releases/download/v1.28.0/zizmor-x86_64-pc-windows-msvc.zip"}
+"platforms.windows-x64" = { checksum = "sha256:06e5b2345323201ed4c55897651862fee3b43f79ddced799f1236f0f0d1c1c0f", url = "https://github.com/zizmorcore/zizmor/releases/download/v1.28.0/zizmor-x86_64-pc-windows-msvc.zip"}

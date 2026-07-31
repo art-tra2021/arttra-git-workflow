@@ -1,10 +1,28 @@
 min_version = "2026.2.2"
 
+[settings]
+experimental = true
+lockfile = true
+
 [tools]
 rust = { version = "1.93.0", components = "clippy,rustfmt" }
+gh = "2.97.0"
+hk = "1.54.0"
+jq = "1.8.2"
+yq = "4.53.3"
+actionlint = "1.7.12"
+gitleaks = "8.30.1"
+rumdl = "0.2.47"
+shellcheck = "0.11.0"
+shfmt = "3.13.1"
+taplo = "0.10.0"
+typos = "1.48.0"
+zizmor = "1.28.0"
+"osv-scanner" = "2.4.0"
 
 [env]
 CARGO_TERM_COLOR = "always"
+HK_MISE = "1"
 
 [tasks.build]
 description = "Build git-ar"
@@ -26,9 +44,33 @@ run = "cargo test --locked"
 description = "Run clippy with warnings denied"
 run = "cargo clippy --locked --all-targets -- -D warnings"
 
+[tasks.lint]
+description = "Run the shared cross-language linters"
+run = "hk check --all --check"
+
+[tasks."security:actions"]
+description = "Audit GitHub Actions for unsafe patterns"
+run = "zizmor .github/workflows"
+
+[tasks."security:secrets"]
+description = "Scan the working tree for secrets without printing them"
+run = "gitleaks dir . --redact --no-banner"
+
+[tasks.security]
+description = "Run deterministic security checks"
+depends = ["security:actions", "security:secrets"]
+
+[tasks."security:dependencies"]
+description = "Scan supported lockfiles for known vulnerabilities"
+run = "osv-scanner scan source -r ."
+
+[tasks.typos]
+description = "Run the advisory spelling check"
+run = "typos"
+
 [tasks.verify]
 description = "Run every local and CI quality gate"
-depends = ["fmt:check", "check", "test", "clippy"]
+depends = ["fmt:check", "check", "test", "clippy", "lint", "security:actions"]
 
 [tasks.quick]
 description = "Run fast checks while editing"
@@ -39,7 +81,6 @@ description = "Install git-ar and activate repository-managed hooks"
 depends = ["verify"]
 run = """
 cargo install --path . --locked --force
-git config core.hooksPath .githooks
 git ar setup
 git ar doctor
 """
@@ -62,7 +103,22 @@ run = "git ar policy"
 
 [tasks.tasks]
 description = "Show Issues assigned to the current GitHub user"
-run = "git ar tasks"
+run = "git ar tasks --dashboard"
+
+[tasks.dashboard]
+description = "Open the optional human GitHub dashboard"
+run = "gh dash"
+
+[tasks."extensions:install"]
+description = "Install reviewed, optional GitHub extensions at fixed versions"
+run = """
+gh ext install dlvhdr/gh-dash --pin v4.25.2 --force
+gh ext install seachicken/gh-poi --pin v0.18.3 --force
+"""
+
+[tasks."branches:clean"]
+description = "Remove local branches whose squash-merged PRs are closed"
+run = "gh poi"
 
 [tasks.telemetry]
 description = "Summarize local privacy-safe policy events"

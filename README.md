@@ -5,6 +5,7 @@
 ## セットアップ
 
 必要なのはGitと[mise](https://mise.jdx.dev/)だけです。
+`mise.lock`に固定した`gh`、`hk`、lint/security toolは`mise install`で揃います。
 
 ```console
 git clone git@github.com:rozwer/arttra-git-lab.git
@@ -14,7 +15,10 @@ mise install
 mise run setup
 ```
 
-`mise run setup`はRust CLIをインストールし、Git hookとClaude/Codexのローカルhookを有効にします。
+`mise install`は全toolを正確なversionで導入し、外部CLIには`mise.lock`のURL/checksumを利用します。
+core runtimeのRustはversion固定ですが、miseのlock対象外なのでartifact lockは行いません。
+`mise run setup`はRust CLIをインストールし、mise経由の`hk`とClaude/Codexのローカルhookを有効にします。
+既存の`core.hooksPath=.githooks`だけは自動移行し、それ以外の独自hook設定は上書きせず日本語で停止します。
 Claude向けの`CLAUDE.md`も共有templateから生成します。
 `CLAUDE.md`、Claude/Codexの端末別設定、telemetryはGit管理外なので、個人調整が共有差分へ混ざりません。
 Codexではセットアップ後に`/hooks`を一度開き、リポジトリhookを信頼します。
@@ -27,10 +31,15 @@ git ar
 
 メニューからcommit、Issue作成、診断、AI向けコンテキスト確認を選べます。
 branch作成では種類、Issue番号、内容、担当者を選ぶだけで、英数字の規則準拠名を生成します。
+作成時は`gh issue develop`を使うため、branchとIssueの関係もGitHubへ記録されます。
 
 ```console
 git ar branch
+mise run tasks
 ```
+
+`mise run tasks`は任意導入の`gh-dash`を開き、未導入・起動失敗時は組み込みの簡易表示へ戻ります。
+AIは常に`git ar tasks --json`を使い、TUIやextensionの有無に依存しません。
 
 ## AI・自動化向け
 
@@ -64,6 +73,33 @@ IssueをGitHubへ登録する場合は`--create`を指定します。
 ClaudeとCodexは、shell commandの実行前に同じ`arttra.toml`を評価します。
 たとえば`npm install`は日本語の修正案付きで拒否され、`bun install`へ誘導されます。
 判定結果には安定したerror codeが含まれます。
+
+GitHub CLI 2.94以降を固定しているため、Issueの親子・blocked-by関係はGitHub本体の構造として扱えます。
+`git ar issue --blocked-by 123 --create`は本文だけでなくnative relationshipも登録します。
+
+## 共通toolchain
+
+`mise`がversionと実行入口、`hk`が変更ファイルに応じたhook実行、各専用toolが実際の判定を担当します。
+hookは自動stash・自動stage・自動fixを行いません。
+
+| 対象 | tool |
+| --- | --- |
+| GitHub | `gh` |
+| hook | `hk` |
+| JSON / YAML | `jq` / `yq` |
+| Actions / shell / TOML / Markdown | `actionlint` / `shellcheck` / `shfmt` / `taplo` / `rumdl` |
+| secret / Actions security | `gitleaks` / `zizmor` |
+| 依存脆弱性（明示実行） | `osv-scanner` |
+
+```console
+mise run lint
+mise run security
+mise run security:dependencies
+```
+
+人間向けのGitHub拡張は必須基盤から分離しています。
+利用する場合だけ、レビュー済みversionを固定した`mise run extensions:install`を実行します。
+導入対象はタスクTUIの`gh-dash`と、squash merge後のlocal branchを掃除する`gh-poi`です。
 
 ## 変更ファイルの共有
 
@@ -110,7 +146,7 @@ git ar branch \
   --create
 ```
 
-`pre-push` hookが命名を検証します。
+`hk`の`pre-push` hookが送信対象の全branch名を検証します。
 違反時は`AR-BRANCH-001`と日本語の理由を表示し、Issue番号を判別できる場合は実行可能な`git branch -m ...`を提示します。
 既存リポジトリへの導入時だけ`branch.mode = "warn"`で観測期間を設け、新規リポジトリでは`block`を使います。
 
@@ -119,6 +155,8 @@ git ar branch \
 ```console
 mise run quick
 mise run verify
+mise run lint
+mise run security
 mise run doctor
 mise run context
 mise run policy
@@ -132,7 +170,7 @@ mise run presence:status
 mise run presence:uninstall
 ```
 
-miseはruntimeと短い入口を管理します。
+miseはruntime、CLI、短い入口を管理し、hkはmise環境内で実行します。
 Issue、Task、PR、担当、期限等の正本はGitHub Projectsとし、`git ar tasks`は担当IssueをTUIまたはJSONで表示します。
 Projectsを読むにはGitHub CLIへ`read:project` scopeが必要です。
 

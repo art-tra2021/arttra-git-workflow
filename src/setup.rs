@@ -1,5 +1,6 @@
 use std::fs::{create_dir_all, read_to_string, write};
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -8,6 +9,92 @@ const CLAUDE_SETTINGS: &str = ".claude/settings.local.json";
 const CODEX_HOOKS: &str = ".codex/hooks.json";
 const CLAUDE_INSTRUCTIONS: &str = "CLAUDE.md";
 const CLAUDE_INSTRUCTIONS_TEMPLATE: &str = include_str!("../templates/ai/claude-instructions.md");
+
+pub fn install(repository_root: &Path) -> Result<()> {
+    install_git_hooks(repository_root)?;
+    install_ai_hooks(repository_root)
+}
+
+fn install_git_hooks(repository_root: &Path) -> Result<()> {
+    let hk = Command::new("hk")
+        .current_dir(repository_root)
+        .arg("validate")
+        .output()
+        .context("hkを起動できませんでした。先に`mise install`を実行してください")?;
+    if !hk.status.success() {
+        bail!(
+            "hk設定を検証できないため、既存hookを変更せず停止しました: {}",
+            String::from_utf8_lossy(&hk.stderr).trim()
+        );
+    }
+
+    for scope in ["--global", "--system"] {
+        let inherited = Command::new("git")
+            .current_dir(repository_root)
+            .args(["config", scope, "--get", "core.hooksPath"])
+            .output()
+            .with_context(|| format!("{scope}のcore.hooksPathを確認できませんでした"))?;
+        if inherited.status.success() && !inherited.stdout.is_empty() {
+            let value = String::from_utf8_lossy(&inherited.stdout);
+            bail!(
+                "{scope}に独自のcore.hooksPath=`{}`があります。上書きせず停止しました。",
+                value.trim()
+            );
+        }
+        if !inherited.status.success() && inherited.status.code() != Some(1) {
+            bail!(
+                "{scope}のcore.hooksPath確認に失敗しました: {}",
+                String::from_utf8_lossy(&inherited.stderr).trim()
+            );
+        }
+    }
+
+    let configured = Command::new("git")
+        .current_dir(repository_root)
+        .args(["config", "--local", "--get", "core.hooksPath"])
+        .output()
+        .context("core.hooksPathを確認できませんでした")?;
+    if configured.status.success() {
+        let value = String::from_utf8_lossy(&configured.stdout)
+            .trim()
+            .to_owned();
+        if value == ".githooks" {
+            let status = Command::new("git")
+                .current_dir(repository_root)
+                .args(["config", "--local", "--unset", "core.hooksPath"])
+                .status()
+                .context("旧hook設定を解除できませんでした")?;
+            if !status.success() {
+                bail!("旧core.hooksPath=.githooksを解除できませんでした");
+            }
+            println!("✓ 旧.githooks設定をhkへ移行します");
+        } else if !value.is_empty() {
+            bail!(
+                "独自のcore.hooksPath=`{value}`が設定されています。上書きせず停止しました。\n\
+                 内容を確認してから手動で解除し、`mise run setup`を再実行してください。"
+            );
+        }
+    } else if configured.status.code() != Some(1) {
+        bail!(
+            "core.hooksPathの確認に失敗しました: {}",
+            String::from_utf8_lossy(&configured.stderr).trim()
+        );
+    }
+
+    let output = Command::new("hk")
+        .current_dir(repository_root)
+        .args(["install", "--mise"])
+        .output()
+        .context("hk installを起動できませんでした。先に`mise install`を実行してください")?;
+    if !output.status.success() {
+        bail!(
+            "hk hookを導入できませんでした: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    println!("✓ Git hooks: hk（mise管理）");
+    Ok(())
+}
 
 pub fn install_ai_hooks(repository_root: &Path) -> Result<()> {
     install_if_missing(

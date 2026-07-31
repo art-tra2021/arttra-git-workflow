@@ -20,7 +20,10 @@ TUIは便利な入力手段であり、正本ではありません。
 - `git ar issue`はTUIと引数から同じIssue本文を生成する。
 - `git ar branch`はTUIと引数から同じbranch名を生成し、`pre-push`も同じvalidatorを呼ぶ。
 - `git ar presence`はdiff本文を送らず、branchと変更ファイルのメタデータだけを専用refへ共有する。
-- `commit-msg` hookはCLIと同じvalidatorを呼び、規則を二重実装しない。
+- `hk`は変更ファイルを専用linterへ振り分け、`commit-msg`と`pre-push`ではCLIと同じvalidatorを呼ぶ。
+- hookは自動stash、自動stage、自動fixをせず、利用者の作業treeを暗黙に変更しない。
+- GitHub操作は`gh`を正本とし、`git ar`は日本語の誘導と安定したJSONを加える薄いadapterにする。
+- 人間向け`gh-dash`は任意extension、AI向け`git ar tasks --json`は必須の安定interfaceとする。
 - Claude/Codexの`PreToolUse` hookは`git ar guard hook`を呼び、同じtoolchain validatorを使う。
 - AIは候補を提案できるが、合否は`arttra.toml`とvalidatorが決める。
 
@@ -32,6 +35,15 @@ TUIは便利な入力手段であり、正本ではありません。
 - Codex/Claude固有のhookは薄いadapterに限定し、規則本体を持たない。
 - telemetryは規則ID、agent、allow/warn/denyだけを記録し、command本文、diff、secretは記録しない。
 - shell scriptに依存せずRust CLIを呼ぶことで、macOS、Windows、WSLで同じ判定を使う。
+
+## Toolchain
+
+- `mise.toml`と`mise.lock`が、macOS・Windows・WSLで使うCLIのversion、取得URL、提供されるchecksumを固定する。
+- mise core runtimeはversionを固定し、CIでは外部CLIだけを`--locked`で導入する。
+- `hk`、`gh`、`jq`、`yq`と共通linterはmiseからだけ解決する。
+- Python profileは`uv + ruff`、TypeScript profileは`bun + Biome + tsc`、Rust profileはCargoを使う。
+- GitHub extensionはGitHubによる検証済みとは限らないため、自動setupから外し、repositoryとversionをallowlistする。
+- AIには各toolのJSON/SARIFと決定的なexit codeを渡し、人間には`git ar`が日本語の修正案を表示する。
 
 ## Presence
 

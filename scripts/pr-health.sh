@@ -3,40 +3,48 @@ set -euo pipefail
 
 : "${GH_REPO:?GH_REPO is required}"
 prs="$(gh pr list --repo "$GH_REPO" --state open --limit 100 \
-  --json number,title,url,mergeStateStatus,updatedAt,additions,deletions,files)"
+	--json number,title,url,mergeStateStatus,updatedAt,additions,deletions,files)"
+now_epoch="${NOW_EPOCH:-$(date +%s)}"
 
 echo "## PR health" >>"$GITHUB_STEP_SUMMARY"
 count="$(jq 'length' <<<"$prs")"
 echo "Open PR: ${count}" >>"$GITHUB_STEP_SUMMARY"
 
 while IFS= read -r row; do
-  number="$(jq -r '.number' <<<"$row")"
-  state="$(jq -r '.mergeStateStatus' <<<"$row")"
-  changed="$(jq '.additions + .deletions' <<<"$row")"
-  updated="$(jq -r '.updatedAt' <<<"$row")"
-  age_days="$(( ($(date +%s) - $(date -d "$updated" +%s)) / 86400 ))"
+	number="$(jq -r '.number' <<<"$row")"
+	state="$(jq -r '.mergeStateStatus' <<<"$row")"
+	changed="$(jq '.additions + .deletions' <<<"$row")"
+	updated="$(jq -r '.updatedAt' <<<"$row")"
+	age_days="$(
+		jq -nr --arg updated "$updated" --argjson now "$now_epoch" \
+			'((($now - ($updated | fromdateiso8601)) / 86400) | floor)'
+	)"
 
-  if (( changed <= 50 )); then size="size/S"
-  elif (( changed <= 250 )); then size="size/M"
-  elif (( changed <= 800 )); then size="size/L"
-  else size="size/XL"
-  fi
-  for candidate in size/S size/M size/L size/XL; do
-    [[ "$candidate" == "$size" ]] ||
-      gh pr edit "$number" --repo "$GH_REPO" --remove-label "$candidate" >/dev/null 2>&1 || true
-  done
-  gh pr edit "$number" --repo "$GH_REPO" --add-label "$size" >/dev/null
+	if ((changed <= 50)); then
+		size="size/S"
+	elif ((changed <= 250)); then
+		size="size/M"
+	elif ((changed <= 800)); then
+		size="size/L"
+	else
+		size="size/XL"
+	fi
+	for candidate in size/S size/M size/L size/XL; do
+		[[ "$candidate" == "$size" ]] ||
+			gh pr edit "$number" --repo "$GH_REPO" --remove-label "$candidate" >/dev/null 2>&1 || true
+	done
+	gh pr edit "$number" --repo "$GH_REPO" --add-label "$size" >/dev/null
 
-  if [[ "$state" == "DIRTY" ]]; then
-    gh pr edit "$number" --repo "$GH_REPO" --add-label "status/conflict" >/dev/null
-  else
-    gh pr edit "$number" --repo "$GH_REPO" --remove-label "status/conflict" >/dev/null 2>&1 || true
-  fi
-  if [[ "$state" == "BEHIND" || "$age_days" -ge 3 ]]; then
-    gh pr edit "$number" --repo "$GH_REPO" --add-label "status/needs-update" >/dev/null
-  else
-    gh pr edit "$number" --repo "$GH_REPO" --remove-label "status/needs-update" >/dev/null 2>&1 || true
-  fi
+	if [[ "$state" == "DIRTY" ]]; then
+		gh pr edit "$number" --repo "$GH_REPO" --add-label "status/conflict" >/dev/null
+	else
+		gh pr edit "$number" --repo "$GH_REPO" --remove-label "status/conflict" >/dev/null 2>&1 || true
+	fi
+	if [[ "$state" == "BEHIND" || "$age_days" -ge 3 ]]; then
+		gh pr edit "$number" --repo "$GH_REPO" --add-label "status/needs-update" >/dev/null
+	else
+		gh pr edit "$number" --repo "$GH_REPO" --remove-label "status/needs-update" >/dev/null 2>&1 || true
+	fi
 done < <(jq -c '.[]' <<<"$prs")
 
 jq -r '

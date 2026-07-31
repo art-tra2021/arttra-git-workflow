@@ -1,7 +1,7 @@
 name: PR Policy
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, edited, synchronize, reopened, labeled, unlabeled]
   pull_request_review:
     types: [submitted, dismissed]
@@ -18,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.event.repository.default_branch }}
       - name: Validate linked Issue and merge mode
         env:

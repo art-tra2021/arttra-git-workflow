@@ -69,6 +69,9 @@ enum Commands {
         /// Select an Issue and open it in the browser.
         #[arg(long)]
         open: bool,
+        /// Open gh-dash when installed, with the compact view as a fallback.
+        #[arg(long)]
+        dashboard: bool,
     },
     /// Summarize privacy-safe local policy telemetry.
     Telemetry {
@@ -89,6 +92,9 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Validate refs received on stdin. Intended for pre-push hooks.
+    #[command(hide = true)]
+    ValidatePush,
 }
 
 #[derive(Debug, Args)]
@@ -240,7 +246,7 @@ struct BranchArgs {
     /// Work owner, normally a GitHub login.
     #[arg(long)]
     owner: Option<String>,
-    /// Starting revision or branch.
+    /// Base branch. Defaults to the repository default branch.
     #[arg(long)]
     from: Option<String>,
     /// Create and switch to the branch. Otherwise only preview it.
@@ -445,17 +451,29 @@ fn run() -> Result<()> {
         Some(Commands::Policy { json }) => show_policy(json),
         Some(Commands::Guard(args)) => guard(args),
         Some(Commands::Presence(args)) => presence(args),
-        Some(Commands::Tasks { json, open }) => tasks::show(json, open),
+        Some(Commands::Tasks {
+            json,
+            open,
+            dashboard,
+        }) => tasks::show(json, open, dashboard),
         Some(Commands::Telemetry { json }) => {
             let root = guard::repository_root()?;
             telemetry::report(&Policy::load()?, &root, json)
         }
-        Some(Commands::Setup) => setup::install_ai_hooks(&guard::repository_root()?),
+        Some(Commands::Setup) => setup::install(&guard::repository_root()?),
         Some(Commands::ValidateCommitFile { path }) => validate_commit_file(&path),
         Some(Commands::ValidateBranch { branch, json }) => {
             let policy = Policy::load()?;
             let branch = branch.map_or_else(branch::current_branch, Ok)?;
             branch::validate_or_report(&branch, &policy.branch, json)
+        }
+        Some(Commands::ValidatePush) => {
+            let policy = Policy::load()?;
+            let mut input = String::new();
+            io::stdin()
+                .read_to_string(&mut input)
+                .context("pre-pushの入力を読み込めませんでした")?;
+            branch::validate_push_input(&input, &policy.branch)
         }
         None => tui(),
     }
@@ -486,7 +504,7 @@ fn tui() -> Result<()> {
             let policy = Policy::load()?;
             presence::check(&policy.presence, false)
         }
-        "自分のタスクを見る" => tasks::show(false, true),
+        "自分のタスクを見る" => tasks::show(false, false, true),
         "環境を診断する" => doctor(false),
         "AI向けコンテキストを見る" => context(false),
         _ => Ok(()),
@@ -598,7 +616,7 @@ fn branch_command(mut args: BranchArgs) -> Result<()> {
         args.owner = Some(Text::new("担当者").with_default(&default_owner).prompt()?);
     }
     if interactive && args.from.is_none() {
-        let from = Text::new("作成元branch（任意。空欄は現在位置）").prompt()?;
+        let from = Text::new("作成元branch（任意。空欄はGitHubのdefault branch）").prompt()?;
         if !from.trim().is_empty() {
             args.from = Some(from);
         }
@@ -714,6 +732,15 @@ fn issue(mut args: IssueArgs) -> Result<()> {
     if let Some(merge) = draft.merge {
         command.args(["--label", merge.label()]);
     }
+    if !draft.blocked_by.is_empty() {
+        let blocked_by = draft
+            .blocked_by
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        command.args(["--blocked-by", &blocked_by]);
+    }
     if !matches!(draft.kind, IssueKind::Intake) {
         command.args(["--assignee", "@me"]);
     }
@@ -727,23 +754,9 @@ fn issue(mut args: IssueArgs) -> Result<()> {
 
 fn doctor(json: bool) -> Result<()> {
     let root = git_output(["rev-parse", "--show-toplevel"]);
-    let hooks = git_output(["config", "--get", "core.hooksPath"]);
     let report = DoctorReport {
         repository: check_result(root, |value| format!("repository: {value}")),
-        hooks: match hooks {
-            Ok(value) if value.trim() == ".githooks" => Check {
-                ok: true,
-                detail: "core.hooksPath=.githooks".into(),
-            },
-            Ok(value) => Check {
-                ok: false,
-                detail: format!("core.hooksPath={value}; run `mise run setup`"),
-            },
-            Err(_) => Check {
-                ok: false,
-                detail: "core.hooksPath is unset; run `mise run setup`".into(),
-            },
-        },
+        hooks: hook_check(),
         git_ar: command_check("git-ar", ["--version"]),
         mise: command_check("mise", ["--version"]),
         gh: command_check("gh", ["auth", "status"]),
@@ -780,6 +793,36 @@ fn doctor(json: bool) -> Result<()> {
         Ok(())
     } else {
         bail!("doctor found setup problems")
+    }
+}
+
+fn hook_check() -> Check {
+    if let Ok(value) = git_output(["config", "--local", "--get", "core.hooksPath"])
+        && !value.trim().is_empty()
+    {
+        return Check {
+            ok: false,
+            detail: format!(
+                "custom core.hooksPath={}; confirm it before running `mise run setup`",
+                value.trim()
+            ),
+        };
+    }
+    let Ok(path) = git_output(["rev-parse", "--git-path", "hooks/commit-msg"]) else {
+        return Check {
+            ok: false,
+            detail: "Git hookの場所を確認できませんでした".into(),
+        };
+    };
+    match std::fs::read_to_string(path.trim()) {
+        Ok(contents) if contents.contains("hk run commit-msg") => Check {
+            ok: true,
+            detail: "hk-managed hooks are installed".into(),
+        },
+        _ => Check {
+            ok: false,
+            detail: "hk hook is not installed; run `mise run setup`".into(),
+        },
     }
 }
 

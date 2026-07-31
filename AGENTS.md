@@ -22,8 +22,8 @@
 
 ## 主要コマンド
 
-- `mise run setup`: CLI導入と共有hookの有効化
-- `mise run verify`: format、check、test、clippy
+- `mise run setup`: CLI導入とmise管理のhk共有hookの有効化
+- `mise run verify`: format、check、test、clippy、共通lint、security
 - `mise run ar -- <args>`: インストール前のCLI実行
 - `git ar`: 人間向けTUI
 - `git ar branch`: Issue、種別、内容、担当者から規則準拠branchを作成

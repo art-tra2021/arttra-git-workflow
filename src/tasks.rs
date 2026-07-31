@@ -29,7 +29,25 @@ pub struct TaskItem {
     labels: Vec<String>,
 }
 
-pub fn show(json: bool, open: bool) -> Result<()> {
+pub fn show(json: bool, open: bool, dashboard: bool) -> Result<()> {
+    if dashboard && !json {
+        if dashboard_installed() {
+            match Command::new("gh").arg("dash").status() {
+                Ok(status) if status.success() => return Ok(()),
+                Ok(_) => {
+                    eprintln!("gh-dashを開けなかったため、組み込みのタスク表示へ切り替えます。")
+                }
+                Err(_) => {
+                    eprintln!("ghを起動できなかったため、組み込みのタスク表示へ切り替えます。")
+                }
+            }
+        } else {
+            eprintln!(
+                "gh-dashは未導入です。組み込み表示を使います。\n\
+                 導入する場合: mise run extensions:install"
+            );
+        }
+    }
     let output = Command::new("gh")
         .args([
             "issue",
@@ -93,6 +111,18 @@ pub fn show(json: bool, open: bool) -> Result<()> {
         println!("  #{:<4} {}  {}", task.number, task.title, task.url);
     }
     Ok(())
+}
+
+fn dashboard_installed() -> bool {
+    Command::new("gh")
+        .args(["extension", "list"])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.contains("dlvhdr/gh-dash"))
+        })
 }
 
 fn normalize(task: GitHubTask) -> TaskItem {
