@@ -1,4 +1,5 @@
 mod branch;
+mod governance;
 mod guard;
 mod policy;
 mod presence;
@@ -84,6 +85,37 @@ enum Commands {
     },
     /// Summarize privacy-safe local policy telemetry.
     Telemetry {
+        /// Return machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show repository Rulesets and recent Rule Insights.
+    Rules {
+        /// Maximum number of recent rule suites.
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u8).range(1..=100))]
+        limit: u8,
+        /// Show one rule suite with per-rule evaluations.
+        #[arg(long)]
+        suite: Option<u64>,
+        /// Return machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Preview or apply the declared Organization Custom Properties.
+    Properties {
+        #[arg(long)]
+        organization: String,
+        #[arg(long, default_value = "governance/custom-properties.schema.json")]
+        schema: PathBuf,
+        /// Apply create/update operations. Omit to preview only.
+        #[arg(long)]
+        apply: bool,
+        /// Explicitly request a preview without writes.
+        #[arg(long)]
+        dry_run: bool,
+        /// Confirm Organization-level GitHub writes.
+        #[arg(long)]
+        yes: bool,
         /// Return machine-readable output.
         #[arg(long)]
         json: bool,
@@ -501,6 +533,15 @@ fn run() -> Result<()> {
             let root = guard::repository_root()?;
             telemetry::report(&Policy::load()?, &root, json)
         }
+        Some(Commands::Rules { limit, suite, json }) => governance::rules(limit, suite, json),
+        Some(Commands::Properties {
+            organization,
+            schema,
+            apply,
+            dry_run,
+            yes,
+            json,
+        }) => governance::properties(&organization, &schema, apply, dry_run, yes, json),
         Some(Commands::Setup) => setup::install(&guard::repository_root()?),
         Some(Commands::ValidateCommitFile { path }) => validate_commit_file(&path),
         Some(Commands::ValidateBranch { branch, json }) => {
@@ -531,6 +572,7 @@ fn tui() -> Result<()> {
             "作業ファイルの重複を確認する",
             "自分のタスクを見る",
             "一括チェックする",
+            "Rules Insightsを見る",
             "環境を診断する",
             "AI向けコンテキストを見る",
             "終了する",
@@ -548,6 +590,7 @@ fn tui() -> Result<()> {
         }
         "自分のタスクを見る" => tasks::show(false, false, true),
         "一括チェックする" => check(false, false),
+        "Rules Insightsを見る" => governance::rules(10, None, false),
         "環境を診断する" => doctor(false),
         "AI向けコンテキストを見る" => context(false),
         _ => Ok(()),

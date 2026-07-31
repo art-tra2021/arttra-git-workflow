@@ -26,6 +26,8 @@ TUIは便利な入力手段であり、正本ではありません。
 - 人間向け`gh-dash`は任意extension、AI向け`git ar tasks --json`は必須の安定interfaceとする。
 - Claude/Codexの`PreToolUse` hookは`git ar guard hook`を呼び、同じtoolchain validatorを使う。
 - AIは候補を提案できるが、合否は`arttra.toml`とvalidatorが決める。
+- RulesetとRule InsightsはGitHub REST APIを正本とし、`git ar rules`は日本語表示と安定JSONだけを加える。
+- Custom Propertiesは宣言ファイルとの差分をdry-runし、Organization管理者の`--apply --yes`でcreate/updateだけを行う。
 
 ## AI hookとローカル状態
 

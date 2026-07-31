@@ -109,6 +109,22 @@ run = "git ar context"
 description = "Show the effective ART-TRA policy"
 run = "git ar policy"
 
+[tasks.rules]
+description = "Show Rulesets and recent Rule Insights"
+run = "git ar rules"
+
+[tasks."rules:json"]
+description = "Return Rulesets and recent Rule Insights as JSON"
+run = "git ar rules --json"
+
+[tasks."properties:plan"]
+description = "Preview Organization Custom Property changes"
+run = "git ar properties --organization art-tra2021 --dry-run"
+
+[tasks."properties:apply"]
+description = "Apply Organization Custom Property changes after explicit confirmation"
+run = "git ar properties --organization art-tra2021 --apply --yes"
+
 [tasks.tasks]
 description = "Show Issues assigned to the current GitHub user"
 run = "git ar tasks --dashboard"

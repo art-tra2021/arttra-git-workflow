@@ -6,24 +6,28 @@
       "value_type": "single_select",
       "required": true,
       "default_value": "product",
+      "description": "Repositoryの用途分類",
       "allowed_values": ["product", "business", "platform", "workflow-lab"]
     },
     {
       "property_name": "owner_team",
       "value_type": "string",
-      "required": true
+      "required": true,
+      "description": "Repositoryの責任チーム"
     },
     {
       "property_name": "risk_level",
       "value_type": "single_select",
       "required": true,
       "default_value": "standard",
+      "description": "変更時に要求するリスク管理水準",
       "allowed_values": ["low", "standard", "high", "critical"]
     },
     {
       "property_name": "ci_profile",
       "value_type": "single_select",
       "required": true,
+      "description": "共通CIの言語profile",
       "allowed_values": ["python", "typescript", "rust", "mixed", "documents"]
     },
     {
@@ -31,13 +35,15 @@
       "value_type": "single_select",
       "required": true,
       "default_value": "flexible",
+      "description": "既定のレビュー方針",
       "allowed_values": ["flexible", "standard", "strict"]
     },
     {
       "property_name": "ai_ready",
       "value_type": "true_false",
       "required": true,
-      "default_value": "true"
+      "default_value": "true",
+      "description": "AI向け非対話入口と構造化出力が整備済みか"
     }
   ]
 }

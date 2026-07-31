@@ -69,3 +69,7 @@ TUIでは任意の詳細設定、AIでは`--parent`、`--blocked-by`、`--blocki
 
 GitHubの`evaluate` RulesetはEnterprise機能なので、現在のプランでは使いません。
 テストリポではactive rulesetを使い、管理者bypassを非常口として残します。
+
+Rule Insightsは`git ar rules`で定期確認し、個別suiteの規則別結果は`--suite <ID>`で取得します。
+Organization Custom Propertiesは`governance/custom-properties.schema.json`を宣言元とし、dry-run後の明示承認で適用します。
+宣言外propertyの削除は自動化せず、既存運用を破壊しません。

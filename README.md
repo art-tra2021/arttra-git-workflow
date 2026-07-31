@@ -52,6 +52,8 @@ git ar presence check --json
 git ar presence publish --yes
 git ar tasks --json
 git ar telemetry --json
+git ar rules --json
+git ar properties --organization art-tra2021 --dry-run --json
 git ar branch \
   --type feature \
   --issue 123 \
@@ -182,6 +184,11 @@ mise run presence:uninstall
 miseはruntime、CLI、短い入口を管理し、hkはmise環境内で実行します。
 Issue、Task、PR、担当、期限等の正本はGitHub Projectsとし、`git ar tasks`は担当IssueをTUIまたはJSONで表示します。
 Projectsを読むにはGitHub CLIへ`read:project` scopeが必要です。
+
+Rulesetの実効結果は`mise run rules`、AIや集計は`mise run rules:json`で確認します。
+個別のRule Suiteは`git ar rules --suite <ID> --json`で各規則の合否まで取得できます。
+Organization Custom Propertiesは宣言ファイルから管理し、まず`mise run properties:plan`で差分を確認します。
+適用はOrganization管理者が`mise run properties:apply`を明示実行した場合だけ行い、宣言外のpropertyは削除しません。
 
 設計原則と実験記録は[`docs/architecture.md`](docs/architecture.md)と
 [`docs/experiments.md`](docs/experiments.md)にあります。
