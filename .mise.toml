@@ -77,12 +77,16 @@ description = "Run fast checks while editing"
 depends = ["fmt:check", "check"]
 
 [tasks.setup]
-description = "Install git-ar and activate repository-managed hooks"
-depends = ["verify"]
+description = "Backward-compatible alias for setup-ar"
+run = "mise run setup-ar"
+
+[tasks.setup-ar]
+description = "Install the shared toolchain, git-ar, hooks, and AI integration"
 run = """
+mise install
 cargo install --path . --locked --force
 git ar setup
-git ar doctor
+mise run ready
 """
 
 [tasks.ar]
@@ -100,6 +104,14 @@ run = "git ar check --json"
 [tasks.doctor]
 description = "Check the local ART-TRA development environment"
 run = "git ar doctor"
+
+[tasks.ready]
+description = "Confirm setup and show the next action"
+run = """
+git ar doctor
+git ar check
+git ar status
+"""
 
 [tasks.context]
 description = "Show the current repository and worktree context"

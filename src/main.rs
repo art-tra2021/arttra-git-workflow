@@ -21,6 +21,10 @@ use serde::{Deserialize, Serialize};
 use crate::guard::{GuardDecision, GuardDenied};
 use crate::policy::{Policy, ValidationMode};
 
+const SETUP_MANUAL_URL: &str = "https://app.notion.com/p/3af8c19110bf81af8c5dcc1e0403bd38";
+const MISE_MANUAL_URL: &str = "https://app.notion.com/p/3af8c19110bf81b0832bc3a18cfb909f";
+const GH_AUTH_MANUAL_URL: &str = "https://app.notion.com/p/3af8c19110bf812a8f71f29486da997f";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "git-ar",
@@ -472,12 +476,34 @@ struct DoctorReport {
     git_ar: Check,
     mise: Check,
     gh: Check,
+    environment: ManagedEnvironmentCheck,
 }
 
 #[derive(Debug, Serialize)]
 struct Check {
     ok: bool,
     detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manual_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ManagedEnvironmentCheck {
+    ok: bool,
+    detail: String,
+    mise_errors: Vec<String>,
+    manual_url: String,
+    commands: Vec<ManagedCommandCheck>,
+}
+
+#[derive(Debug, Serialize)]
+struct ManagedCommandCheck {
+    command: String,
+    ok: bool,
+    actual_path: Option<String>,
+    mise_path: Option<String>,
+    detail: String,
+    fix_command: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -897,12 +923,23 @@ fn issue(mut args: IssueArgs) -> Result<()> {
 
 fn doctor(json: bool) -> Result<()> {
     let root = git_output(["rev-parse", "--show-toplevel"]);
+    let environment = match Policy::load() {
+        Ok(policy) => managed_environment_check(&policy.doctor.managed_commands),
+        Err(error) => ManagedEnvironmentCheck {
+            ok: false,
+            detail: format!("arttra.tomlを読み込めませんでした: {error:#}"),
+            mise_errors: Vec::new(),
+            manual_url: SETUP_MANUAL_URL.into(),
+            commands: Vec::new(),
+        },
+    };
     let report = DoctorReport {
-        repository: check_result(root, |value| format!("repository: {value}")),
+        repository: check_result(root, |value| format!("repository: {value}"), None),
         hooks: hook_check(),
-        git_ar: command_check("git-ar", ["--version"]),
-        mise: command_check("mise", ["--version"]),
-        gh: command_check("gh", ["auth", "status"]),
+        git_ar: command_check("git-ar", ["--version"], Some(SETUP_MANUAL_URL)),
+        mise: command_check("mise", ["--version"], Some(MISE_MANUAL_URL)),
+        gh: command_check("gh", ["auth", "status"], Some(GH_AUTH_MANUAL_URL)),
+        environment,
     };
 
     if json {
@@ -914,12 +951,36 @@ fn doctor(json: bool) -> Result<()> {
             ("git-ar", &report.git_ar),
             ("mise", &report.mise),
             ("GitHub", &report.gh),
+            (
+                "mise環境",
+                &Check {
+                    ok: report.environment.ok,
+                    detail: report.environment.detail.clone(),
+                    manual_url: Some(report.environment.manual_url.clone()),
+                },
+            ),
         ] {
             println!(
                 "{} {name}: {}",
                 if check.ok { "✓" } else { "✗" },
                 check.detail
             );
+            if !check.ok
+                && let Some(url) = &check.manual_url
+            {
+                println!("  マニュアル: {url}");
+            }
+        }
+        for error in &report.environment.mise_errors {
+            println!("  ✗ mise: {error}");
+        }
+        for command in report
+            .environment
+            .commands
+            .iter()
+            .filter(|command| !command.ok)
+        {
+            println!("  ✗ {}: {}", command.command, command.detail);
         }
     }
 
@@ -932,11 +993,192 @@ fn doctor(json: bool) -> Result<()> {
     ]
     .iter()
     .all(|check| check.ok)
+        && report.environment.ok
     {
         Ok(())
     } else {
         bail!("doctor found setup problems")
     }
+}
+
+fn managed_environment_check(commands: &[String]) -> ManagedEnvironmentCheck {
+    let mise_doctor = mise_doctor_state();
+    let checks = commands
+        .iter()
+        .map(|command| managed_command_check(command, mise_doctor.shims.as_deref()))
+        .collect::<Vec<_>>();
+    let failures = checks.iter().filter(|check| !check.ok).count();
+    let mise_failures = mise_doctor.errors.len();
+    ManagedEnvironmentCheck {
+        ok: failures == 0 && mise_failures == 0,
+        detail: if commands.is_empty() {
+            "検査対象は設定されていません".into()
+        } else if failures == 0 && mise_failures == 0 {
+            format!("{}個のコマンドがmise管理下です", checks.len())
+        } else {
+            format!(
+                "コマンドの不一致が{failures}個、mise本体の環境問題が{mise_failures}個あります。表示された修正方法を実行してください"
+            )
+        },
+        mise_errors: mise_doctor.errors,
+        manual_url: MISE_MANUAL_URL.into(),
+        commands: checks,
+    }
+}
+
+fn managed_command_check(command: &str, mise_shims: Option<&Path>) -> ManagedCommandCheck {
+    let fix_command = format!("mise install && mise reshim && mise run doctor # {command}");
+    let mise_path = Command::new("mise")
+        .args(["which", command])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            (!path.is_empty()).then(|| PathBuf::from(path))
+        });
+    let actual_path = resolve_executable(command);
+
+    let (ok, detail) = match (&actual_path, &mise_path) {
+        (Some(actual), Some(expected)) if path_is_mise_managed(actual, expected, mise_shims) => {
+            (true, format!("{}はmise管理下です", actual.display()))
+        }
+        (Some(actual), Some(expected)) => (
+            false,
+            format!(
+                "現在は{}を使用しますが、mise指定版は{}です。`{fix_command}`を実行し、terminalとIDEを開き直してください",
+                actual.display(),
+                expected.display()
+            ),
+        ),
+        (None, Some(expected)) => (
+            false,
+            format!(
+                "PATHから見つかりません。mise指定版は{}です。`{fix_command}`を実行してください",
+                expected.display()
+            ),
+        ),
+        (_, None) => (
+            false,
+            format!(
+                "`mise which {command}`で指定版を確認できません。`{fix_command}`を実行してください"
+            ),
+        ),
+    };
+
+    ManagedCommandCheck {
+        command: command.into(),
+        ok,
+        actual_path: actual_path.map(|path| path.display().to_string()),
+        mise_path: mise_path.map(|path| path.display().to_string()),
+        detail,
+        fix_command,
+    }
+}
+
+#[derive(Default)]
+struct MiseDoctorState {
+    shims: Option<PathBuf>,
+    errors: Vec<String>,
+}
+
+fn mise_doctor_state() -> MiseDoctorState {
+    let Ok(output) = Command::new("mise").args(["doctor", "--json"]).output() else {
+        return MiseDoctorState {
+            shims: None,
+            errors: vec![
+                "mise doctorを起動できませんでした。mise本体の導入を確認してください".into(),
+            ],
+        };
+    };
+    let Ok(report) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return MiseDoctorState {
+            shims: None,
+            errors: vec![
+                "mise doctorの結果を読み取れませんでした。`mise doctor`を直接実行してください"
+                    .into(),
+            ],
+        };
+    };
+    let shims = report
+        .pointer("/dirs/shims")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
+    let errors = report
+        .pointer("/errors")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(translate_mise_error)
+        .collect();
+    MiseDoctorState { shims, errors }
+}
+
+fn translate_mise_error(error: &str) -> String {
+    if error.contains("shims are on PATH") && error.contains("mise is also activated") {
+        "miseのshimsとshell activationが同時にPATHへ入っています。どちらか一方に統一し、terminalとIDEを開き直してください"
+            .into()
+    } else {
+        format!("mise doctor: {error}")
+    }
+}
+
+fn resolve_executable(command: &str) -> Option<PathBuf> {
+    let command_path = Path::new(command);
+    if command_path.components().count() > 1 {
+        return command_path.is_file().then(|| command_path.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        for candidate in executable_candidates(&directory, command) {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn executable_candidates(directory: &Path, command: &str) -> Vec<PathBuf> {
+    let direct = directory.join(command);
+    #[cfg(not(windows))]
+    {
+        vec![direct]
+    }
+    #[cfg(windows)]
+    {
+        if Path::new(command).extension().is_some() {
+            return vec![direct];
+        }
+        let extensions = std::env::var_os("PATHEXT")
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+        extensions
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| directory.join(format!("{command}{extension}")))
+            .collect()
+    }
+}
+
+fn path_is_mise_managed(actual: &Path, expected: &Path, mise_shims: Option<&Path>) -> bool {
+    let normalize = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if normalize(actual) == normalize(expected) {
+        return true;
+    }
+    if mise_shims
+        .is_some_and(|shims| normalize(actual.parent().unwrap_or(actual)) == normalize(shims))
+    {
+        return true;
+    }
+
+    expected.ancestors().any(|ancestor| {
+        ancestor.file_name().is_some_and(|name| name == "installs")
+            && ancestor.parent().is_some_and(|data_dir| {
+                normalize(actual.parent().unwrap_or(actual)) == normalize(&data_dir.join("shims"))
+            })
+    })
 }
 
 fn check(quick: bool, json: bool) -> Result<()> {
@@ -987,7 +1229,8 @@ fn hook_check() -> Check {
     {
         return Check {
             ok: true,
-            detail: "hk-managed config hooks are installed".into(),
+            detail: "hk管理のGit hookが有効です".into(),
+            manual_url: None,
         };
     }
 
@@ -997,25 +1240,29 @@ fn hook_check() -> Check {
         return Check {
             ok: false,
             detail: format!(
-                "custom core.hooksPath={}; confirm it before running `mise run setup`",
+                "独自のcore.hooksPath={}があります。上書きせず、マニュアルを確認してください",
                 value.trim()
             ),
+            manual_url: Some(SETUP_MANUAL_URL.into()),
         };
     }
     let Ok(path) = git_output(["rev-parse", "--git-path", "hooks/commit-msg"]) else {
         return Check {
             ok: false,
             detail: "Git hookの場所を確認できませんでした".into(),
+            manual_url: Some(SETUP_MANUAL_URL.into()),
         };
     };
     match std::fs::read_to_string(path.trim()) {
         Ok(contents) if contents.contains("hk run commit-msg") => Check {
             ok: true,
-            detail: "hk-managed hooks are installed".into(),
+            detail: "hk管理のGit hookが有効です".into(),
+            manual_url: None,
         },
         _ => Check {
             ok: false,
-            detail: "hk hook is not installed; run `mise run setup`".into(),
+            detail: "Git hookが未導入です。`mise run setup-ar`を実行してください".into(),
+            manual_url: Some(SETUP_MANUAL_URL.into()),
         },
     }
 }
@@ -1283,24 +1530,31 @@ fn git_output<const N: usize>(args: [&str; N]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn command_check<const N: usize>(program: &str, args: [&str; N]) -> Check {
+fn command_check<const N: usize>(
+    program: &str,
+    args: [&str; N],
+    manual_url: Option<&str>,
+) -> Check {
     match Command::new(program).args(args).output() {
         Ok(output) if output.status.success() => Check {
             ok: true,
             detail: first_output_line(&output),
+            manual_url: None,
         },
         Ok(output) => Check {
             ok: false,
             detail: first_output_line(&output),
+            manual_url: manual_url.map(str::to_owned),
         },
         Err(error) => Check {
             ok: false,
             detail: error.to_string(),
+            manual_url: manual_url.map(str::to_owned),
         },
     }
 }
 
-fn check_result<F>(result: Result<String>, format: F) -> Check
+fn check_result<F>(result: Result<String>, format: F, manual_url: Option<&str>) -> Check
 where
     F: FnOnce(String) -> String,
 {
@@ -1308,10 +1562,12 @@ where
         Ok(value) => Check {
             ok: true,
             detail: format(value),
+            manual_url: None,
         },
         Err(error) => Check {
             ok: false,
             detail: error.to_string(),
+            manual_url: manual_url.map(str::to_owned),
         },
     }
 }
@@ -1358,7 +1614,12 @@ fn lines(value: String) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{IssueDraft, IssueKind, MergeMode, is_hk_commit_msg_command, parse_issue_numbers};
+    use std::path::Path;
+
+    use super::{
+        IssueDraft, IssueKind, MergeMode, is_hk_commit_msg_command, parse_issue_numbers,
+        path_is_mise_managed,
+    };
 
     #[test]
     fn issue_body_has_stable_sections() {
@@ -1402,5 +1663,22 @@ mod tests {
             "mise x -- hk run pre-commit --from-hook"
         ));
         assert!(!is_hk_commit_msg_command("some-unrelated-command"));
+    }
+
+    #[test]
+    fn recognizes_mise_install_and_its_shim_but_rejects_foreign_paths() {
+        let expected = Path::new("/example/mise/installs/gh/2.97.0/bin/gh");
+        let shims = Path::new("/example/mise/shims");
+        assert!(path_is_mise_managed(expected, expected, Some(shims)));
+        assert!(path_is_mise_managed(
+            Path::new("/example/mise/shims/gh"),
+            expected,
+            Some(shims)
+        ));
+        assert!(!path_is_mise_managed(
+            Path::new("/usr/local/bin/gh"),
+            expected,
+            Some(shims)
+        ));
     }
 }

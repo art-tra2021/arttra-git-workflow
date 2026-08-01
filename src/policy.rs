@@ -19,6 +19,15 @@ pub struct Policy {
     pub presence: PresencePolicy,
     #[serde(default)]
     pub branch: BranchPolicy,
+    #[serde(default)]
+    pub doctor: DoctorPolicy,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DoctorPolicy {
+    /// Commands whose first PATH match must be the version selected by mise.
+    #[serde(default)]
+    pub managed_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
