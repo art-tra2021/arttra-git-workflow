@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "exactOptionalPropertyTypes": true,
+    "lib": ["ES2024"],
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "noUncheckedIndexedAccess": true,
+    "strict": true,
+    "types": ["bun", "node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

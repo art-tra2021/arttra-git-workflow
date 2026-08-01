@@ -62,6 +62,7 @@ bypass_prefixes = ["dependabot/", "renovate/", "ar-presence/"]
 [doctor]
 # PATHで先に見つかる実体がmise指定版かを検査する。言語runtimeはプロジェクトごとに追加する。
 managed_commands = [
+  "bun",
   "cargo",
   "rustc",
   "gh",

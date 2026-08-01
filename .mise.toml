@@ -6,6 +6,7 @@ lockfile = true
 
 [tools]
 rust = { version = "1.93.0", components = "clippy,rustfmt" }
+bun = "1.3.14"
 gh = "2.97.0"
 hk = "1.54.0"
 jq = "1.8.2"
@@ -70,7 +71,16 @@ run = "typos"
 
 [tasks.verify]
 description = "Run every local and CI quality gate"
-depends = ["fmt:check", "check", "test", "clippy", "lint", "security:actions"]
+depends = ["fmt:check", "check", "test", "clippy", "lint", "security:actions", "slack:check"]
+
+[tasks."slack:install"]
+description = "Install the locked Slack adapter dependencies"
+run = "bun install --cwd apps/slack-adapter --frozen-lockfile"
+
+[tasks."slack:check"]
+description = "Type-check, lint, and test the Slack adapter"
+depends = ["slack:install"]
+run = "bun run --cwd apps/slack-adapter check"
 
 [tasks.quick]
 description = "Run fast checks while editing"

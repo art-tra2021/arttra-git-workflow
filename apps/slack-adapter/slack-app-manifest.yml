@@ -1,0 +1,27 @@
+display_information:
+  name: ART-TRA Work Lab
+  description: GitHubの仕事を人間向けに整理してSlackへ届けるテストアプリ
+  background_color: "#1D3557"
+features:
+  bot_user:
+    display_name: ART-TRA Work Lab
+    always_online: false
+  slash_commands:
+    - command: /ar
+      description: 自分が次に行う仕事を表示する
+      usage_hint: "my | issue <number> | new"
+      should_escape: false
+      url: https://example.com/slack/events
+oauth_config:
+  scopes:
+    bot:
+      - canvases:write
+      - chat:write
+      - commands
+settings:
+  interactivity:
+    is_enabled: true
+    request_url: https://example.com/slack/events
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
