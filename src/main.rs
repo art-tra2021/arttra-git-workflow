@@ -24,6 +24,7 @@ use crate::policy::{Policy, ValidationMode};
 const SETUP_MANUAL_URL: &str = "https://app.notion.com/p/3af8c19110bf81af8c5dcc1e0403bd38";
 const MISE_MANUAL_URL: &str = "https://app.notion.com/p/3af8c19110bf81b0832bc3a18cfb909f";
 const GH_AUTH_MANUAL_URL: &str = "https://app.notion.com/p/3af8c19110bf812a8f71f29486da997f";
+const AI_MANUAL_URL: &str = "https://app.notion.com/p/3af8c19110bf818d911dc8cfa19ae0b7";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -476,6 +477,7 @@ struct DoctorReport {
     git_ar: Check,
     mise: Check,
     gh: Check,
+    ai: Check,
     environment: ManagedEnvironmentCheck,
 }
 
@@ -923,6 +925,18 @@ fn issue(mut args: IssueArgs) -> Result<()> {
 
 fn doctor(json: bool) -> Result<()> {
     let root = git_output(["rev-parse", "--show-toplevel"]);
+    let ai = match &root {
+        Ok(root) => check_result(
+            setup::check_ai_settings(Path::new(root)),
+            |detail| detail,
+            Some(AI_MANUAL_URL),
+        ),
+        Err(error) => Check {
+            ok: false,
+            detail: format!("AI設定を確認するrepositoryを判定できませんでした: {error:#}"),
+            manual_url: Some(AI_MANUAL_URL.into()),
+        },
+    };
     let environment = match Policy::load() {
         Ok(policy) => managed_environment_check(&policy.doctor.managed_commands),
         Err(error) => ManagedEnvironmentCheck {
@@ -939,6 +953,7 @@ fn doctor(json: bool) -> Result<()> {
         git_ar: command_check("git-ar", ["--version"], Some(SETUP_MANUAL_URL)),
         mise: command_check("mise", ["--version"], Some(MISE_MANUAL_URL)),
         gh: command_check("gh", ["auth", "status"], Some(GH_AUTH_MANUAL_URL)),
+        ai,
         environment,
     };
 
@@ -951,6 +966,7 @@ fn doctor(json: bool) -> Result<()> {
             ("git-ar", &report.git_ar),
             ("mise", &report.mise),
             ("GitHub", &report.gh),
+            ("AI設定", &report.ai),
             (
                 "mise環境",
                 &Check {
@@ -990,6 +1006,7 @@ fn doctor(json: bool) -> Result<()> {
         &report.git_ar,
         &report.mise,
         &report.gh,
+        &report.ai,
     ]
     .iter()
     .all(|check| check.ok)

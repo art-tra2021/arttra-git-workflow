@@ -60,6 +60,13 @@ struct Violation {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct CriticalViolation {
+    error_code: &'static str,
+    rule_id: &'static str,
+    message_ja: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
 enum Replacement {
     Javascript,
     JavascriptInstall,
@@ -71,6 +78,16 @@ enum Replacement {
 }
 
 pub fn evaluate(command: &str, policy: &CommandGuardPolicy) -> GuardResult {
+    if let Some(violation) = find_critical_violation(command) {
+        return GuardResult {
+            schema_version: 1,
+            decision: GuardDecision::Deny,
+            error_code: Some(violation.error_code),
+            rule_id: Some(violation.rule_id),
+            message_ja: Some(violation.message_ja.into()),
+            fix_command: None,
+        };
+    }
     if matches!(policy.mode, ValidationMode::Off) {
         return allowed();
     }
@@ -95,6 +112,72 @@ pub fn evaluate(command: &str, policy: &CommandGuardPolicy) -> GuardResult {
         )),
         fix_command: Some(fix_command),
     }
+}
+
+fn find_critical_violation(command: &str) -> Option<CriticalViolation> {
+    const RULES: &[(&str, CriticalViolation)] = &[
+        (
+            r"(?:sudo|doas)\b",
+            CriticalViolation {
+                error_code: "AR-DANGER-001",
+                rule_id: "danger.privilege-escalation",
+                message_ja: "AIによる権限昇格は禁止です。必要な場合は人間が内容を確認して実行してください。",
+            },
+        ),
+        (
+            r"(?:rm|/bin/rm|/usr/bin/rm)\s+-(?:rf|fr)\s+(?:/|~)",
+            CriticalViolation {
+                error_code: "AR-DANGER-002",
+                rule_id: "danger.root-home-delete",
+                message_ja: "rootまたはhomeの再帰削除は禁止です。削除対象を限定して人間が確認してください。",
+            },
+        ),
+        (
+            r"git\s+reset\s+--hard\b",
+            CriticalViolation {
+                error_code: "AR-DANGER-003",
+                rule_id: "danger.git-hard-reset",
+                message_ja: "未commit変更を失うgit reset --hardは禁止です。差分を確認して安全な復旧方法を選んでください。",
+            },
+        ),
+        (
+            r"git\s+clean\s+-(?:fd|df|fdx|xdf|dfx|fxd)\b",
+            CriticalViolation {
+                error_code: "AR-DANGER-004",
+                rule_id: "danger.git-clean",
+                message_ja: "未追跡fileを復元不能に削除するgit cleanは禁止です。人間がgit clean -ndで対象を確認してください。",
+            },
+        ),
+        (
+            r"git\s+push(?:\s+[^\n;&|]+)*\s+(?:--force|-f)\b",
+            CriticalViolation {
+                error_code: "AR-DANGER-005",
+                rule_id: "danger.git-force-push",
+                message_ja: "無条件force pushは禁止です。必要な場合は人間が--force-with-leaseを検討してください。",
+            },
+        ),
+        (
+            r"gh\s+repo\s+delete\b|gh\s+api[^\n;&|]*(?:-X|--method)\s+DELETE\b",
+            CriticalViolation {
+                error_code: "AR-DANGER-006",
+                rule_id: "danger.github-delete",
+                message_ja: "GitHub repositoryまたは任意API resourceの削除はAIから実行できません。管理者が対象を確認してください。",
+            },
+        ),
+        (
+            r"(?:terraform|pulumi)\s+destroy\b|kubectl\s+delete\s+namespace\b|gcloud\s+projects\s+delete\b|firebase\s+projects:delete\b",
+            CriticalViolation {
+                error_code: "AR-DANGER-007",
+                rule_id: "danger.infrastructure-destroy",
+                message_ja: "infrastructureまたはcloud projectの破棄はAIから実行できません。管理者が対象と計画を確認してください。",
+            },
+        ),
+    ];
+
+    RULES
+        .iter()
+        .find(|(pattern, _)| shell_command_matches(command, pattern))
+        .map(|(_, violation)| *violation)
 }
 
 pub fn record_telemetry(
@@ -335,5 +418,46 @@ mod tests {
             evaluate("npm install", &policy(ValidationMode::Off)).decision,
             GuardDecision::Allow
         );
+    }
+
+    #[test]
+    fn critical_operations_are_denied_even_when_toolchain_guard_is_off() {
+        for command in [
+            "sudo rm /tmp/example",
+            "rm -rf /",
+            "git reset --hard HEAD~1",
+            "git clean -fdx",
+            "git push origin main --force",
+            "gh repo delete owner/repository --yes",
+            "gh api repos/owner/repository -X DELETE",
+            "terraform destroy -auto-approve",
+            "kubectl delete namespace production",
+            "gcloud projects delete production",
+            "firebase projects:delete production",
+        ] {
+            assert_eq!(
+                evaluate(command, &policy(ValidationMode::Off)).decision,
+                GuardDecision::Deny,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn safer_alternatives_are_not_in_the_critical_deny_set() {
+        for command in [
+            "git reset --soft HEAD~1",
+            "git clean -nd",
+            "git push origin main --force-with-lease",
+            "terraform plan",
+            "kubectl get namespace",
+            "gcloud projects describe production",
+        ] {
+            assert_eq!(
+                evaluate(command, &policy(ValidationMode::Off)).decision,
+                GuardDecision::Allow,
+                "{command}"
+            );
+        }
     }
 }

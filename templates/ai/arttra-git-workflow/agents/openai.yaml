@@ -1,0 +1,4 @@
+interface:
+  display_name: "ART-TRA Git Workflow"
+  short_description: "ART-TRA の安全な Git 運用を案内します"
+  default_prompt: "Use $arttra-git-workflow to continue this repository task safely."

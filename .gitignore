@@ -8,4 +8,7 @@
 /.arttra/local/
 /.claude/settings.local.json
 /.codex/hooks.json
+/.codex/rules/arttra.rules
+/.claude/skills/arttra-git-workflow/
+/.agents/skills/arttra-git-workflow/
 /CLAUDE.md
