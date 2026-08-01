@@ -36,3 +36,5 @@
 - 操作: `merge/self` IssueからPRを作り、`verify`と`policy`を必須にしたactive Ruleset下でsquash mergeする。
 - 観測: required check、merge可否、Rule suiteを記録する。
 - 成功条件: 管理者bypassなしで本人マージでき、Rulesetの評価記録をAPIから取得できる。
+- 実環境: `art-tra2021/arttra-git-workflow`のRuleset `ART-TRA baseline`を`active`にし、repository administratorだけを非常口として宣言した。
+- 実証Issue: [#7 active RulesetとRule Insightsを実証する](https://github.com/art-tra2021/arttra-git-workflow/issues/7)。この文書変更を`merge/self`で提出し、必須check、squash merge、Rule Insightsを確認する。
