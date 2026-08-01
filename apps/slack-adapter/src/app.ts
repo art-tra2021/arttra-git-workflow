@@ -21,6 +21,7 @@ export interface SlackAppOptions {
   socketMode?: boolean;
   approverUserIds?: string[];
   selfApproverUserIds?: string[];
+  syncCanvas?: (channelId: string) => Promise<{ canvasId: string; itemCount: number }>;
 }
 
 interface PendingIssueApproval {
@@ -44,6 +45,25 @@ export function createSlackApp(
 
   app.command("/ar", async ({ ack, client, command, respond }) => {
     await ack();
+    if (["canvas", "canvas sync"].includes(command.text.trim().toLowerCase())) {
+      if (!options.syncCanvas) {
+        await respond({ response_type: "ephemeral", text: "Canvas同期が設定されていません。" });
+        return;
+      }
+      try {
+        const result = await options.syncCanvas(command.channel_id);
+        await respond({
+          response_type: "ephemeral",
+          text: `Canvasを同期しました。対象${result.itemCount}件 / Canvas ID: ${result.canvasId}`,
+        });
+      } catch (error) {
+        await respond({
+          response_type: "ephemeral",
+          text: error instanceof Error ? error.message : "Canvasを同期できませんでした。",
+        });
+      }
+      return;
+    }
     if (["new", "issue"].includes(command.text.trim().toLowerCase())) {
       const repositories = await dependencies.listRepositories();
       await client.views.open({

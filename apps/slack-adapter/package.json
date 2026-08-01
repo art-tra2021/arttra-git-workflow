@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "check": "bun run typecheck && bun run lint && bun run test",
+    "canvas:sync": "node --env-file=.env src/sync-canvas.ts",
     "lint": "biome check .",
     "start": "node --env-file=.env src/start.ts",
     "test": "bun test",
@@ -12,6 +13,7 @@
   },
   "dependencies": {
     "@slack/bolt": "5.0.0",
+    "@slack/web-api": "8.0.0",
     "yaml": "2.9.0"
   },
   "devDependencies": {

@@ -88,6 +88,11 @@ description = "Slack adapterをSocket Modeで起動する"
 depends = ["slack:install"]
 run = "bun run --cwd apps/slack-adapter start"
 
+[tasks."slack:canvas"]
+description = "GitHubの現在状態をSlack Canvasへ同期する"
+depends = ["slack:install"]
+run = "bun run --cwd apps/slack-adapter canvas:sync"
+
 [tasks.quick]
 description = "Run fast checks while editing"
 depends = ["fmt:check", "check"]

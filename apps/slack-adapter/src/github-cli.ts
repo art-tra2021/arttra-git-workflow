@@ -131,6 +131,22 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
     return issues.map((issue) => toHumanWorkItem(toSnapshot(issue), this.githubLogin));
   }
 
+  async loadCanvasItems(): Promise<HumanWorkItem[]> {
+    const issues = await ghJson<GhIssue[]>([
+      "issue",
+      "list",
+      "--repo",
+      this.repository,
+      "--state",
+      "open",
+      "--limit",
+      "50",
+      "--json",
+      "number,title,url,labels,assignees",
+    ]);
+    return issues.map((issue) => toHumanWorkItem(toSnapshot(issue), this.githubLogin));
+  }
+
   async claimIssue(issueNumber: number): Promise<HumanWorkItem> {
     await gh([
       "issue",

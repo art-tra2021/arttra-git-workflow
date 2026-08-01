@@ -28,6 +28,18 @@ mise run slack:check
 mise run slack:dev
 ```
 
+## Canvasを同期する
+
+`AR_SLACK_CANVAS_CHANNEL_ID`へ同期先channel IDを設定し、次を実行する。
+
+```sh
+mise run slack:canvas
+```
+
+初回はchannel Canvasを作成し、Canvas IDをGit管理外の`.state`へ保存する。
+2回目以降は同じCanvasを全体更新する。
+起動中のadapterでは、同期先channelから`/ar canvas sync`を実行しても同じ処理を呼び出せる。
+
 `AR_SLACK_APPROVER_IDS`には、`merge/self`または`merge/emergency`を許可できるSlack user IDをカンマ区切りで設定する。
 申請者本人による承認を許すPL等は、`AR_SLACK_SELF_APPROVER_IDS`にも明示する。
 通常レビューのIssueは即時作成し、権限昇格を伴うIssueだけをSlackの承認ボタンへ送る。
