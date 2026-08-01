@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CanvasClient } from "../src/canvas.ts";
 import { CanvasSyncService } from "../src/canvas-service.ts";
 import { toHumanWorkItem } from "../src/read-model.ts";
+import { LocalStateStore } from "../src/state-store.ts";
 import { snapshot } from "./fixtures.ts";
 
 describe("CanvasSyncService", () => {
@@ -28,13 +29,16 @@ describe("CanvasSyncService", () => {
       },
     };
     const source = { loadCanvasItems: async () => [toHumanWorkItem(snapshot(), "reviewer")] };
-    const service = new CanvasSyncService(client, source, directory);
+    const store = new LocalStateStore(directory);
+    const service = new CanvasSyncService(client, source, store);
 
     expect((await service.sync("C123")).canvasId).toBe("F-CANVAS");
     expect((await service.sync("C123")).canvasId).toBe("F-CANVAS");
     expect(created).toEqual(["C123"]);
     expect(edited).toEqual(["F-CANVAS"]);
-    expect(await readFile(join(directory, "C123.canvas-id"), "utf8")).toBe("F-CANVAS\n");
+    expect(await store.get<{ canvasId: string }>("canvas", "C123")).toEqual({
+      canvasId: "F-CANVAS",
+    });
   });
 
   test("未参加channelでは招待commandを日本語で案内する", async () => {
@@ -49,7 +53,11 @@ describe("CanvasSyncService", () => {
         },
       },
     };
-    const service = new CanvasSyncService(client, { loadCanvasItems: async () => [] }, directory);
+    const service = new CanvasSyncService(
+      client,
+      { loadCanvasItems: async () => [] },
+      new LocalStateStore(directory),
+    );
 
     expect(service.sync("C123")).rejects.toThrow("/invite @ART-TRA Work Lab");
   });

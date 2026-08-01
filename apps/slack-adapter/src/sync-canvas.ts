@@ -1,8 +1,8 @@
-import { resolve } from "node:path";
 import { WebClient } from "@slack/web-api";
 import type { CanvasClient } from "./canvas.ts";
 import { CanvasSyncService } from "./canvas-service.ts";
 import { GitHubCliDependencies } from "./github-cli.ts";
+import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
 
 const botToken = required("SLACK_BOT_TOKEN");
 const repository = required("AR_GITHUB_REPO");
@@ -14,11 +14,10 @@ const dependencies = new GitHubCliDependencies(
   githubLogin,
   owners.length > 0 ? owners : undefined,
 );
-const stateDirectory = resolve(process.env.AR_SLACK_CANVAS_STATE_DIR ?? ".state");
 const service = new CanvasSyncService(
   new WebClient(botToken) as unknown as CanvasClient,
   dependencies,
-  stateDirectory,
+  createStateStoreFromEnvironment(),
 );
 const result = await service.sync(channelId);
 

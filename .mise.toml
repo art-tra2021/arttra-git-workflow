@@ -93,6 +93,13 @@ description = "GitHubの現在状態をSlack Canvasへ同期する"
 depends = ["slack:install"]
 run = "bun run --cwd apps/slack-adapter canvas:sync"
 
+[tasks."slack:container"]
+description = "Cloud Run用Slack adapter imageをbuildする"
+run = """
+docker build --file apps/slack-adapter/Dockerfile --tag arttra-slack-adapter:test .
+bash scripts/slack-container-smoke.sh
+"""
+
 [tasks.quick]
 description = "Run fast checks while editing"
 depends = ["fmt:check", "check"]

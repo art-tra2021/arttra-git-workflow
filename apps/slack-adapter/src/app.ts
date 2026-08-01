@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { App } from "@slack/bolt";
+import { App, type Receiver } from "@slack/bolt";
 import { canApproveIssue, canBypassIssueApproval, requiresIssueApproval } from "./approval.ts";
 import { buildCreateIssueCommand } from "./issue-command.ts";
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
@@ -22,6 +22,8 @@ export interface SlackAppOptions {
   approverUserIds?: string[];
   selfApproverUserIds?: string[];
   syncCanvas?: (channelId: string) => Promise<{ canvasId: string; itemCount: number }>;
+  receiver?: Receiver;
+  tokenVerificationEnabled?: boolean;
 }
 
 interface PendingIssueApproval {
@@ -41,6 +43,10 @@ export function createSlackApp(
     ...(options.signingSecret ? { signingSecret: options.signingSecret } : {}),
     ...(options.appToken ? { appToken: options.appToken } : {}),
     ...(options.socketMode === undefined ? {} : { socketMode: options.socketMode }),
+    ...(options.receiver ? { receiver: options.receiver } : {}),
+    ...(options.tokenVerificationEnabled === undefined
+      ? {}
+      : { tokenVerificationEnabled: options.tokenVerificationEnabled }),
   });
 
   app.command("/ar", async ({ ack, client, command, respond }) => {

@@ -1,6 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
 import { type CanvasClient, syncWorkCanvas } from "./canvas.ts";
+import type { StateStore } from "./state-store.ts";
 import type { HumanWorkItem } from "./types.ts";
 
 export interface CanvasWorkSource {
@@ -15,20 +14,20 @@ export interface CanvasSyncResult {
 export class CanvasSyncService {
   private readonly client: CanvasClient;
   private readonly source: CanvasWorkSource;
-  private readonly stateDirectory: string;
+  private readonly store: StateStore;
 
-  constructor(client: CanvasClient, source: CanvasWorkSource, stateDirectory: string) {
+  constructor(client: CanvasClient, source: CanvasWorkSource, store: StateStore) {
     this.client = client;
     this.source = source;
-    this.stateDirectory = stateDirectory;
+    this.store = store;
   }
 
   async sync(channelId: string): Promise<CanvasSyncResult> {
     if (!/^[CG][A-Z0-9]+$/.test(channelId)) {
       throw new Error("Slack channel IDが不正です。");
     }
-    const statePath = join(this.stateDirectory, `${channelId}.canvas-id`);
-    const canvasId = await readOptionalFile(statePath);
+    const state = await this.store.get<{ canvasId: string }>("canvas", channelId);
+    const canvasId = state?.canvasId;
     const items = await this.source.loadCanvasItems();
     let syncedCanvasId: string;
     try {
@@ -46,7 +45,7 @@ export class CanvasSyncService {
       }
       throw error;
     }
-    await writeAtomic(statePath, `${syncedCanvasId}\n`);
+    await this.store.set("canvas", channelId, { canvasId: syncedCanvasId });
     return { canvasId: syncedCanvasId, itemCount: items.length };
   }
 }
@@ -60,25 +59,6 @@ function slackErrorCode(error: unknown): string | undefined {
     return undefined;
   }
   return typeof data.error === "string" ? data.error : undefined;
-}
-
-async function readOptionalFile(path: string): Promise<string | undefined> {
-  try {
-    return (await readFile(path, "utf8")).trim() || undefined;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return undefined;
-    }
-    throw error;
-  }
-}
-
-async function writeAtomic(path: string, value: string): Promise<void> {
-  const directory = dirname(path);
-  await mkdir(directory, { recursive: true });
-  const temporaryPath = `${path}.${process.pid}.tmp`;
-  await writeFile(temporaryPath, value, { encoding: "utf8", mode: 0o600 });
-  await rename(temporaryPath, path);
 }
 
 function formatJst(date: Date): string {

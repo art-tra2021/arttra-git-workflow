@@ -50,3 +50,29 @@ adapter再起動後の申請は安全のため失効するため、本番化時�
 依存管理とtestにはBunを使い、Socket Modeの実行にはmise管理のNode.jsを使う。
 テスト時のGitHub操作には認証済みの`gh`を使う。本番では同じdependency interfaceをGitHub App実装へ差し替える。
 `/ar new`はrepositoryを選択した後、そのrepositoryの`.github/ISSUE_TEMPLATE/*.yml`を読み、実際のfieldからmodalを生成する。
+
+## Cloud Run runtime
+
+本番では`AR_SLACK_TRANSPORT=http`を指定し、`/slack/events`でSlash Commandとinteractionを受信する。
+`/healthz`はCloud Runのstartup、liveness、readiness確認に利用できる。
+Slackのrequest署名は`SLACK_SIGNING_SECRET`で検証する。
+
+```sh
+mise run slack:container
+```
+
+このtaskは非root userで動くproduction imageをbuildし、実際にcontainerを起動して`/healthz`を検証する。
+imageへ`.env`、local state、AI設定、文書を含めない。
+
+本番の状態保存には`AR_STATE_BACKEND=firestore`を指定する。
+Application Default Credentialsを利用し、Cloud Run service accountには対象collectionだけを読み書きできる権限を与える。
+local開発では`AR_STATE_BACKEND=local`を指定し、Git管理外の`.state`を使う。
+
+Secret ManagerからCloud Run環境変数へ次のsecretを注入する。
+
+- `SLACK_BOT_TOKEN`
+- `SLACK_SIGNING_SECRET`
+- GitHub Appのprivate key
+
+Cloud Runへのdeploy pipelineは各projectのCDが担当する。
+本repositoryはcontainer、health contract、環境変数、永続化境界までを提供する。

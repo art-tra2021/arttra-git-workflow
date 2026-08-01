@@ -1,0 +1,11 @@
+.git
+.arttra
+.claude
+.codex
+.agents
+target
+docs
+apps/slack-adapter/.env
+apps/slack-adapter/.state
+apps/slack-adapter/node_modules
+**/.DS_Store

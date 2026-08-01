@@ -33,6 +33,9 @@ jobs:
       - name: Verify
         run: mise run verify
 
+      - name: Build Cloud Run container
+        run: mise run slack:container
+
   windows-smoke:
     runs-on: windows-latest
     timeout-minutes: 20
