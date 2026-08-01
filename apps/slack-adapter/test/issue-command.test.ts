@@ -6,7 +6,7 @@ import { issueTemplate } from "../src/issue-schema.ts";
 describe("Issue作成command", () => {
   test("SlackとAIが共有できる安定したJSONへ変換する", () => {
     const command = buildCreateIssueCommand({
-      repository: "rozwer/arttra-git-lab",
+      repository: "art-tra2021/arttra-git-workflow",
       template: "work",
       title: " SlackからIssueを作る ",
       fields: {
@@ -23,7 +23,7 @@ describe("Issue作成command", () => {
     expect(command).toEqual({
       schemaVersion: 1,
       kind: "issue.create",
-      repository: "rozwer/arttra-git-lab",
+      repository: "art-tra2021/arttra-git-workflow",
       template: "work",
       title: "SlackからIssueを作る",
       fields: {
@@ -43,7 +43,7 @@ describe("Issue作成command", () => {
   test("templateの必須項目がないIssueを拒否する", () => {
     expect(() =>
       buildCreateIssueCommand({
-        repository: "rozwer/arttra-git-lab",
+        repository: "art-tra2021/arttra-git-workflow",
         template: "intake",
         title: "相談",
         fields: { summary: "", urgency: "通常" },

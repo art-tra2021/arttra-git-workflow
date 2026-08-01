@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "repository": "rozwer/arttra-git-lab",
+  "repository": "art-tra2021/arttra-git-workflow",
   "values": {
     "repo_kind": "workflow-lab",
     "owner_team": "git-platform",
