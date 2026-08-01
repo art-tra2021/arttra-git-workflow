@@ -1,32 +1,60 @@
 import { WebClient } from "@slack/web-api";
-import type { CanvasClient } from "./canvas.ts";
-import { CanvasSyncService } from "./canvas-service.ts";
 import { GitHubCliDependencies } from "./github-cli.ts";
+import type { GitHubIdentity } from "./identity-service.ts";
+import type { ProjectListClient } from "./project-list.ts";
+import { ProjectListSyncService } from "./project-list-service.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
 
 const botToken = required("SLACK_BOT_TOKEN");
 const repository = required("AR_GITHUB_REPO");
 const githubLogin = required("AR_GITHUB_LOGIN");
-const channelId = argument("--channel") ?? required("AR_SLACK_CANVAS_CHANNEL_ID");
+const channelId =
+  argument("--channel") ??
+  process.env.AR_SLACK_PROJECT_LIST_CHANNEL_ID?.trim() ??
+  required("AR_SLACK_CANVAS_CHANNEL_ID");
+const managerUserId =
+  argument("--user") ?? optional("AR_SLACK_PROJECT_LIST_MANAGER_ID") ?? undefined;
+const slackTeamId = required("AR_SLACK_TEAM_ID");
 const owners = csv("AR_GITHUB_OWNERS");
 const project = projectConfig();
+const store = createStateStoreFromEnvironment();
 const dependencies = new GitHubCliDependencies(
   repository,
   githubLogin,
   owners.length > 0 ? owners : undefined,
   project,
 );
-const service = new CanvasSyncService(
-  new WebClient(botToken) as unknown as CanvasClient,
+const service = new ProjectListSyncService(
+  new WebClient(botToken) as unknown as ProjectListClient,
   dependencies,
-  createStateStoreFromEnvironment(),
-  optional("AR_SLACK_CANVAS_ID"),
+  store,
+  async (githubLoginToFind) => {
+    const identities = await store.list<GitHubIdentity>("github-identity");
+    return (
+      identities.find(
+        (identity) =>
+          identity.slackTeamId === slackTeamId &&
+          identity.githubLogin.toLowerCase() === githubLoginToFind.toLowerCase(),
+      )?.slackUserId ?? null
+    );
+  },
 );
-const result = await service.sync(channelId);
+const result = await service.sync(channelId, managerUserId);
 
-console.log(
-  `Slack Canvasを同期しました: channel=${channelId} canvas=${result.canvasId} items=${result.itemCount}`,
-);
+if (process.argv.includes("--json")) {
+  console.log(
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: "project-list.sync.result",
+      channelId,
+      ...result,
+    }),
+  );
+} else {
+  console.log(
+    `Slack Listを同期しました: channel=${channelId} list=${result.listId} items=${result.itemCount} created=${result.created} updated=${result.updated} deleted=${result.deleted}`,
+  );
+}
 
 function required(name: string): string {
   const value = process.env[name]?.trim();

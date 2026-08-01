@@ -3,13 +3,11 @@ import { WebClient } from "@slack/web-api";
 import { raw } from "express";
 import { createSlackApp } from "./app.ts";
 import { IssueApprovalService } from "./approval.ts";
-import type { CanvasClient } from "./canvas.ts";
-import { CanvasSyncService } from "./canvas-service.ts";
 import { GitHubAppDependencies } from "./github-app.ts";
 import { GitHubCliDependencies } from "./github-cli.ts";
 import { parseGitHubWebhookJob, verifyGitHubWebhookSignature } from "./github-webhook.ts";
 import { GitHubWebhookProcessor } from "./github-webhook-processor.ts";
-import { GitHubIdentityService } from "./identity-service.ts";
+import { type GitHubIdentity, GitHubIdentityService } from "./identity-service.ts";
 import {
   CloudTasksGitHubJobQueue,
   type GitHubJobQueue,
@@ -17,6 +15,8 @@ import {
   LocalGitHubJobQueue,
   verifyJobSignature,
 } from "./job-queue.ts";
+import type { ProjectListClient } from "./project-list.ts";
+import { ProjectListSyncService, parseProjectListSyncCommand } from "./project-list-service.ts";
 import { PullRequestReviewService } from "./review-service.ts";
 import { SlackReviewNotifier } from "./slack-review-notifier.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
@@ -76,12 +76,22 @@ const approvalService = new IssueApprovalService(store, {
     positiveInteger(process.env.AR_APPROVAL_TTL_MINUTES ?? "1440", "AR_APPROVAL_TTL_MINUTES") *
     60_000,
 });
-const canvasService = new CanvasSyncService(
-  slackClient as unknown as CanvasClient,
+const projectListService = new ProjectListSyncService(
+  slackClient as unknown as ProjectListClient,
   dependencies,
   store,
-  optional("AR_SLACK_CANVAS_ID"),
+  async (githubLoginToFind) => {
+    const identities = await store.list<GitHubIdentity>("github-identity");
+    return (
+      identities.find(
+        (identity) =>
+          identity.slackTeamId === slackTeamId &&
+          identity.githubLogin.toLowerCase() === githubLoginToFind.toLowerCase(),
+      )?.slackUserId ?? null
+    );
+  },
 );
+const projectListChannelId = optional("AR_SLACK_PROJECT_LIST_CHANNEL_ID");
 const receiver =
   transport === "http"
     ? new ExpressReceiver({
@@ -107,7 +117,14 @@ const reviewService =
         },
       )
     : null;
-const webhookProcessor = reviewService ? new GitHubWebhookProcessor(reviewService, store) : null;
+const webhookProcessor =
+  reviewService || projectListChannelId
+    ? new GitHubWebhookProcessor(
+        reviewService,
+        store,
+        projectListChannelId ? () => projectListService.sync(projectListChannelId) : undefined,
+      )
+    : null;
 const jobSecret = strongSecret("AR_JOB_SECRET");
 const githubWebhookSecret = strongSecret("GITHUB_WEBHOOK_SECRET");
 const jobQueue = createJobQueue(webhookProcessor, jobSecret);
@@ -173,6 +190,30 @@ receiver?.router.post(
 );
 
 receiver?.router.post(
+  "/internal/project-list-sync",
+  raw({ type: "application/json", limit: "1kb" }),
+  async (request, response) => {
+    if (!projectListChannelId) {
+      response.status(503).json({ ok: false, error: "project_list_channel_required" });
+      return;
+    }
+    const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
+    if (!verifyJobSignature(body, request.header("x-ar-job-signature") ?? "", jobSecret)) {
+      response.status(401).json({ ok: false, error: "invalid_job_signature" });
+      return;
+    }
+    try {
+      parseProjectListSyncCommand(body);
+      const result = await projectListService.sync(projectListChannelId);
+      response.status(200).json({ ok: true, schemaVersion: 1, ...result });
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "Project List同期に失敗しました。");
+      response.status(500).json({ ok: false, error: "project_list_sync_failed" });
+    }
+  },
+);
+
+receiver?.router.post(
   "/internal/review-reminders",
   raw({ type: "application/json", limit: "1kb" }),
   async (request, response) => {
@@ -232,7 +273,8 @@ const app = createSlackApp(dependencies, {
   selfApproverUserIds,
   approvalService,
   identityService,
-  syncCanvas: (channelId) => canvasService.sync(channelId),
+  syncProjectList: (channelId, requesterUserId) =>
+    projectListService.sync(channelId, requesterUserId),
   tokenVerificationEnabled: process.env.AR_SLACK_TOKEN_VERIFICATION !== "off",
 });
 

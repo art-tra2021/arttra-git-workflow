@@ -118,7 +118,7 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
     return issues.map((issue) => toHumanWorkItem(projectIssueSnapshot(issue), this.githubLogin));
   }
 
-  async loadCanvasItems(): Promise<HumanWorkItem[]> {
+  async loadProjectItems(): Promise<HumanWorkItem[]> {
     return (await this.workIssues(100)).map((issue) =>
       toHumanWorkItem(projectIssueSnapshot(issue), this.githubLogin),
     );

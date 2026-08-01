@@ -98,4 +98,44 @@ describe("GitHubWebhookProcessor", () => {
     await processor.process(job);
     expect(calls).toEqual(["example/repo#28"]);
   });
+
+  test("ProjectとIssueの変更でListを再取得し、同じdeliveryを重複処理しない", async () => {
+    const values = new Map<string, unknown>();
+    const store = {
+      get: async (_namespace: string, key: string) => values.get(key) ?? null,
+      create: async (_namespace: string, key: string, value: unknown) => {
+        if (values.has(key)) return false;
+        values.set(key, value);
+        return true;
+      },
+    } as unknown as StateStore;
+    let syncCount = 0;
+    const processor = new GitHubWebhookProcessor(null, store, async () => {
+      syncCount += 1;
+    });
+    const projectJob = {
+      schemaVersion: 1 as const,
+      deliveryId: "delivery-project",
+      event: "projects_v2_item",
+      payload: { action: "edited" },
+    };
+    const issueJob = {
+      schemaVersion: 1 as const,
+      deliveryId: "delivery-issue",
+      event: "issues",
+      payload: { action: "assigned" },
+    };
+
+    await processor.process(projectJob);
+    await processor.process(projectJob);
+    await processor.process(issueJob);
+    await processor.process({
+      schemaVersion: 1,
+      deliveryId: "delivery-ping",
+      event: "ping",
+      payload: { zen: "safe" },
+    });
+
+    expect(syncCount).toBe(2);
+  });
 });

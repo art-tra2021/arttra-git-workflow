@@ -46,41 +46,15 @@ export function workItemBlocks(item: HumanWorkItem): SlackBlock[] {
   ];
 }
 
-export function renderWorkCanvas(items: HumanWorkItem[], generatedAt: string): string {
-  const visible = items.filter((item) => item.delivery !== "silent").slice(0, 45);
-  const rows = visible.map(
-    (item) =>
-      `|[${escapeCell(`#${item.issueNumber} ${item.title}`)}](${item.url})|${statusLabel(item.status)}|${item.priority}|${escapeCell(item.nextActor)}|${item.targetDate ?? "未設定"}|${escapeCell(item.nextAction)}|`,
-  );
-  const omitted = items.filter((item) => item.delivery !== "silent").length - visible.length;
-
-  return [
-    "# ART-TRA Work",
-    "",
-    `更新: ${generatedAt}`,
-    "",
-    "|Issue|状態|優先度|次に動く人|目標日|次の行動|",
-    "|---|---|---|---|---|---|",
-    ...rows,
-    ...(omitted > 0
-      ? ["", `${omitted}件は表の上限により省略した。GitHub Projectsで確認する。`]
-      : []),
-  ].join("\n");
-}
-
-function escapeCell(value: string): string {
-  return value.replaceAll("|", "\\|").replaceAll("\n", " ");
-}
-
 function statusLabel(status: HumanWorkItem["status"]): string {
   const labels: Record<HumanWorkItem["status"], string> = {
-    triage: "Triage",
-    todo: "Todo",
-    "urgent-unstarted": "Urgent Unstarted",
-    "in-progress": "In Progress",
-    blocked: "Blocked",
-    "in-review": "In Review",
-    done: "Done",
+    triage: "受付",
+    todo: "着手待ち",
+    "urgent-unstarted": "未着手・緊急",
+    "in-progress": "進行中",
+    blocked: "ブロック中",
+    "in-review": "レビュー中",
+    done: "完了",
   };
   return labels[status];
 }

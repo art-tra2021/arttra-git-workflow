@@ -6,7 +6,7 @@ GitHub の生イベントを Slack へ転送せず、GitHub と Projects から�
 
 - Webhook は表示データではなく再取得のきっかけとして扱う。
 - Slack の即時通知は、blocker、急ぎの未割当、CI 失敗、conflict、review 依頼に限定する。
-- 通常の進行中作業は digest と Canvas に集約し、完了済み項目は通知しない。
+- 通常の進行中作業は digest と Slack List に集約し、完了済み項目は通知しない。
 - Slack は操作窓口であり、正本は GitHub Issue と Projects に置く。
 - Slack ユーザーと GitHub ユーザーの対応を推測しない。
 - `/ar new` のmodalとAIは、同じversion付きIssue作成commandを使う。
@@ -34,22 +34,34 @@ Issue modalでは実在するSlackメンバーを担当者と予定レビュワ�
 mise run slack:dev
 ```
 
-## Canvasを同期する
+## Project Listを同期する
 
 `AR_GITHUB_PROJECT_OWNER`と`AR_GITHUB_PROJECT_NUMBER`を設定すると、単一repositoryのIssue一覧ではなくOrganization Projectを正本として複数repositoryの項目を取得する。
 ART-TRAではownerを`art-tra2021`、Project番号を`8`とする。
 
-`AR_SLACK_CANVAS_CHANNEL_ID`へ同期先channel IDを設定する。
-すでにAppが作成したCanvasがある場合は`AR_SLACK_CANVAS_ID`も設定する。
-既存Canvas IDを指定した同期はchannel参加前でも実行でき、未指定時だけchannel Canvasを新規作成する。
+`AR_SLACK_PROJECT_LIST_CHANNEL_ID`へ同期先channel IDを設定する。
+CLIから初回作成する場合は、`AR_SLACK_PROJECT_LIST_MANAGER_ID`へタブを設定する管理者のSlack user IDを任意で設定する。`/ar project sync`では実行者へ自動で閲覧権限を付ける。
+Appは初回同期で専用のSlack Listを作成し、`lists:read`と`lists:write`でGitHub Projectsの現在状態を反映する。
+作成したListは対象channelへread権限で共有し、Slack側を第二の正本にしない。
+Listの列はタスク、状態、優先度、Slack担当者、GitHub担当者、期限日、次の行動、リポジトリ、GitHubリンクである。
 
 ```sh
-mise run slack:canvas
+mise run slack:list
 ```
 
-初回はchannel Canvasを作成し、Canvas IDをGit管理外の`.state`へ保存する。
-2回目以降は同じCanvasを全体更新する。
-起動中のadapterでは、同期先channelから`/ar canvas sync`を実行しても同じ処理を呼び出せる。
+AIや運用scriptは、同じ処理のversion付きJSON結果を取得する。
+
+```sh
+mise run slack:list:json
+```
+
+初回はList IDと列IDをGit管理外の`.state`へ保存する。
+ローカル実行では`AR_LOCAL_STATE_DIR=../../.state`としてrepository rootの状態を共有し、実行directoryによるListの二重作成を防ぐ。
+2回目以降はGitHub Issue URLを安定キーとして、既存行の更新、新規行の追加、Projectから外れた行の削除を行う。
+GitHub OAuthで対応付け済みの担当者はSlackのnative user列へ反映し、未連携者はGitHub担当者列だけを表示する。
+起動中のadapterでは、同期先channelから`/ar project sync`を実行しても同じ処理を呼び出せる。
+`/ar list sync`と従来の`/ar canvas sync`も移行用aliasとして同じ処理を呼ぶ。
+同じchannelへの同期はleaseで直列化し、Webhook、定期同期、人間の手動操作が重なって行を重複作成しない。
 
 非公開channelで新規作成・通知を行うには、channel管理権限を持つ利用者が次を実行する。
 
@@ -57,7 +69,8 @@ mise run slack:canvas
 /invite @ART-TRA Work Lab
 ```
 
-招待待ちの間は、Appが作成した単独CanvasをSlack UIからchannel tabへ追加し、`AR_SLACK_CANVAS_ID`で更新を継続できる。
+初回同期後、作成された`ART-TRA Work` Listをchannel tabへ一度だけ追加する。
+SlackのLists APIはpaid planでのみ利用できるため、未対応planでは同期を開始しない。
 
 Issue modalの担当者と予定レビュワーはSlackのネイティブなメンバー選択を使う。
 検証済みGitHub user IDへ変換したうえで、担当者はAssignee、予定レビュワーはIssue内の`@login`と構造化ID、PR作成時はGitHubのReview Requestへ反映する。
@@ -118,12 +131,17 @@ GitHub Appには対象repositoryに対するMetadata read、Contents read、Issu
 ProjectsのStatus、Priority、Target dateを読むため、Organization permissionsのProjects readも与える。
 ローカルの`gh` backendでは`gh auth refresh -s read:project`で同等のscopeを追加する。
 PR reviewer自動設定にはPull requests read/write、Ruleset確認にはAdministration readも与える。
-Webhook URLは`AR_PUBLIC_BASE_URL/github/events`とし、`pull_request`と`pull_request_review`を購読する。
+Webhook URLは`AR_PUBLIC_BASE_URL/github/events`とし、`issues`、`projects_v2_item`、`pull_request`、`pull_request_review`を購読する。
 `GITHUB_WEBHOOK_SECRET`でGitHub署名を検証し、生payloadをSlackへ表示しない。
 
 本番gatewayは検証済みwebhookをCloud Tasksへ積み、`/internal/github-events`のworker処理と分離する。
 `AR_JOB_QUEUE=cloud-tasks`を指定し、project、location、queue、任意のOIDC service accountを設定する。
 job本文は`AR_JOB_SECRET`でも署名し、GitHub delivery IDをCloud Tasks task IDに利用して重複投入を抑止する。
+Project項目、Issue、PR、reviewの変更を処理したworkerはGitHub Projectsを再取得し、設定済みSlack Listへ反映する。
+
+Webhookの取りこぼしを修復する定期同期は、固定JSON `{"schemaVersion":1,"kind":"project-list.sync"}` を`/internal/project-list-sync`へ送る。
+本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
+定期同期と`/ar project sync`は同じ同期serviceと決定的なrow変換を使用する。
 
 PR作成・更新時は、linked Issueのversion付き予定reviewer、変更fileに最後に一致するCODEOWNERS、active Rulesetの必要承認数をGitHubから再取得する。
 GitHubへ正式なuser/team review requestを設定した後、検証済みaccount mappingを持つ利用者だけSlackでmentionする。

@@ -28,7 +28,16 @@ export interface SlackAppOptions {
   selfApproverUserIds?: string[];
   approvalService: IssueApprovalService;
   identityService: GitHubIdentityService;
-  syncCanvas?: (channelId: string) => Promise<{ canvasId: string; itemCount: number }>;
+  syncProjectList?: (
+    channelId: string,
+    requesterUserId?: string,
+  ) => Promise<{
+    listId: string;
+    itemCount: number;
+    created: number;
+    updated: number;
+    deleted: number;
+  }>;
   receiver?: Receiver;
   tokenVerificationEnabled?: boolean;
 }
@@ -97,21 +106,26 @@ export function createSlackApp(
       });
       return;
     }
-    if (["canvas", "canvas sync"].includes(normalized)) {
-      if (!options.syncCanvas) {
-        await respond({ response_type: "ephemeral", text: "Canvas同期が設定されていません。" });
+    if (
+      ["project", "project sync", "list", "list sync", "canvas", "canvas sync"].includes(normalized)
+    ) {
+      if (!options.syncProjectList) {
+        await respond({
+          response_type: "ephemeral",
+          text: "Project List同期が設定されていません。",
+        });
         return;
       }
       try {
-        const result = await options.syncCanvas(command.channel_id);
+        const result = await options.syncProjectList(command.channel_id, command.user_id);
         await respond({
           response_type: "ephemeral",
-          text: `Canvasを同期しました。対象${result.itemCount}件 / Canvas ID: ${result.canvasId}`,
+          text: `Project Listを同期しました。対象${result.itemCount}件 / 新規${result.created}件 / 更新${result.updated}件 / 削除${result.deleted}件 / List ID: ${result.listId}`,
         });
       } catch (error) {
         await respond({
           response_type: "ephemeral",
-          text: error instanceof Error ? error.message : "Canvasを同期できませんでした。",
+          text: error instanceof Error ? error.message : "Project Listを同期できませんでした。",
         });
       }
       return;

@@ -2,6 +2,7 @@
 /apps/slack-adapter/node_modules/
 /apps/slack-adapter/.env
 /apps/slack-adapter/.state/
+/.state/
 /.idea/
 /.vscode/
 .DS_Store
