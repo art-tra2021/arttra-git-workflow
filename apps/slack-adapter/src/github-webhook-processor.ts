@@ -1,16 +1,26 @@
 import type { GitHubWebhookJob } from "./job-queue.ts";
 import type { PullRequestReviewService } from "./review-service.ts";
 import type { StateStore } from "./state-store.ts";
+import type { WorkNotificationService } from "./work-notification-service.ts";
 
 const DELIVERY_NAMESPACE = "github-delivery";
 
 export class GitHubWebhookProcessor {
-  private readonly reviews: PullRequestReviewService;
+  private readonly reviews: PullRequestReviewService | null;
   private readonly store: StateStore;
+  private readonly syncProjectList: (() => Promise<unknown>) | undefined;
+  private readonly notifications: WorkNotificationService | null;
 
-  constructor(reviews: PullRequestReviewService, store: StateStore) {
+  constructor(
+    reviews: PullRequestReviewService | null,
+    store: StateStore,
+    syncProjectList?: () => Promise<unknown>,
+    notifications: WorkNotificationService | null = null,
+  ) {
     this.reviews = reviews;
     this.store = store;
+    this.syncProjectList = syncProjectList;
+    this.notifications = notifications;
   }
 
   async process(job: GitHubWebhookJob): Promise<void> {
@@ -18,8 +28,14 @@ export class GitHubWebhookProcessor {
       return;
     }
     const target = reviewTarget(job);
-    if (target) {
+    if (target && this.reviews) {
       await this.reviews.process(target.repository, target.pullRequestNumber);
+    }
+    if (this.syncProjectList && shouldSyncProjectList(job)) {
+      await this.syncProjectList();
+    }
+    if (this.notifications && shouldRefreshWorkNotifications(job)) {
+      await this.notifications.notifyImmediate();
     }
     await this.store.create(DELIVERY_NAMESPACE, job.deliveryId, {
       schemaVersion: 1,
@@ -27,6 +43,51 @@ export class GitHubWebhookProcessor {
       event: job.event,
     });
   }
+}
+
+function shouldRefreshWorkNotifications(job: GitHubWebhookJob): boolean {
+  if (job.event === "check_run" || job.event === "check_suite") {
+    return Boolean(actionFrom(job));
+  }
+  return shouldSyncProjectList(job);
+}
+
+function shouldSyncProjectList(job: GitHubWebhookJob): boolean {
+  const action = actionFrom(job);
+  if (job.event === "projects_v2_item") {
+    return Boolean(action);
+  }
+  const actions: Record<string, Set<string>> = {
+    issues: new Set([
+      "opened",
+      "edited",
+      "deleted",
+      "transferred",
+      "pinned",
+      "unpinned",
+      "closed",
+      "reopened",
+      "assigned",
+      "unassigned",
+      "labeled",
+      "unlabeled",
+    ]),
+    pull_request: new Set([
+      "opened",
+      "closed",
+      "reopened",
+      "converted_to_draft",
+      "ready_for_review",
+      "synchronize",
+    ]),
+    pull_request_review: new Set(["submitted", "dismissed"]),
+  };
+  return action ? (actions[job.event]?.has(action) ?? false) : false;
+}
+
+function actionFrom(job: GitHubWebhookJob): string | null {
+  if (!job.payload || typeof job.payload !== "object" || !("action" in job.payload)) return null;
+  return typeof job.payload.action === "string" ? job.payload.action : null;
 }
 
 function reviewTarget(

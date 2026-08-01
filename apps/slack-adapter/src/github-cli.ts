@@ -4,6 +4,9 @@ import type { SlackAdapterDependencies } from "./app.ts";
 import { buildIssueCreateInput, parseIssueForm } from "./github-shared.ts";
 import type { IssueTemplateSchema } from "./issue-schema.ts";
 import {
+  ORGANIZATION_PROJECT_ITEMS_QUERY,
+  type OrganizationProjectItemsResponse,
+  organizationProjectIssuePage,
   PROJECT_ISSUES_QUERY,
   type ProjectIssuesResponse,
   projectIssueNodes,
@@ -37,16 +40,19 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
   private readonly repository: string;
   private readonly githubLogin: string;
   private readonly owners: string[];
+  private readonly project: { owner: string; number: number } | null;
   private readonly templateCache = new Map<string, IssueTemplateSchema[]>();
 
   constructor(
     repository: string,
     githubLogin: string,
     owners = [repository.split("/")[0] ?? githubLogin],
+    project: { owner: string; number: number } | null = null,
   ) {
     this.repository = repository;
     this.githubLogin = githubLogin;
     this.owners = owners;
+    this.project = project;
   }
 
   async listRepositories(): Promise<string[]> {
@@ -108,23 +114,23 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
   }
 
   async loadWorkItems(): Promise<HumanWorkItem[]> {
-    const issues = await this.projectIssues(20, this.githubLogin);
+    const issues = await this.workIssues(100, this.githubLogin);
     return issues.map((issue) => toHumanWorkItem(projectIssueSnapshot(issue), this.githubLogin));
   }
 
-  async loadCanvasItems(): Promise<HumanWorkItem[]> {
-    return (await this.projectIssues(50)).map((issue) =>
+  async loadProjectItems(): Promise<HumanWorkItem[]> {
+    return (await this.workIssues(100)).map((issue) =>
       toHumanWorkItem(projectIssueSnapshot(issue), this.githubLogin),
     );
   }
 
-  async claimIssue(issueNumber: number): Promise<HumanWorkItem> {
+  async claimIssue(repository: string, issueNumber: number): Promise<HumanWorkItem> {
     await gh([
       "issue",
       "edit",
       String(issueNumber),
       "--repo",
-      this.repository,
+      repository,
       "--add-assignee",
       this.githubLogin,
     ]);
@@ -133,7 +139,7 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
       "view",
       String(issueNumber),
       "--repo",
-      this.repository,
+      repository,
       "--json",
       "number,title,url,labels,assignees",
     ]);
@@ -211,6 +217,39 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
         ...(assignee ? ["-F", `assignee=${assignee}`] : []),
       ]),
     );
+  }
+
+  private async workIssues(limit: number, assignee: string | null = null) {
+    if (!this.project) {
+      return this.projectIssues(limit, assignee);
+    }
+    const issues = [];
+    let cursor: string | null = null;
+    do {
+      const page = organizationProjectIssuePage(
+        await ghJson<OrganizationProjectItemsResponse>([
+          "api",
+          "graphql",
+          "-f",
+          `query=${ORGANIZATION_PROJECT_ITEMS_QUERY}`,
+          "-F",
+          `owner=${this.project.owner}`,
+          "-F",
+          `number=${this.project.number}`,
+          "-F",
+          `limit=${limit}`,
+          ...(cursor ? ["-f", `cursor=${cursor}`] : []),
+        ]),
+        this.project.number,
+        assignee,
+      );
+      issues.push(...page.issues);
+      if (page.hasNextPage && !page.endCursor) {
+        throw new Error("GitHub Projectの次ページ位置を読み取れませんでした。");
+      }
+      cursor = page.hasNextPage ? page.endCursor : null;
+    } while (cursor);
+    return issues;
   }
 }
 

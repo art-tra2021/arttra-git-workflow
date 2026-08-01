@@ -7,7 +7,7 @@
     "check": "bun run typecheck && bun run lint && bun run test",
     "approval:status": "node --env-file-if-exists=.env src/approval-status.ts",
     "review:status": "node --env-file-if-exists=.env src/review-status.ts",
-    "canvas:sync": "node --env-file-if-exists=.env src/sync-canvas.ts",
+    "project-list:sync": "node --env-file-if-exists=.env src/sync-project-list.ts",
     "lint": "biome check .",
     "start": "node --env-file-if-exists=.env src/start.ts",
     "test": "bun test",

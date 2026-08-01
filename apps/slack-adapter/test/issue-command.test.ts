@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { parseIssueUrl } from "../src/app.ts";
 import { buildCreateIssueCommand } from "../src/issue-command.ts";
 import { issueTemplate } from "../src/issue-schema.ts";
 
@@ -50,5 +51,16 @@ describe("Issue作成command", () => {
         schema: issueTemplate("intake"),
       }),
     ).toThrow("何がありましたかを入力してください");
+  });
+});
+
+describe("Issue URL", () => {
+  test("Project横断の着手先repositoryと番号を確定する", () => {
+    expect(parseIssueUrl("https://github.com/art-tra2021/service/issues/42")).toEqual({
+      repository: "art-tra2021/service",
+      number: 42,
+    });
+    expect(parseIssueUrl("42")).toBeNull();
+    expect(parseIssueUrl("https://example.com/art-tra2021/service/issues/42")).toBeNull();
   });
 });

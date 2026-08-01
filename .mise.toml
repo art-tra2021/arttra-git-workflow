@@ -88,10 +88,19 @@ description = "Slack adapterをSocket Modeで起動する"
 depends = ["slack:install"]
 run = "bun run --cwd apps/slack-adapter start"
 
-[tasks."slack:canvas"]
-description = "GitHubの現在状態をSlack Canvasへ同期する"
+[tasks."slack:list"]
+description = "GitHub Projectsの現在状態をSlack Listへ同期する"
 depends = ["slack:install"]
-run = "bun run --cwd apps/slack-adapter canvas:sync"
+run = "bun run --cwd apps/slack-adapter project-list:sync"
+
+[tasks."slack:list:json"]
+description = "GitHub ProjectsからSlack Listへ同期し、AI向けJSON結果を返す"
+depends = ["slack:install"]
+run = "bun run --cwd apps/slack-adapter project-list:sync -- --json"
+
+[tasks."slack:canvas"]
+description = "slack:listの移行用alias"
+run = "mise run slack:list"
 
 [tasks."slack:approval"]
 description = "Issue承認のversion付きJSON statusを取得する"

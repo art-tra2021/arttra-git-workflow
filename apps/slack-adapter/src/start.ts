@@ -3,13 +3,11 @@ import { WebClient } from "@slack/web-api";
 import { raw } from "express";
 import { createSlackApp } from "./app.ts";
 import { IssueApprovalService } from "./approval.ts";
-import type { CanvasClient } from "./canvas.ts";
-import { CanvasSyncService } from "./canvas-service.ts";
 import { GitHubAppDependencies } from "./github-app.ts";
 import { GitHubCliDependencies } from "./github-cli.ts";
 import { parseGitHubWebhookJob, verifyGitHubWebhookSignature } from "./github-webhook.ts";
 import { GitHubWebhookProcessor } from "./github-webhook-processor.ts";
-import { GitHubIdentityService } from "./identity-service.ts";
+import { type GitHubIdentity, GitHubIdentityService } from "./identity-service.ts";
 import {
   CloudTasksGitHubJobQueue,
   type GitHubJobQueue,
@@ -17,9 +15,13 @@ import {
   LocalGitHubJobQueue,
   verifyJobSignature,
 } from "./job-queue.ts";
+import type { ProjectListClient } from "./project-list.ts";
+import { ProjectListSyncService, parseProjectListSyncCommand } from "./project-list-service.ts";
 import { PullRequestReviewService } from "./review-service.ts";
 import { SlackReviewNotifier } from "./slack-review-notifier.ts";
+import { SlackWorkNotifier } from "./slack-work-notifier.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
+import { WorkNotificationService } from "./work-notification-service.ts";
 
 const transport = (process.env.AR_SLACK_TRANSPORT ?? "socket").trim().toLowerCase();
 if (transport !== "socket" && transport !== "http") {
@@ -33,6 +35,7 @@ const owners = (process.env.AR_GITHUB_OWNERS ?? repository.split("/")[0] ?? gith
   .split(",")
   .map((owner) => owner.trim())
   .filter(Boolean);
+const project = projectConfig();
 const approverUserIds = csv("AR_SLACK_APPROVER_IDS");
 const selfApproverUserIds = csv("AR_SLACK_SELF_APPROVER_IDS");
 const githubBackend = (process.env.AR_GITHUB_BACKEND ?? "cli").trim().toLowerCase();
@@ -57,6 +60,7 @@ const dependencies =
         repository,
         githubLogin,
         owners,
+        project,
         resolveGitHubLogin: async (slackUserId) => {
           const identity = await identityService.get(slackTeamId, slackUserId);
           if (!identity) {
@@ -67,18 +71,37 @@ const dependencies =
           return identity.githubLogin;
         },
       })
-    : new GitHubCliDependencies(repository, githubLogin, owners);
+    : new GitHubCliDependencies(repository, githubLogin, owners, project);
 const slackClient = new WebClient(botToken);
 const approvalService = new IssueApprovalService(store, {
   ttlMilliseconds:
     positiveInteger(process.env.AR_APPROVAL_TTL_MINUTES ?? "1440", "AR_APPROVAL_TTL_MINUTES") *
     60_000,
 });
-const canvasService = new CanvasSyncService(
-  slackClient as unknown as CanvasClient,
+const projectListService = new ProjectListSyncService(
+  slackClient as unknown as ProjectListClient,
   dependencies,
   store,
+  async (githubLoginToFind) => {
+    const identities = await store.list<GitHubIdentity>("github-identity");
+    return (
+      identities.find(
+        (identity) =>
+          identity.slackTeamId === slackTeamId &&
+          identity.githubLogin.toLowerCase() === githubLoginToFind.toLowerCase(),
+      )?.slackUserId ?? null
+    );
+  },
 );
+const projectListChannelId = optional("AR_SLACK_PROJECT_LIST_CHANNEL_ID");
+const workNotificationChannelId = optional("AR_SLACK_WORK_CHANNEL_ID") ?? projectListChannelId;
+const workNotificationService = workNotificationChannelId
+  ? new WorkNotificationService(
+      dependencies,
+      store,
+      new SlackWorkNotifier(slackClient, workNotificationChannelId),
+    )
+  : null;
 const receiver =
   transport === "http"
     ? new ExpressReceiver({
@@ -104,7 +127,15 @@ const reviewService =
         },
       )
     : null;
-const webhookProcessor = reviewService ? new GitHubWebhookProcessor(reviewService, store) : null;
+const webhookProcessor =
+  reviewService || projectListChannelId || workNotificationService
+    ? new GitHubWebhookProcessor(
+        reviewService,
+        store,
+        projectListChannelId ? () => projectListService.sync(projectListChannelId) : undefined,
+        workNotificationService,
+      )
+    : null;
 const jobSecret = strongSecret("AR_JOB_SECRET");
 const githubWebhookSecret = strongSecret("GITHUB_WEBHOOK_SECRET");
 const jobQueue = createJobQueue(webhookProcessor, jobSecret);
@@ -170,6 +201,58 @@ receiver?.router.post(
 );
 
 receiver?.router.post(
+  "/internal/project-list-sync",
+  raw({ type: "application/json", limit: "1kb" }),
+  async (request, response) => {
+    if (!projectListChannelId) {
+      response.status(503).json({ ok: false, error: "project_list_channel_required" });
+      return;
+    }
+    const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
+    if (!verifyJobSignature(body, request.header("x-ar-job-signature") ?? "", jobSecret)) {
+      response.status(401).json({ ok: false, error: "invalid_job_signature" });
+      return;
+    }
+    try {
+      parseProjectListSyncCommand(body);
+      const result = await projectListService.sync(projectListChannelId);
+      response.status(200).json({ ok: true, schemaVersion: 1, ...result });
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "Project List同期に失敗しました。");
+      response.status(500).json({ ok: false, error: "project_list_sync_failed" });
+    }
+  },
+);
+
+receiver?.router.post(
+  "/internal/work-digest",
+  raw({ type: "application/json", limit: "1kb" }),
+  async (request, response) => {
+    if (!workNotificationService) {
+      response.status(503).json({ ok: false, error: "work_notification_channel_required" });
+      return;
+    }
+    const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
+    if (!verifyJobSignature(body, request.header("x-ar-job-signature") ?? "", jobSecret)) {
+      response.status(401).json({ ok: false, error: "invalid_job_signature" });
+      return;
+    }
+    try {
+      const command = JSON.parse(body) as { schemaVersion?: number; kind?: string };
+      if (command.schemaVersion !== 1 || command.kind !== "work.digest") {
+        response.status(400).json({ ok: false, error: "invalid_digest_command" });
+        return;
+      }
+      const itemCount = await workNotificationService.sendDigest();
+      response.status(200).json({ ok: true, itemCount, schemaVersion: 1 });
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "作業ダイジェストに失敗しました。");
+      response.status(500).json({ ok: false, error: "digest_failed" });
+    }
+  },
+);
+
+receiver?.router.post(
   "/internal/review-reminders",
   raw({ type: "application/json", limit: "1kb" }),
   async (request, response) => {
@@ -229,7 +312,8 @@ const app = createSlackApp(dependencies, {
   selfApproverUserIds,
   approvalService,
   identityService,
-  syncCanvas: (channelId) => canvasService.sync(channelId),
+  syncProjectList: (channelId, requesterUserId) =>
+    projectListService.sync(channelId, requesterUserId),
   tokenVerificationEnabled: process.env.AR_SLACK_TOKEN_VERIFICATION !== "off",
 });
 
@@ -257,6 +341,24 @@ function csv(name: string): string[] {
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+}
+
+function optional(name: string): string | null {
+  return process.env[name]?.trim() || null;
+}
+
+function projectConfig(): { owner: string; number: number } | null {
+  const owner = optional("AR_GITHUB_PROJECT_OWNER");
+  const value = optional("AR_GITHUB_PROJECT_NUMBER");
+  if (!owner && !value) return null;
+  if (!owner || !value || !/^[A-Za-z0-9-]+$/.test(owner)) {
+    throw new Error("AR_GITHUB_PROJECT_OWNERとAR_GITHUB_PROJECT_NUMBERを両方設定してください。");
+  }
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1) {
+    throw new Error("AR_GITHUB_PROJECT_NUMBERには1以上の整数を指定してください。");
+  }
+  return { owner, number };
 }
 
 function strongSecret(name: string): string {
