@@ -61,4 +61,37 @@ describe("CanvasSyncService", () => {
 
     expect(service.sync("C123")).rejects.toThrow("/invite @ART-TRA Work Lab");
   });
+
+  test("設定済みCanvas IDはchannel参加前でも直接更新する", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "arttra-canvas-"));
+    const edited: string[] = [];
+    const client: CanvasClient = {
+      canvases: {
+        edit: async (input) => {
+          edited.push(input.canvas_id);
+        },
+      },
+      conversations: {
+        canvases: {
+          create: async () => {
+            throw new Error("既存Canvas指定時は作成しない");
+          },
+        },
+      },
+    };
+    const store = new LocalStateStore(directory);
+    const service = new CanvasSyncService(
+      client,
+      { loadCanvasItems: async () => [] },
+      store,
+      "F0BM88NUQAZ",
+    );
+
+    await store.set("canvas", "C0BK0RGD87J", { canvasId: "F-OLD" });
+    expect((await service.sync("C0BK0RGD87J")).canvasId).toBe("F0BM88NUQAZ");
+    expect(edited).toEqual(["F0BM88NUQAZ"]);
+    expect(await store.get<{ canvasId: string }>("canvas", "C0BK0RGD87J")).toEqual({
+      canvasId: "F0BM88NUQAZ",
+    });
+  });
 });

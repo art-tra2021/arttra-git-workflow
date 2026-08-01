@@ -125,7 +125,7 @@ describe("GitHub App adapter", () => {
   });
 
   test("検証済みGitHub loginでProjectsの自分の仕事を絞り込む", async () => {
-    let graphqlBody: unknown;
+    const graphqlBodies: unknown[] = [];
     const client = new GitHubAppDependencies({
       appId: "12345",
       installationId: "99",
@@ -133,18 +133,31 @@ describe("GitHub App adapter", () => {
       repository: "rozwer/arttra-git-lab",
       githubLogin: "service-account",
       owners: ["rozwer"],
+      project: { owner: "art-tra2021", number: 8 },
       apiBaseUrl: "https://github.example/api/v3",
       fetch: async (input, init) => {
         if (input.endsWith("/app/installations/99/access_tokens")) {
           return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
         }
         if (input.endsWith("/graphql")) {
-          graphqlBody = JSON.parse(String(init?.body));
+          const graphqlBody = JSON.parse(String(init?.body)) as {
+            variables: { cursor?: string | null };
+          };
+          graphqlBodies.push(graphqlBody);
           return json({
             data: {
-              repository: {
-                issues: {
-                  nodes: [projectIssue(42, "alice", "In progress", "P1")],
+              organization: {
+                projectV2: {
+                  items: {
+                    nodes:
+                      graphqlBody.variables.cursor === "cursor-2"
+                        ? [projectItem(43, "alice", "Ready", "P2")]
+                        : [projectItem(42, "alice", "In progress", "P1")],
+                    pageInfo:
+                      graphqlBody.variables.cursor === "cursor-2"
+                        ? { hasNextPage: false, endCursor: null }
+                        : { hasNextPage: true, endCursor: "cursor-2" },
+                  },
                 },
               },
             },
@@ -160,15 +173,20 @@ describe("GitHub App adapter", () => {
     });
 
     expect(await client.loadWorkItems("U_ALICE")).toEqual([
+      expect.objectContaining({ issueNumber: 42, status: "in-progress", priority: "P1" }),
+      expect.objectContaining({ issueNumber: 43, status: "todo", priority: "P2" }),
+    ]);
+    expect(graphqlBodies).toEqual([
       expect.objectContaining({
-        issueNumber: 42,
-        status: "in-progress",
-        priority: "P1",
-        owner: "alice",
+        variables: { owner: "art-tra2021", number: 8, limit: 100, cursor: null },
+      }),
+      expect.objectContaining({
+        variables: { owner: "art-tra2021", number: 8, limit: 100, cursor: "cursor-2" },
       }),
     ]);
-    expect(graphqlBody).toMatchObject({
-      variables: { owner: "rozwer", name: "arttra-git-lab", limit: 20, assignee: "alice" },
+    expect(graphqlBodies).toHaveLength(2);
+    expect(graphqlBodies[0]).toMatchObject({
+      variables: { owner: "art-tra2021", number: 8, limit: 100, cursor: null },
     });
   });
 
@@ -292,5 +310,22 @@ function projectIssue(number: number, assignee: string, status: string, priority
         },
       ],
     },
+  };
+}
+
+function projectItem(number: number, assignee: string, status: string, priority: string) {
+  const issue = projectIssue(number, assignee, status, priority);
+  const fieldValues = issue.projectItems.nodes[0]?.fieldValues;
+  if (!fieldValues) throw new Error("Project fixtureにfieldValuesがありません");
+  return {
+    content: {
+      number: issue.number,
+      title: issue.title,
+      url: issue.url,
+      state: "OPEN",
+      labels: issue.labels,
+      assignees: issue.assignees,
+    },
+    fieldValues,
   };
 }

@@ -15,11 +15,21 @@ export class CanvasSyncService {
   private readonly client: CanvasClient;
   private readonly source: CanvasWorkSource;
   private readonly store: StateStore;
+  private readonly configuredCanvasId: string | null;
 
-  constructor(client: CanvasClient, source: CanvasWorkSource, store: StateStore) {
+  constructor(
+    client: CanvasClient,
+    source: CanvasWorkSource,
+    store: StateStore,
+    configuredCanvasId: string | null = null,
+  ) {
     this.client = client;
     this.source = source;
     this.store = store;
+    if (configuredCanvasId && !/^F[A-Z0-9]+$/.test(configuredCanvasId)) {
+      throw new Error("Slack Canvas IDが不正です。");
+    }
+    this.configuredCanvasId = configuredCanvasId;
   }
 
   async sync(channelId: string): Promise<CanvasSyncResult> {
@@ -27,7 +37,7 @@ export class CanvasSyncService {
       throw new Error("Slack channel IDが不正です。");
     }
     const state = await this.store.get<{ canvasId: string }>("canvas", channelId);
-    const canvasId = state?.canvasId;
+    const canvasId = this.configuredCanvasId ?? state?.canvasId ?? undefined;
     const items = await this.source.loadCanvasItems();
     let syncedCanvasId: string;
     try {

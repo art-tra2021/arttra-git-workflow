@@ -31,6 +31,41 @@ query ArttraWorkItems($owner: String!, $name: String!, $limit: Int!, $assignee: 
   }
 }`;
 
+export const ORGANIZATION_PROJECT_ITEMS_QUERY = `
+query ArttraOrganizationProjectItems($owner: String!, $number: Int!, $limit: Int!, $cursor: String) {
+  organization(login: $owner) {
+    projectV2(number: $number) {
+      items(first: $limit, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          fieldValues(first: 30) {
+            nodes {
+              ... on ProjectV2ItemFieldSingleSelectValue {
+                name
+                field { ... on ProjectV2FieldCommon { name } }
+              }
+              ... on ProjectV2ItemFieldDateValue {
+                date
+                field { ... on ProjectV2FieldCommon { name } }
+              }
+            }
+          }
+          content {
+            ... on Issue {
+              number
+              title
+              url
+              state
+              labels(first: 20) { nodes { name } }
+              assignees(first: 10) { nodes { login } }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
 export interface ProjectIssueNode {
   number: number;
   title: string;
@@ -51,15 +86,79 @@ export interface ProjectIssuesResponse {
   errors?: Array<{ message?: string }>;
 }
 
+interface OrganizationProjectItemNode {
+  content?: (Omit<ProjectIssueNode, "projectItems"> & { state?: string }) | null;
+  fieldValues: ProjectIssueNode["projectItems"]["nodes"][number]["fieldValues"];
+}
+
+export interface OrganizationProjectItemsResponse {
+  data?: {
+    organization?: {
+      projectV2?: {
+        items?: {
+          nodes?: OrganizationProjectItemNode[];
+          pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+        };
+      } | null;
+    } | null;
+  };
+  errors?: Array<{ message?: string }>;
+}
+
+export interface OrganizationProjectIssuePage {
+  issues: ProjectIssueNode[];
+  hasNextPage: boolean;
+  endCursor: string | null;
+}
+
 export function projectIssueNodes(response: ProjectIssuesResponse): ProjectIssueNode[] {
-  const error = response.errors
-    ?.map((item) => item.message)
-    .filter(Boolean)
-    .join(" / ");
-  if (error) {
-    throw new Error(`GitHub Projectsを読み取れませんでした: ${error}`);
-  }
+  throwGraphqlErrors(response.errors);
   return response.data?.repository?.issues?.nodes ?? [];
+}
+
+export function organizationProjectIssueNodes(
+  response: OrganizationProjectItemsResponse,
+  projectNumber: number,
+  assignee: string | null = null,
+): ProjectIssueNode[] {
+  return organizationProjectIssuePage(response, projectNumber, assignee).issues;
+}
+
+export function organizationProjectIssuePage(
+  response: OrganizationProjectItemsResponse,
+  projectNumber: number,
+  assignee: string | null = null,
+): OrganizationProjectIssuePage {
+  throwGraphqlErrors(response.errors);
+  const organization = response.data?.organization;
+  if (!organization) {
+    throw new Error("GitHub Organizationを読み取れませんでした。ownerと権限を確認してください。");
+  }
+  const project = organization.projectV2;
+  if (!project) {
+    throw new Error(`GitHub Project #${projectNumber}が見つかりません。`);
+  }
+  const normalizedAssignee = assignee?.trim().toLowerCase();
+  const issues = (project.items?.nodes ?? []).flatMap((item) => {
+    const content = item.content;
+    if (content?.state?.toUpperCase() !== "OPEN") {
+      return [];
+    }
+    if (
+      normalizedAssignee &&
+      !content.assignees.nodes.some(
+        (candidate) => candidate.login.trim().toLowerCase() === normalizedAssignee,
+      )
+    ) {
+      return [];
+    }
+    return [{ ...content, projectItems: { nodes: [{ fieldValues: item.fieldValues }] } }];
+  });
+  return {
+    issues,
+    hasNextPage: project.items?.pageInfo?.hasNextPage ?? false,
+    endCursor: project.items?.pageInfo?.endCursor ?? null,
+  };
 }
 
 export function projectIssueSnapshot(issue: ProjectIssueNode): WorkItemSnapshot {
@@ -142,4 +241,14 @@ function labelPriority(labels: string[]): Priority | undefined {
   return labels
     .map((label) => projectPriority(label.startsWith("priority/") ? label.slice(9) : undefined))
     .find((value) => value !== undefined);
+}
+
+function throwGraphqlErrors(errors?: Array<{ message?: string }>): void {
+  const error = errors
+    ?.map((item) => item.message)
+    .filter(Boolean)
+    .join(" / ");
+  if (error) {
+    throw new Error(`GitHub Projectsを読み取れませんでした: ${error}`);
+  }
 }

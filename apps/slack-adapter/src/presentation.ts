@@ -18,7 +18,7 @@ export function workItemBlocks(item: HumanWorkItem): SlackBlock[] {
           type: "button",
           action_id: "ar.claim",
           text: { type: "plain_text", text: "自分が着手する" },
-          value: String(item.issueNumber),
+          value: item.url,
         }
       : {
           type: "button",

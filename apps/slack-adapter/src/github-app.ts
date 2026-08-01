@@ -3,6 +3,9 @@ import type { SlackAdapterDependencies } from "./app.ts";
 import { buildIssueCreateInput, parseIssueForm } from "./github-shared.ts";
 import type { IssueTemplateSchema } from "./issue-schema.ts";
 import {
+  ORGANIZATION_PROJECT_ITEMS_QUERY,
+  type OrganizationProjectItemsResponse,
+  organizationProjectIssuePage,
   PROJECT_ISSUES_QUERY,
   type ProjectIssueNode,
   type ProjectIssuesResponse,
@@ -26,6 +29,7 @@ interface GitHubAppConfig {
   repository: string;
   githubLogin: string;
   owners: string[];
+  project?: { owner: string; number: number } | null;
   apiBaseUrl?: string;
   fetch?: GitHubFetch;
   now?: () => number;
@@ -75,6 +79,7 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
   private readonly fetchImpl: GitHubFetch;
   private readonly now: () => number;
   private readonly resolveGitHubLogin: (slackUserId: string) => Promise<string>;
+  private readonly project: { owner: string; number: number } | null;
   private readonly templateCache = new Map<string, IssueTemplateSchema[]>();
   private token: CachedToken | null = null;
 
@@ -84,6 +89,7 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     this.fetchImpl = config.fetch ?? fetch;
     this.now = config.now ?? Date.now;
     this.resolveGitHubLogin = config.resolveGitHubLogin ?? (async () => this.config.githubLogin);
+    this.project = config.project ?? null;
   }
 
   async listRepositories(): Promise<string[]> {
@@ -141,25 +147,26 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
 
   async loadWorkItems(slackUserId: string): Promise<HumanWorkItem[]> {
     const githubLogin = await this.resolveGitHubLogin(slackUserId);
-    return (await this.projectIssues(20, githubLogin)).map((issue) =>
+    return (await this.workIssues(100, githubLogin)).map((issue) =>
       toHumanWorkItem(projectIssueSnapshot(issue), githubLogin),
     );
   }
 
   async loadCanvasItems(): Promise<HumanWorkItem[]> {
-    return (await this.projectIssues(50)).map((issue) =>
+    return (await this.workIssues(100)).map((issue) =>
       toHumanWorkItem(projectIssueSnapshot(issue), this.config.githubLogin),
     );
   }
 
-  async claimIssue(issueNumber: number, _slackUserId?: string): Promise<HumanWorkItem> {
-    const issue = await this.api<ApiIssue>(
-      `/repos/${this.config.repository}/issues/${issueNumber}`,
-      {
-        method: "PATCH",
-        body: JSON.stringify({ assignees: [this.config.githubLogin] }),
-      },
-    );
+  async claimIssue(
+    repository: string,
+    issueNumber: number,
+    _slackUserId?: string,
+  ): Promise<HumanWorkItem> {
+    const issue = await this.api<ApiIssue>(`/repos/${repository}/issues/${issueNumber}`, {
+      method: "PATCH",
+      body: JSON.stringify({ assignees: [this.config.githubLogin] }),
+    });
     return toHumanWorkItem(toSnapshot(issue), this.config.githubLogin);
   }
 
@@ -284,6 +291,38 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       }),
     });
     return projectIssueNodes(response);
+  }
+
+  private async workIssues(
+    limit: number,
+    assignee: string | null = null,
+  ): Promise<ProjectIssueNode[]> {
+    if (!this.project) {
+      return this.projectIssues(limit, assignee);
+    }
+    const issues: ProjectIssueNode[] = [];
+    let cursor: string | null = null;
+    do {
+      const response = await this.api<OrganizationProjectItemsResponse>("/graphql", {
+        method: "POST",
+        body: JSON.stringify({
+          query: ORGANIZATION_PROJECT_ITEMS_QUERY,
+          variables: {
+            owner: this.project.owner,
+            number: this.project.number,
+            limit,
+            cursor,
+          },
+        }),
+      });
+      const page = organizationProjectIssuePage(response, this.project.number, assignee);
+      issues.push(...page.issues);
+      if (page.hasNextPage && !page.endCursor) {
+        throw new Error("GitHub Projectの次ページ位置を読み取れませんでした。");
+      }
+      cursor = page.hasNextPage ? page.endCursor : null;
+    } while (cursor);
+    return issues;
   }
 
   private async paginate<T extends unknown[]>(path: string): Promise<T> {

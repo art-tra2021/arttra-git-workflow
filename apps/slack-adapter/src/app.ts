@@ -14,7 +14,7 @@ export interface SlackAdapterDependencies {
   listRepositories(): Promise<string[]>;
   listIssueTemplates(repository: string): Promise<IssueTemplateSchema[]>;
   loadWorkItems(slackUserId: string): Promise<HumanWorkItem[]>;
-  claimIssue(issueNumber: number, slackUserId: string): Promise<HumanWorkItem>;
+  claimIssue(repository: string, issueNumber: number, slackUserId: string): Promise<HumanWorkItem>;
   createIssue(command: CreateIssueCommand): Promise<CreatedIssue>;
   validateIssueAuthorization(command: CreateIssueCommand): Promise<void>;
 }
@@ -295,25 +295,35 @@ export function createSlackApp(
 
   app.action("ar.claim", async ({ ack, action, body, respond }) => {
     await ack();
-    if (action.type !== "button") {
+    if (action.type !== "button" || !action.value) {
       return;
     }
-    const issueNumber = Number(action.value);
-    if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) {
-      await respond({ response_type: "ephemeral", text: "Issue番号を読み取れませんでした。" });
+    const target = parseIssueUrl(action.value);
+    if (!target) {
+      await respond({ response_type: "ephemeral", text: "Issue URLを読み取れませんでした。" });
       return;
     }
 
-    const item = await dependencies.claimIssue(issueNumber, body.user.id);
+    const item = await dependencies.claimIssue(target.repository, target.number, body.user.id);
     await respond({
       response_type: "ephemeral",
-      text: `#${issueNumber}を担当に設定しました。`,
+      text: `${target.repository}#${target.number}を担当に設定しました。`,
       blocks: workItemBlocks(item),
       replace_original: false,
     });
   });
 
   return app;
+}
+
+export function parseIssueUrl(value: string): { repository: string; number: number } | null {
+  const match = value.match(
+    /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([1-9][0-9]*)\/?$/,
+  );
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+  return { repository: match[1], number: Number(match[2]) };
 }
 
 interface IssueModalMetadata {

@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { projectIssueNodes, projectIssueSnapshot } from "../src/project-read-model.ts";
+import {
+  organizationProjectIssueNodes,
+  organizationProjectIssuePage,
+  projectIssueNodes,
+  projectIssueSnapshot,
+} from "../src/project-read-model.ts";
 
 describe("GitHub Projects read model", () => {
   test("Projects V2の正本fieldを内部schemaへ変換する", () => {
@@ -60,9 +65,92 @@ describe("GitHub Projects read model", () => {
     });
   });
 
+  test("Organization ProjectのIssueだけを担当者で絞り込む", () => {
+    const issues = organizationProjectIssueNodes(
+      {
+        data: {
+          organization: {
+            projectV2: {
+              items: {
+                nodes: [
+                  projectItem(42, "alice", "OPEN", "In progress", "P1"),
+                  projectItem(43, "bob", "OPEN", "Ready", "P2"),
+                  projectItem(44, "alice", "CLOSED", "Done", "P3"),
+                  { content: null, fieldValues: { nodes: [] } },
+                ],
+              },
+            },
+          },
+        },
+      },
+      8,
+      "ALICE",
+    );
+
+    expect(issues).toHaveLength(1);
+    const [issue] = issues;
+    if (!issue) throw new Error("担当者で絞り込んだIssueがありません");
+    expect(projectIssueSnapshot(issue)).toMatchObject({
+      issue: { number: 42 },
+      project: { status: "in-progress", priority: "P1", owner: "alice" },
+    });
+  });
+
+  test("Organization Projectが存在しない場合は番号付きで案内する", () => {
+    expect(() =>
+      organizationProjectIssueNodes({ data: { organization: { projectV2: null } } }, 8),
+    ).toThrow("GitHub Project #8が見つかりません");
+  });
+
+  test("Organization Projectの次ページ位置を返す", () => {
+    const page = organizationProjectIssuePage(
+      {
+        data: {
+          organization: {
+            projectV2: {
+              items: {
+                nodes: [projectItem(42, "alice", "OPEN", "In progress", "P1")],
+                pageInfo: { hasNextPage: true, endCursor: "cursor-2" },
+              },
+            },
+          },
+        },
+      },
+      8,
+    );
+
+    expect(page.issues).toHaveLength(1);
+    expect(page).toMatchObject({ hasNextPage: true, endCursor: "cursor-2" });
+  });
+
   test("GraphQL errorを日本語の運用エラーへ変換する", () => {
     expect(() =>
       projectIssueNodes({ errors: [{ message: "Projects permission denied" }] }),
     ).toThrow("GitHub Projectsを読み取れませんでした: Projects permission denied");
   });
 });
+
+function projectItem(
+  number: number,
+  assignee: string,
+  state: string,
+  status: string,
+  priority: string,
+) {
+  return {
+    content: {
+      number,
+      title: `Issue ${number}`,
+      url: `https://github.com/art-tra2021/service/issues/${number}`,
+      state,
+      labels: { nodes: [{ name: "type/work" }] },
+      assignees: { nodes: [{ login: assignee }] },
+    },
+    fieldValues: {
+      nodes: [
+        { name: status, field: { name: "Status" } },
+        { name: priority, field: { name: "Priority" } },
+      ],
+    },
+  };
+}

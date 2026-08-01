@@ -36,7 +36,12 @@ mise run slack:dev
 
 ## Canvasを同期する
 
-`AR_SLACK_CANVAS_CHANNEL_ID`へ同期先channel IDを設定し、次を実行する。
+`AR_GITHUB_PROJECT_OWNER`と`AR_GITHUB_PROJECT_NUMBER`を設定すると、単一repositoryのIssue一覧ではなくOrganization Projectを正本として複数repositoryの項目を取得する。
+ART-TRAではownerを`art-tra2021`、Project番号を`8`とする。
+
+`AR_SLACK_CANVAS_CHANNEL_ID`へ同期先channel IDを設定する。
+すでにAppが作成したCanvasがある場合は`AR_SLACK_CANVAS_ID`も設定する。
+既存Canvas IDを指定した同期はchannel参加前でも実行でき、未指定時だけchannel Canvasを新規作成する。
 
 ```sh
 mise run slack:canvas
@@ -45,6 +50,18 @@ mise run slack:canvas
 初回はchannel Canvasを作成し、Canvas IDをGit管理外の`.state`へ保存する。
 2回目以降は同じCanvasを全体更新する。
 起動中のadapterでは、同期先channelから`/ar canvas sync`を実行しても同じ処理を呼び出せる。
+
+非公開channelで新規作成・通知を行うには、channel管理権限を持つ利用者が次を実行する。
+
+```text
+/invite @ART-TRA Work Lab
+```
+
+招待待ちの間は、Appが作成した単独CanvasをSlack UIからchannel tabへ追加し、`AR_SLACK_CANVAS_ID`で更新を継続できる。
+
+Issue modalの担当者と予定レビュワーはSlackのネイティブなメンバー選択を使う。
+検証済みGitHub user IDへ変換したうえで、担当者はAssignee、予定レビュワーはIssue内の`@login`と構造化ID、PR作成時はGitHubのReview Requestへ反映する。
+表示名、同名ユーザー、メールアドレスから対応を推測しない。
 
 `AR_SLACK_APPROVER_IDS`には、`merge/self`または`merge/emergency`を許可できるSlack user IDをカンマ区切りで設定する。
 申請者本人による承認を許すPL等は、`AR_SLACK_SELF_APPROVER_IDS`にも明示する。
