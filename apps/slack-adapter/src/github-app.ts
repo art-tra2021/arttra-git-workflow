@@ -2,6 +2,13 @@ import { createPrivateKey, sign } from "node:crypto";
 import type { SlackAdapterDependencies } from "./app.ts";
 import { buildIssueCreateInput, parseIssueForm } from "./github-shared.ts";
 import type { IssueTemplateSchema } from "./issue-schema.ts";
+import {
+  PROJECT_ISSUES_QUERY,
+  type ProjectIssueNode,
+  type ProjectIssuesResponse,
+  projectIssueNodes,
+  projectIssueSnapshot,
+} from "./project-read-model.ts";
 import { toHumanWorkItem } from "./read-model.ts";
 import type {
   GitHubReviewClient,
@@ -22,6 +29,7 @@ interface GitHubAppConfig {
   apiBaseUrl?: string;
   fetch?: GitHubFetch;
   now?: () => number;
+  resolveGitHubLogin?: (slackUserId: string) => Promise<string>;
 }
 
 interface InstallationToken {
@@ -66,6 +74,7 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
   private readonly apiBaseUrl: string;
   private readonly fetchImpl: GitHubFetch;
   private readonly now: () => number;
+  private readonly resolveGitHubLogin: (slackUserId: string) => Promise<string>;
   private readonly templateCache = new Map<string, IssueTemplateSchema[]>();
   private token: CachedToken | null = null;
 
@@ -74,6 +83,7 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     this.apiBaseUrl = (config.apiBaseUrl ?? "https://api.github.com").replace(/\/$/, "");
     this.fetchImpl = config.fetch ?? fetch;
     this.now = config.now ?? Date.now;
+    this.resolveGitHubLogin = config.resolveGitHubLogin ?? (async () => this.config.githubLogin);
   }
 
   async listRepositories(): Promise<string[]> {
@@ -129,15 +139,16 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     return templates;
   }
 
-  async loadWorkItems(_slackUserId?: string): Promise<HumanWorkItem[]> {
-    return (await this.listIssues(20, this.config.githubLogin)).map((issue) =>
-      toHumanWorkItem(toSnapshot(issue), this.config.githubLogin),
+  async loadWorkItems(slackUserId: string): Promise<HumanWorkItem[]> {
+    const githubLogin = await this.resolveGitHubLogin(slackUserId);
+    return (await this.projectIssues(20, githubLogin)).map((issue) =>
+      toHumanWorkItem(projectIssueSnapshot(issue), githubLogin),
     );
   }
 
   async loadCanvasItems(): Promise<HumanWorkItem[]> {
-    return (await this.listIssues(50)).map((issue) =>
-      toHumanWorkItem(toSnapshot(issue), this.config.githubLogin),
+    return (await this.projectIssues(50)).map((issue) =>
+      toHumanWorkItem(projectIssueSnapshot(issue), this.config.githubLogin),
     );
   }
 
@@ -259,15 +270,20 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     });
   }
 
-  private async listIssues(limit: number, assignee?: string): Promise<ApiIssue[]> {
-    const query = new URLSearchParams({ state: "open", per_page: String(limit) });
-    if (assignee) {
-      query.set("assignee", assignee);
-    }
-    const issues = await this.api<ApiIssue[]>(
-      `/repos/${this.config.repository}/issues?${query.toString()}`,
-    );
-    return issues.filter((issue) => issue.pull_request === undefined);
+  private async projectIssues(
+    limit: number,
+    assignee: string | null = null,
+  ): Promise<ProjectIssueNode[]> {
+    const [owner, name] = this.config.repository.split("/");
+    if (!owner || !name) throw new Error(`repository名が不正です: ${this.config.repository}`);
+    const response = await this.api<ProjectIssuesResponse>("/graphql", {
+      method: "POST",
+      body: JSON.stringify({
+        query: PROJECT_ISSUES_QUERY,
+        variables: { owner, name, limit, assignee },
+      }),
+    });
+    return projectIssueNodes(response);
   }
 
   private async paginate<T extends unknown[]>(path: string): Promise<T> {

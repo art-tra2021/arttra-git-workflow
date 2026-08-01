@@ -98,6 +98,8 @@ GitHub AppのClient IDは`GITHUB_OAUTH_CLIENT_ID`へ、公開HTTPS URLは`AR_PUB
 GitHub Appのcallback URLは`AR_PUBLIC_BASE_URL/github/callback`である。
 private keyは改行を含むPEM文字列、または改行を`\\n`に置換したSecret Managerの値を受け付ける。
 GitHub Appには対象repositoryに対するMetadata read、Contents read、Issues read/writeを与える。
+ProjectsのStatus、Priority、Target dateを読むため、Organization permissionsのProjects readも与える。
+ローカルの`gh` backendでは`gh auth refresh -s read:project`で同等のscopeを追加する。
 PR reviewer自動設定にはPull requests read/write、Ruleset確認にはAdministration readも与える。
 Webhook URLは`AR_PUBLIC_BASE_URL/github/events`とし、`pull_request`と`pull_request_review`を購読する。
 `GITHUB_WEBHOOK_SECRET`でGitHub署名を検証し、生payloadをSlackへ表示しない。

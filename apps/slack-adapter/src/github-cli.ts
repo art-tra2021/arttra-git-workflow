@@ -3,6 +3,12 @@ import { promisify } from "node:util";
 import type { SlackAdapterDependencies } from "./app.ts";
 import { buildIssueCreateInput, parseIssueForm } from "./github-shared.ts";
 import type { IssueTemplateSchema } from "./issue-schema.ts";
+import {
+  PROJECT_ISSUES_QUERY,
+  type ProjectIssuesResponse,
+  projectIssueNodes,
+  projectIssueSnapshot,
+} from "./project-read-model.ts";
 import { toHumanWorkItem } from "./read-model.ts";
 import type { CreatedIssue, CreateIssueCommand, HumanWorkItem, WorkItemSnapshot } from "./types.ts";
 
@@ -102,37 +108,14 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
   }
 
   async loadWorkItems(): Promise<HumanWorkItem[]> {
-    const issues = await ghJson<GhIssue[]>([
-      "issue",
-      "list",
-      "--repo",
-      this.repository,
-      "--assignee",
-      this.githubLogin,
-      "--state",
-      "open",
-      "--limit",
-      "20",
-      "--json",
-      "number,title,url,labels,assignees",
-    ]);
-    return issues.map((issue) => toHumanWorkItem(toSnapshot(issue), this.githubLogin));
+    const issues = await this.projectIssues(20, this.githubLogin);
+    return issues.map((issue) => toHumanWorkItem(projectIssueSnapshot(issue), this.githubLogin));
   }
 
   async loadCanvasItems(): Promise<HumanWorkItem[]> {
-    const issues = await ghJson<GhIssue[]>([
-      "issue",
-      "list",
-      "--repo",
-      this.repository,
-      "--state",
-      "open",
-      "--limit",
-      "50",
-      "--json",
-      "number,title,url,labels,assignees",
-    ]);
-    return issues.map((issue) => toHumanWorkItem(toSnapshot(issue), this.githubLogin));
+    return (await this.projectIssues(50)).map((issue) =>
+      toHumanWorkItem(projectIssueSnapshot(issue), this.githubLogin),
+    );
   }
 
   async claimIssue(issueNumber: number): Promise<HumanWorkItem> {
@@ -208,6 +191,26 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
     if (!template) {
       throw new Error(`Issue templateが見つかりません: ${command.template}`);
     }
+  }
+
+  private async projectIssues(limit: number, assignee: string | null = null) {
+    const [owner, name] = this.repository.split("/");
+    if (!owner || !name) throw new Error(`repository名が不正です: ${this.repository}`);
+    return projectIssueNodes(
+      await ghJson<ProjectIssuesResponse>([
+        "api",
+        "graphql",
+        "-f",
+        `query=${PROJECT_ISSUES_QUERY}`,
+        "-F",
+        `owner=${owner}`,
+        "-F",
+        `name=${name}`,
+        "-F",
+        `limit=${limit}`,
+        ...(assignee ? ["-F", `assignee=${assignee}`] : []),
+      ]),
+    );
   }
 }
 

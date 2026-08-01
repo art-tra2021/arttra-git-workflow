@@ -124,6 +124,54 @@ describe("GitHub App adapter", () => {
     );
   });
 
+  test("検証済みGitHub loginでProjectsの自分の仕事を絞り込む", async () => {
+    let graphqlBody: unknown;
+    const client = new GitHubAppDependencies({
+      appId: "12345",
+      installationId: "99",
+      privateKey,
+      repository: "rozwer/arttra-git-lab",
+      githubLogin: "service-account",
+      owners: ["rozwer"],
+      apiBaseUrl: "https://github.example/api/v3",
+      fetch: async (input, init) => {
+        if (input.endsWith("/app/installations/99/access_tokens")) {
+          return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
+        }
+        if (input.endsWith("/graphql")) {
+          graphqlBody = JSON.parse(String(init?.body));
+          return json({
+            data: {
+              repository: {
+                issues: {
+                  nodes: [projectIssue(42, "alice", "In progress", "P1")],
+                },
+              },
+            },
+          });
+        }
+        throw new Error(`予期しないrequest: ${input}`);
+      },
+      now: () => NOW,
+      resolveGitHubLogin: async (slackUserId) => {
+        expect(slackUserId).toBe("U_ALICE");
+        return "alice";
+      },
+    });
+
+    expect(await client.loadWorkItems("U_ALICE")).toEqual([
+      expect.objectContaining({
+        issueNumber: 42,
+        status: "in-progress",
+        priority: "P1",
+        owner: "alice",
+      }),
+    ]);
+    expect(graphqlBody).toMatchObject({
+      variables: { owner: "rozwer", name: "arttra-git-lab", limit: 20, assignee: "alice" },
+    });
+  });
+
   test("PR、linked Issue、CODEOWNERS、Rulesetを再取得してreviewerをrequestする", async () => {
     let requested: unknown;
     const client = dependencies(async (input, init) => {
@@ -223,4 +271,26 @@ body:
         - 通常レビュー（既定）
         - 自分でマージ可
 `;
+}
+
+function projectIssue(number: number, assignee: string, status: string, priority: string) {
+  return {
+    number,
+    title: `Issue ${number}`,
+    url: `https://github.example/issues/${number}`,
+    labels: { nodes: [{ name: "type/work" }] },
+    assignees: { nodes: [{ login: assignee }] },
+    projectItems: {
+      nodes: [
+        {
+          fieldValues: {
+            nodes: [
+              { name: status, field: { name: "Status" } },
+              { name: priority, field: { name: "Priority" } },
+            ],
+          },
+        },
+      ],
+    },
+  };
 }

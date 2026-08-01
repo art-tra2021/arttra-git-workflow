@@ -39,6 +39,15 @@ const githubBackend = (process.env.AR_GITHUB_BACKEND ?? "cli").trim().toLowerCas
 if (githubBackend !== "cli" && githubBackend !== "app") {
   throw new Error("AR_GITHUB_BACKENDはcliまたはappを指定してください。");
 }
+const store = createStateStoreFromEnvironment();
+const identityService = new GitHubIdentityService({
+  clientId: required("GITHUB_OAUTH_CLIENT_ID"),
+  clientSecret: required("GITHUB_OAUTH_CLIENT_SECRET"),
+  stateSecret: required("AR_OAUTH_STATE_SECRET"),
+  publicBaseUrl: required("AR_PUBLIC_BASE_URL"),
+  store,
+});
+const slackTeamId = required("AR_SLACK_TEAM_ID");
 const dependencies =
   githubBackend === "app"
     ? new GitHubAppDependencies({
@@ -48,17 +57,18 @@ const dependencies =
         repository,
         githubLogin,
         owners,
+        resolveGitHubLogin: async (slackUserId) => {
+          const identity = await identityService.get(slackTeamId, slackUserId);
+          if (!identity) {
+            throw new Error(
+              "GitHubアカウントが未連携です。Slackで `/ar connect github` を実行してください。",
+            );
+          }
+          return identity.githubLogin;
+        },
       })
     : new GitHubCliDependencies(repository, githubLogin, owners);
-const store = createStateStoreFromEnvironment();
 const slackClient = new WebClient(botToken);
-const identityService = new GitHubIdentityService({
-  clientId: required("GITHUB_OAUTH_CLIENT_ID"),
-  clientSecret: required("GITHUB_OAUTH_CLIENT_SECRET"),
-  stateSecret: required("AR_OAUTH_STATE_SECRET"),
-  publicBaseUrl: required("AR_PUBLIC_BASE_URL"),
-  store,
-});
 const approvalService = new IssueApprovalService(store, {
   ttlMilliseconds:
     positiveInteger(process.env.AR_APPROVAL_TTL_MINUTES ?? "1440", "AR_APPROVAL_TTL_MINUTES") *
@@ -85,7 +95,7 @@ const reviewService =
         store,
         new SlackReviewNotifier(slackClient, required("AR_SLACK_REVIEW_CHANNEL_ID")),
         {
-          slackTeamId: required("AR_SLACK_TEAM_ID"),
+          slackTeamId,
           reminderMilliseconds:
             positiveInteger(
               process.env.AR_REVIEW_REMINDER_MINUTES ?? "1440",
