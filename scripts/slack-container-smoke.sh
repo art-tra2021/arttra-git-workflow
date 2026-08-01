@@ -38,7 +38,7 @@ docker run --detach --rm \
 ar_host_port="$(docker port "${ar_container_name}" 8080/tcp | sed -E 's/.*:([0-9]+)$/\1/')"
 ar_ready=false
 for _ in {1..30}; do
-	if curl --fail --silent "http://127.0.0.1:${ar_host_port}/healthz" | jq -e '.ok == true and .schemaVersion == 1' >/dev/null; then
+	if curl --fail --silent "http://127.0.0.1:${ar_host_port}/health" | jq -e '.ok == true and .schemaVersion == 1' >/dev/null; then
 		ar_ready=true
 		break
 	fi

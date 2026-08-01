@@ -101,14 +101,15 @@ mise run slack:approval -- <approval-id>
 本番では`AR_SLACK_TRANSPORT=http`を指定し、`/slack/events`でSlash Commandとinteractionを受信する。
 `AR_GITHUB_BACKEND=app`を指定し、GitHub Appのinstallation token経由でGitHub REST APIを利用する。
 production imageに`gh`は含めず、個人のGitHub tokenにも依存しない。
-`/healthz`はCloud Runのstartup、liveness、readiness確認に利用できる。
+`/health`はCloud Runのstartup、liveness、readiness確認に利用できる。
+Cloud Runでは一部の末尾`z`パスが予約されるため、health endpointに`/healthz`を使わない。
 Slackのrequest署名は`SLACK_SIGNING_SECRET`で検証する。
 
 ```sh
 mise run slack:container
 ```
 
-このtaskは非root userで動くproduction imageをbuildし、実際にcontainerを起動して`/healthz`を検証する。
+このtaskは非root userで動くproduction imageをbuildし、実際にcontainerを起動して`/health`を検証する。
 imageへ`.env`、local state、AI設定、文書を含めない。
 
 本番の状態保存には`AR_STATE_BACKEND=firestore`を指定する。
