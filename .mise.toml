@@ -98,6 +98,11 @@ description = "Issue承認のversion付きJSON statusを取得する"
 depends = ["slack:install"]
 run = "bun run --cwd apps/slack-adapter approval:status --"
 
+[tasks."slack:review"]
+description = "PR review依頼の人間向けread modelをJSONで取得する"
+depends = ["slack:install"]
+run = "bun run --cwd apps/slack-adapter review:status --"
+
 [tasks."slack:container"]
 description = "Cloud Run用Slack adapter imageをbuildする"
 run = """

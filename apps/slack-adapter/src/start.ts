@@ -1,12 +1,24 @@
 import { ExpressReceiver } from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
+import { raw } from "express";
 import { createSlackApp } from "./app.ts";
 import { IssueApprovalService } from "./approval.ts";
 import type { CanvasClient } from "./canvas.ts";
 import { CanvasSyncService } from "./canvas-service.ts";
 import { GitHubAppDependencies } from "./github-app.ts";
 import { GitHubCliDependencies } from "./github-cli.ts";
+import { parseGitHubWebhookJob, verifyGitHubWebhookSignature } from "./github-webhook.ts";
+import { GitHubWebhookProcessor } from "./github-webhook-processor.ts";
 import { GitHubIdentityService } from "./identity-service.ts";
+import {
+  CloudTasksGitHubJobQueue,
+  type GitHubJobQueue,
+  type GitHubWebhookJob,
+  LocalGitHubJobQueue,
+  verifyJobSignature,
+} from "./job-queue.ts";
+import { PullRequestReviewService } from "./review-service.ts";
+import { SlackReviewNotifier } from "./slack-review-notifier.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
 
 const transport = (process.env.AR_SLACK_TRANSPORT ?? "socket").trim().toLowerCase();
@@ -39,6 +51,7 @@ const dependencies =
       })
     : new GitHubCliDependencies(repository, githubLogin, owners);
 const store = createStateStoreFromEnvironment();
+const slackClient = new WebClient(botToken);
 const identityService = new GitHubIdentityService({
   clientId: required("GITHUB_OAUTH_CLIENT_ID"),
   clientSecret: required("GITHUB_OAUTH_CLIENT_SECRET"),
@@ -52,7 +65,7 @@ const approvalService = new IssueApprovalService(store, {
     60_000,
 });
 const canvasService = new CanvasSyncService(
-  new WebClient(botToken) as unknown as CanvasClient,
+  slackClient as unknown as CanvasClient,
   dependencies,
   store,
 );
@@ -64,6 +77,27 @@ const receiver =
         processBeforeResponse: false,
       })
     : undefined;
+const reviewService =
+  dependencies instanceof GitHubAppDependencies
+    ? new PullRequestReviewService(
+        dependencies,
+        identityService,
+        store,
+        new SlackReviewNotifier(slackClient, required("AR_SLACK_REVIEW_CHANNEL_ID")),
+        {
+          slackTeamId: required("AR_SLACK_TEAM_ID"),
+          reminderMilliseconds:
+            positiveInteger(
+              process.env.AR_REVIEW_REMINDER_MINUTES ?? "1440",
+              "AR_REVIEW_REMINDER_MINUTES",
+            ) * 60_000,
+        },
+      )
+    : null;
+const webhookProcessor = reviewService ? new GitHubWebhookProcessor(reviewService, store) : null;
+const jobSecret = strongSecret("AR_JOB_SECRET");
+const githubWebhookSecret = strongSecret("GITHUB_WEBHOOK_SECRET");
+const jobQueue = createJobQueue(webhookProcessor, jobSecret);
 
 receiver?.router.get("/healthz", (_request, response) => {
   response.status(200).json({ ok: true, schemaVersion: 1 });
@@ -91,6 +125,90 @@ receiver?.router.get("/github/callback", async (request, response) => {
       .send(error instanceof Error ? error.message : "GitHub連携に失敗しました。");
   }
 });
+
+receiver?.router.post(
+  "/github/events",
+  raw({ type: "application/json", limit: "2mb" }),
+  async (request, response) => {
+    const body = Buffer.isBuffer(request.body) ? request.body : Buffer.from("");
+    const signature = request.header("x-hub-signature-256") ?? "";
+    if (!verifyGitHubWebhookSignature(body, signature, githubWebhookSecret)) {
+      response.status(401).json({ ok: false, error: "invalid_signature" });
+      return;
+    }
+    let job: GitHubWebhookJob;
+    try {
+      job = parseGitHubWebhookJob(
+        body,
+        request.header("x-github-delivery") ?? "",
+        request.header("x-github-event") ?? "",
+      );
+    } catch (error) {
+      response.status(400).json({
+        ok: false,
+        error: error instanceof Error ? error.message : "GitHub webhookを受理できませんでした。",
+      });
+      return;
+    }
+    try {
+      const created = await jobQueue.enqueue(job);
+      response.status(202).json({ ok: true, queued: created, schemaVersion: 1 });
+    } catch {
+      response.status(503).json({ ok: false, error: "queue_unavailable" });
+    }
+  },
+);
+
+receiver?.router.post(
+  "/internal/review-reminders",
+  raw({ type: "application/json", limit: "1kb" }),
+  async (request, response) => {
+    if (!reviewService) {
+      response.status(503).json({ ok: false, error: "github_app_required" });
+      return;
+    }
+    const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
+    if (!verifyJobSignature(body, request.header("x-ar-job-signature") ?? "", jobSecret)) {
+      response.status(401).json({ ok: false, error: "invalid_job_signature" });
+      return;
+    }
+    try {
+      const command = JSON.parse(body) as { schemaVersion?: number; kind?: string };
+      if (command.schemaVersion !== 1 || command.kind !== "review.remind") {
+        response.status(400).json({ ok: false, error: "invalid_reminder_command" });
+        return;
+      }
+      const processed = await reviewService.remindPending();
+      response.status(200).json({ ok: true, processed, schemaVersion: 1 });
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "Review再通知処理に失敗しました。");
+      response.status(500).json({ ok: false, error: "reminder_failed" });
+    }
+  },
+);
+
+receiver?.router.post(
+  "/internal/github-events",
+  raw({ type: "application/json", limit: "2mb" }),
+  async (request, response) => {
+    if (!webhookProcessor) {
+      response.status(503).json({ ok: false, error: "github_app_required" });
+      return;
+    }
+    const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
+    if (!verifyJobSignature(body, request.header("x-ar-job-signature") ?? "", jobSecret)) {
+      response.status(401).json({ ok: false, error: "invalid_job_signature" });
+      return;
+    }
+    try {
+      await webhookProcessor.process(parseQueuedJob(body));
+      response.status(200).json({ ok: true, schemaVersion: 1 });
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "GitHub webhook jobに失敗しました。");
+      response.status(500).json({ ok: false, error: "job_failed" });
+    }
+  },
+);
 
 const app = createSlackApp(dependencies, {
   token: botToken,
@@ -131,6 +249,14 @@ function csv(name: string): string[] {
     .filter(Boolean);
 }
 
+function strongSecret(name: string): string {
+  const value = required(name);
+  if (value.length < 32) {
+    throw new Error(`${name}は32文字以上で設定してください。`);
+  }
+  return value;
+}
+
 function positiveInteger(value: string, name: string): number {
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number < 1 || number > 65_535) {
@@ -144,4 +270,45 @@ function defined<T>(value: T | undefined, name: string): T {
     throw new Error(`${name}を初期化できませんでした。`);
   }
   return value;
+}
+
+function createJobQueue(
+  processor: GitHubWebhookProcessor | null,
+  jobSecret: string,
+): GitHubJobQueue {
+  const backend = (process.env.AR_JOB_QUEUE ?? "local").trim().toLowerCase();
+  if (backend === "local") {
+    if (!processor) {
+      return new LocalGitHubJobQueue(async () => {
+        throw new Error("GitHub App backendが必要です。");
+      });
+    }
+    return new LocalGitHubJobQueue((job) => processor.process(job));
+  }
+  if (backend === "cloud-tasks") {
+    return new CloudTasksGitHubJobQueue({
+      projectId: required("AR_GCP_PROJECT_ID"),
+      location: required("AR_CLOUD_TASKS_LOCATION"),
+      queue: required("AR_CLOUD_TASKS_QUEUE"),
+      publicBaseUrl: required("AR_PUBLIC_BASE_URL"),
+      jobSecret,
+      ...(process.env.AR_CLOUD_TASKS_SERVICE_ACCOUNT?.trim()
+        ? { serviceAccountEmail: process.env.AR_CLOUD_TASKS_SERVICE_ACCOUNT.trim() }
+        : {}),
+    });
+  }
+  throw new Error("AR_JOB_QUEUEはlocalまたはcloud-tasksを指定してください。");
+}
+
+function parseQueuedJob(body: string): GitHubWebhookJob {
+  const parsed = JSON.parse(body) as Partial<GitHubWebhookJob>;
+  if (
+    parsed.schemaVersion !== 1 ||
+    typeof parsed.deliveryId !== "string" ||
+    typeof parsed.event !== "string" ||
+    parsed.payload === undefined
+  ) {
+    throw new Error("GitHub webhook jobの形式が不正です。");
+  }
+  return parsed as GitHubWebhookJob;
 }

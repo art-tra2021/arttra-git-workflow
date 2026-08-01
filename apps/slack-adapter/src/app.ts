@@ -148,6 +148,10 @@ export function createSlackApp(
     await ack();
   });
 
+  app.action("ar.review.open", async ({ ack }) => {
+    await ack();
+  });
+
   app.view("ar.issue.repository", async ({ ack, view }) => {
     const metadata = parseMetadata(view.private_metadata);
     const repository = selectedValue(view.state.values, "repository", "value");

@@ -24,16 +24,40 @@ docker run --detach --rm \
 	--env GITHUB_OAUTH_CLIENT_SECRET=smoke \
 	--env AR_OAUTH_STATE_SECRET=smoke-state-secret-at-least-32-characters \
 	--env AR_PUBLIC_BASE_URL=http://localhost:8080 \
+	--env GITHUB_WEBHOOK_SECRET=smoke-webhook-secret-at-least-32-characters \
+	--env AR_JOB_SECRET=smoke-job-secret-at-least-32-characters \
+	--env AR_JOB_QUEUE=local \
+	--env AR_GCP_PROJECT_ID=smoke \
+	--env AR_CLOUD_TASKS_LOCATION=asia-northeast1 \
+	--env AR_CLOUD_TASKS_QUEUE=smoke \
+	--env AR_SLACK_TEAM_ID=T123 \
+	--env AR_SLACK_REVIEW_CHANNEL_ID=C123 \
 	--env AR_STATE_BACKEND=local \
 	arttra-slack-adapter:test >/dev/null
 
 ar_host_port="$(docker port "${ar_container_name}" 8080/tcp | sed -E 's/.*:([0-9]+)$/\1/')"
+ar_ready=false
 for _ in {1..30}; do
 	if curl --fail --silent "http://127.0.0.1:${ar_host_port}/healthz" | jq -e '.ok == true and .schemaVersion == 1' >/dev/null; then
-		exit 0
+		ar_ready=true
+		break
 	fi
 	sleep 1
 done
 
-docker logs "${ar_container_name}"
-exit 1
+if [[ "${ar_ready}" != "true" ]]; then
+	docker logs "${ar_container_name}"
+	exit 1
+fi
+
+curl --fail --silent \
+	--request POST \
+	--header "content-type: application/json" \
+	--header "x-hub-signature-256: sha256=4f81f3d922b57a89f4d64e58b8ee9dc28d78618426cc37e3d5d359e187e43569" \
+	--header "x-github-delivery: smoke-delivery" \
+	--header "x-github-event: ping" \
+	--data-binary '{"zen":"smoke"}' \
+	"http://127.0.0.1:${ar_host_port}/github/events" |
+	jq -e '.ok == true and .queued == true and .schemaVersion == 1' >/dev/null
+
+exit 0

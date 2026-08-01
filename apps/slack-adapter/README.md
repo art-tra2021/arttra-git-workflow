@@ -98,6 +98,26 @@ GitHub AppのClient IDは`GITHUB_OAUTH_CLIENT_ID`へ、公開HTTPS URLは`AR_PUB
 GitHub Appのcallback URLは`AR_PUBLIC_BASE_URL/github/callback`である。
 private keyは改行を含むPEM文字列、または改行を`\\n`に置換したSecret Managerの値を受け付ける。
 GitHub Appには対象repositoryに対するMetadata read、Contents read、Issues read/writeを与える。
+PR reviewer自動設定にはPull requests read/write、Ruleset確認にはAdministration readも与える。
+Webhook URLは`AR_PUBLIC_BASE_URL/github/events`とし、`pull_request`と`pull_request_review`を購読する。
+`GITHUB_WEBHOOK_SECRET`でGitHub署名を検証し、生payloadをSlackへ表示しない。
+
+本番gatewayは検証済みwebhookをCloud Tasksへ積み、`/internal/github-events`のworker処理と分離する。
+`AR_JOB_QUEUE=cloud-tasks`を指定し、project、location、queue、任意のOIDC service accountを設定する。
+job本文は`AR_JOB_SECRET`でも署名し、GitHub delivery IDをCloud Tasks task IDに利用して重複投入を抑止する。
+
+PR作成・更新時は、linked Issueのversion付き予定reviewer、変更fileに最後に一致するCODEOWNERS、active Rulesetの必要承認数をGitHubから再取得する。
+GitHubへ正式なuser/team review requestを設定した後、検証済みaccount mappingを持つ利用者だけSlackでmentionする。
+通知にはPR、選定理由、目標日、必要承認数、次の操作を表示する。
+同じreviewer・理由・期限では既定24時間再通知せず、未対応が続く場合だけ再通知する。
+Cloud Schedulerは固定JSON `{"schemaVersion":1,"kind":"review.remind"}` を`/internal/review-reminders`へ定期送信する。
+本文に対する`X-Ar-Job-Signature`を設定し、workerは保存済みread modelのPRだけをGitHubから再取得して未対応を判定する。
+
+AIはSlackと同じread modelを次で取得できる。
+
+```sh
+mise run slack:review -- owner/repository#123
+```
 
 Cloud Runへのdeploy pipelineは各projectのCDが担当する。
 本repositoryはcontainer、health contract、環境変数、永続化境界までを提供する。

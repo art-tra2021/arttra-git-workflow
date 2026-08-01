@@ -123,6 +123,66 @@ describe("GitHub App adapter", () => {
       '<!-- ar:reviewers:v1 [{"id":456,"login":"reviewer"}] -->',
     );
   });
+
+  test("PR、linked Issue、CODEOWNERS、Rulesetを再取得してreviewerをrequestする", async () => {
+    let requested: unknown;
+    const client = dependencies(async (input, init) => {
+      if (input.endsWith("/app/installations/99/access_tokens")) {
+        return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
+      }
+      if (input.endsWith("/repos/rozwer/arttra-git-lab/pulls/28")) {
+        return json({
+          number: 28,
+          title: "review automation",
+          html_url: "https://github.example/pull/28",
+          body: "Closes #29",
+          draft: false,
+          state: "open",
+          user: { login: "author" },
+          head: { sha: "abc123" },
+          requested_reviewers: [],
+          requested_teams: [],
+        });
+      }
+      if (input.includes("/pulls/28/files?")) return json([{ filename: "src/app.ts" }]);
+      if (input.includes("/pulls/28/reviews?")) {
+        return json([{ state: "APPROVED", user: { login: "finished" } }]);
+      }
+      if (input.endsWith("/issues/29")) {
+        return json({
+          number: 29,
+          body: "issue body",
+          html_url: "https://github.example/issues/29",
+        });
+      }
+      if (input.endsWith("/contents/.github/CODEOWNERS")) return new Response("* @alice");
+      if (input.includes("/rulesets?")) return json([{ id: 7, enforcement: "active" }]);
+      if (input.endsWith("/rulesets/7")) {
+        return json({
+          rules: [{ type: "pull_request", parameters: { required_approving_review_count: 2 } }],
+        });
+      }
+      if (input.endsWith("/users/alice")) return json({ id: 101, login: "alice" });
+      if (input.endsWith("/pulls/28/requested_reviewers")) {
+        requested = JSON.parse(String(init?.body));
+        return json({});
+      }
+      throw new Error(`予期しないrequest: ${input}`);
+    });
+
+    const context = await client.loadPullRequestReviewContext("rozwer/arttra-git-lab", 28);
+    expect(context).toMatchObject({
+      number: 28,
+      files: ["src/app.ts"],
+      requiredApprovals: 2,
+      approvedReviewerLogins: ["finished"],
+      linkedIssues: [{ number: 29, body: "issue body" }],
+      codeowners: "* @alice",
+    });
+    expect(await client.resolveGitHubUsers(["alice"])).toEqual([{ id: 101, login: "alice" }]);
+    await client.requestPullRequestReviewers("rozwer/arttra-git-lab", 28, ["alice"], ["frontend"]);
+    expect(requested).toEqual({ reviewers: ["alice"], team_reviewers: ["frontend"] });
+  });
 });
 
 function dependencies(fetchImpl: GitHubFetch): GitHubAppDependencies {

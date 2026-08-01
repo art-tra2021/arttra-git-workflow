@@ -3,6 +3,11 @@ import type { SlackAdapterDependencies } from "./app.ts";
 import { buildIssueCreateInput, parseIssueForm } from "./github-shared.ts";
 import type { IssueTemplateSchema } from "./issue-schema.ts";
 import { toHumanWorkItem } from "./read-model.ts";
+import type {
+  GitHubReviewClient,
+  GitHubReviewerIdentity,
+  PullRequestReviewContext,
+} from "./review-types.ts";
 import type { CreatedIssue, CreateIssueCommand, HumanWorkItem, WorkItemSnapshot } from "./types.ts";
 
 export type GitHubFetch = (input: string, init?: RequestInit) => Promise<Response>;
@@ -51,7 +56,7 @@ interface CachedToken {
   permissions: Record<string, string>;
 }
 
-export class GitHubAppDependencies implements SlackAdapterDependencies {
+export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubReviewClient {
   private readonly config: Required<
     Pick<
       GitHubAppConfig,
@@ -180,6 +185,80 @@ export class GitHubAppDependencies implements SlackAdapterDependencies {
     }
   }
 
+  async loadPullRequestReviewContext(
+    repository: string,
+    pullRequestNumber: number,
+  ): Promise<PullRequestReviewContext> {
+    const pullRequest = await this.api<{
+      number: number;
+      title: string;
+      html_url: string;
+      body: string | null;
+      draft: boolean;
+      state: "open" | "closed";
+      user: { login: string };
+      head: { sha: string };
+      requested_reviewers: Array<{ login: string }>;
+      requested_teams: Array<{ slug: string }>;
+    }>(`/repos/${repository}/pulls/${pullRequestNumber}`);
+    const [files, reviews, linkedIssues, codeowners, requiredApprovals] = await Promise.all([
+      this.paginate<Array<{ filename: string }>>(
+        `/repos/${repository}/pulls/${pullRequestNumber}/files`,
+      ),
+      this.paginate<Array<{ state: string; user: { login: string } }>>(
+        `/repos/${repository}/pulls/${pullRequestNumber}/reviews`,
+      ),
+      this.loadLinkedIssues(repository, pullRequest.body ?? ""),
+      this.loadCodeowners(repository),
+      this.loadRequiredApprovals(repository),
+    ]);
+    return {
+      schemaVersion: 1,
+      repository,
+      number: pullRequest.number,
+      title: pullRequest.title,
+      url: pullRequest.html_url,
+      authorLogin: pullRequest.user.login,
+      headSha: pullRequest.head.sha,
+      draft: pullRequest.draft,
+      state: pullRequest.state,
+      body: pullRequest.body ?? "",
+      files: files.map((file) => file.filename),
+      linkedIssues,
+      codeowners,
+      requiredApprovals,
+      requestedReviewerLogins: pullRequest.requested_reviewers.map((reviewer) => reviewer.login),
+      requestedTeamSlugs: pullRequest.requested_teams.map((team) => team.slug),
+      approvedReviewerLogins: reviews
+        .filter((review) => review.state.toUpperCase() === "APPROVED")
+        .map((review) => review.user.login),
+    };
+  }
+
+  async resolveGitHubUsers(logins: string[]): Promise<GitHubReviewerIdentity[]> {
+    return Promise.all(
+      [...new Set(logins)].map(async (login) => {
+        const user = await this.api<{ id: number; login: string }>(`/users/${login}`);
+        return { id: user.id, login: user.login };
+      }),
+    );
+  }
+
+  async requestPullRequestReviewers(
+    repository: string,
+    pullRequestNumber: number,
+    reviewerLogins: string[],
+    teamSlugs: string[],
+  ): Promise<void> {
+    if (reviewerLogins.length === 0 && teamSlugs.length === 0) {
+      return;
+    }
+    await this.api(`/repos/${repository}/pulls/${pullRequestNumber}/requested_reviewers`, {
+      method: "POST",
+      body: JSON.stringify({ reviewers: reviewerLogins, team_reviewers: teamSlugs }),
+    });
+  }
+
   private async listIssues(limit: number, assignee?: string): Promise<ApiIssue[]> {
     const query = new URLSearchParams({ state: "open", per_page: String(limit) });
     if (assignee) {
@@ -189,6 +268,87 @@ export class GitHubAppDependencies implements SlackAdapterDependencies {
       `/repos/${this.config.repository}/issues?${query.toString()}`,
     );
     return issues.filter((issue) => issue.pull_request === undefined);
+  }
+
+  private async paginate<T extends unknown[]>(path: string): Promise<T> {
+    const results: unknown[] = [];
+    for (let page = 1; ; page += 1) {
+      const separator = path.includes("?") ? "&" : "?";
+      const pageResults = await this.api<unknown[]>(`${path}${separator}per_page=100&page=${page}`);
+      results.push(...pageResults);
+      if (pageResults.length < 100) {
+        return results as T;
+      }
+    }
+  }
+
+  private async loadLinkedIssues(
+    repository: string,
+    pullRequestBody: string,
+  ): Promise<Array<{ number: number; body: string; url: string }>> {
+    const numbers = [...pullRequestBody.matchAll(/(?:^|\s)#([1-9][0-9]*)\b/gm)]
+      .map((match) => Number(match[1]))
+      .filter((number, index, values) => values.indexOf(number) === index)
+      .slice(0, 10);
+    return Promise.all(
+      numbers.map(async (number) => {
+        const issue = await this.api<{ number: number; body: string | null; html_url: string }>(
+          `/repos/${repository}/issues/${number}`,
+        );
+        return { number: issue.number, body: issue.body ?? "", url: issue.html_url };
+      }),
+    );
+  }
+
+  private async loadCodeowners(repository: string): Promise<string> {
+    for (const path of [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]) {
+      try {
+        return await this.apiText(`/repos/${repository}/contents/${path}`);
+      } catch (error) {
+        if (!(error instanceof GitHubApiError) || error.status !== 404) {
+          throw error;
+        }
+      }
+    }
+    return "";
+  }
+
+  private async loadRequiredApprovals(repository: string): Promise<number> {
+    try {
+      const summaries = await this.api<Array<{ id: number; enforcement: string }>>(
+        `/repos/${repository}/rulesets?includes_parents=true`,
+      );
+      const rulesets = await Promise.all(
+        summaries
+          .filter((ruleset) => ruleset.enforcement === "active")
+          .map((ruleset) =>
+            this.api<{
+              rules: Array<{
+                type: string;
+                parameters?: { required_approving_review_count?: number };
+              }>;
+            }>(`/repos/${repository}/rulesets/${ruleset.id}`),
+          ),
+      );
+      return Math.max(
+        0,
+        ...rulesets.flatMap((ruleset) =>
+          ruleset.rules
+            .filter((rule) => rule.type === "pull_request")
+            .map((rule) => rule.parameters?.required_approving_review_count ?? 0),
+        ),
+      );
+    } catch (error) {
+      if (error instanceof GitHubApiError && error.status === 403) {
+        throw new Error(
+          "GitHub AppにRulesetsを読むAdministration read権限がありません。App設定を確認してください。",
+        );
+      }
+      if (error instanceof GitHubApiError && error.status === 404) {
+        return 0;
+      }
+      throw error;
+    }
   }
 
   private async api<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -289,9 +449,20 @@ async function githubError(response: Response): Promise<Error> {
   } catch {
     // GitHubがJSONを返さない場合も秘密情報を含めずstatusだけを通知する。
   }
-  return new Error(
+  return new GitHubApiError(
+    response.status,
     `GitHub API操作に失敗しました（HTTP ${response.status}${requestId ? ` / request ${requestId}` : ""}）${detail}`,
   );
+}
+
+export class GitHubApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "GitHubApiError";
+    this.status = status;
+  }
 }
 
 function toSnapshot(issue: ApiIssue): WorkItemSnapshot {

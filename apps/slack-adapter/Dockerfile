@@ -11,6 +11,7 @@ ENV PORT=8080
 ENV AR_SLACK_TRANSPORT=http
 ENV AR_STATE_BACKEND=firestore
 ENV AR_GITHUB_BACKEND=app
+ENV AR_JOB_QUEUE=cloud-tasks
 
 WORKDIR /app
 COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules

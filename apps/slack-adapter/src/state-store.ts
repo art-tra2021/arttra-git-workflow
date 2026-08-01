@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Firestore } from "@google-cloud/firestore";
 
 export interface StateStore {
   get<T>(namespace: string, key: string): Promise<T | null>;
+  list<T>(namespace: string): Promise<T[]>;
   set<T>(namespace: string, key: string, value: T): Promise<void>;
   create<T>(namespace: string, key: string, value: T): Promise<boolean>;
   compareAndSet<T extends RevisionedState>(
@@ -51,6 +52,29 @@ export class LocalStateStore implements StateStore {
 
   async set<T>(namespace: string, key: string, value: T): Promise<void> {
     await writeAtomic(this.path(namespace, key), serialize(value));
+  }
+
+  async list<T>(namespace: string): Promise<T[]> {
+    const directory = join(this.rootDirectory, safeSegment(namespace));
+    let files: string[];
+    try {
+      files = await readdir(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+    return Promise.all(
+      files
+        .filter((file) => file.endsWith(".json"))
+        .map(async (file) => {
+          const stored = JSON.parse(
+            await readFile(join(directory, file), "utf8"),
+          ) as StoredValue<T>;
+          return stored.value;
+        }),
+    );
   }
 
   async create<T>(namespace: string, key: string, value: T): Promise<boolean> {
@@ -146,6 +170,11 @@ export class FirestoreStateStore implements StateStore {
 
   async set<T>(namespace: string, key: string, value: T): Promise<void> {
     await this.document(namespace, key).set(envelope(value));
+  }
+
+  async list<T>(namespace: string): Promise<T[]> {
+    const snapshot = await this.collection(namespace).get();
+    return snapshot.docs.map((document) => (document.data() as StoredValue<T>).value);
   }
 
   async create<T>(namespace: string, key: string, value: T): Promise<boolean> {
