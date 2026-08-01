@@ -55,10 +55,12 @@ describe("GitHub App adapter", () => {
     });
 
     expect(await client.listRepositories()).toEqual([
-      "rozwer/arttra-git-lab",
+      "art-tra2021/arttra-git-workflow",
       "art-tra2021/service",
     ]);
-    expect((await client.listIssueTemplates("rozwer/arttra-git-lab"))[0]?.id).toBe("work");
+    expect((await client.listIssueTemplates("art-tra2021/arttra-git-workflow"))[0]?.id).toBe(
+      "work",
+    );
     expect(calls.filter((url) => url.includes("access_tokens"))).toHaveLength(1);
   });
 
@@ -79,15 +81,15 @@ describe("GitHub App adapter", () => {
       if (url.endsWith("/contents/.github/ISSUE_TEMPLATE/work.yml")) {
         return new Response(issueForm(), { status: 200 });
       }
-      if (url.endsWith("/repos/rozwer/arttra-git-lab")) {
-        return json({ full_name: "rozwer/arttra-git-lab" });
+      if (url.endsWith("/repos/art-tra2021/arttra-git-workflow")) {
+        return json({ full_name: "art-tra2021/arttra-git-workflow" });
       }
-      if (url.endsWith("/repos/rozwer/arttra-git-lab/issues")) {
+      if (url.endsWith("/repos/art-tra2021/arttra-git-workflow/issues")) {
         createdBody = JSON.parse(String(init?.body));
         return json({
           number: 42,
           title: "[作業] API接続",
-          html_url: "https://github.com/rozwer/arttra-git-lab/issues/42",
+          html_url: "https://github.com/art-tra2021/arttra-git-workflow/issues/42",
           labels: [],
           assignees: [],
         });
@@ -97,7 +99,7 @@ describe("GitHub App adapter", () => {
     const command: CreateIssueCommand = {
       schemaVersion: 1,
       kind: "issue.create",
-      repository: "rozwer/arttra-git-lab",
+      repository: "art-tra2021/arttra-git-workflow",
       template: "work",
       title: "API接続",
       fields: { outcome: "Cloud Runから作成できる", merge: "自分でマージ可" },
@@ -111,7 +113,7 @@ describe("GitHub App adapter", () => {
     expect(await client.createIssue(command)).toEqual({
       number: 42,
       title: "[作業] API接続",
-      url: "https://github.com/rozwer/arttra-git-lab/issues/42",
+      url: "https://github.com/art-tra2021/arttra-git-workflow/issues/42",
     });
     expect(createdBody).toMatchObject({
       title: "[作業] API接続",
@@ -130,7 +132,7 @@ describe("GitHub App adapter", () => {
       appId: "12345",
       installationId: "99",
       privateKey,
-      repository: "rozwer/arttra-git-lab",
+      repository: "art-tra2021/arttra-git-workflow",
       githubLogin: "service-account",
       owners: ["rozwer"],
       apiBaseUrl: "https://github.example/api/v3",
@@ -168,7 +170,12 @@ describe("GitHub App adapter", () => {
       }),
     ]);
     expect(graphqlBody).toMatchObject({
-      variables: { owner: "rozwer", name: "arttra-git-lab", limit: 20, assignee: "alice" },
+      variables: {
+        owner: "art-tra2021",
+        name: "arttra-git-workflow",
+        limit: 20,
+        assignee: "alice",
+      },
     });
   });
 
@@ -178,7 +185,7 @@ describe("GitHub App adapter", () => {
       if (input.endsWith("/app/installations/99/access_tokens")) {
         return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
       }
-      if (input.endsWith("/repos/rozwer/arttra-git-lab/pulls/28")) {
+      if (input.endsWith("/repos/art-tra2021/arttra-git-workflow/pulls/28")) {
         return json({
           number: 28,
           title: "review automation",
@@ -218,7 +225,10 @@ describe("GitHub App adapter", () => {
       throw new Error(`予期しないrequest: ${input}`);
     });
 
-    const context = await client.loadPullRequestReviewContext("rozwer/arttra-git-lab", 28);
+    const context = await client.loadPullRequestReviewContext(
+      "art-tra2021/arttra-git-workflow",
+      28,
+    );
     expect(context).toMatchObject({
       number: 28,
       files: ["src/app.ts"],
@@ -228,7 +238,12 @@ describe("GitHub App adapter", () => {
       codeowners: "* @alice",
     });
     expect(await client.resolveGitHubUsers(["alice"])).toEqual([{ id: 101, login: "alice" }]);
-    await client.requestPullRequestReviewers("rozwer/arttra-git-lab", 28, ["alice"], ["frontend"]);
+    await client.requestPullRequestReviewers(
+      "art-tra2021/arttra-git-workflow",
+      28,
+      ["alice"],
+      ["frontend"],
+    );
     expect(requested).toEqual({ reviewers: ["alice"], team_reviewers: ["frontend"] });
   });
 });
@@ -238,7 +253,7 @@ function dependencies(fetchImpl: GitHubFetch): GitHubAppDependencies {
     appId: "12345",
     installationId: "99",
     privateKey,
-    repository: "rozwer/arttra-git-lab",
+    repository: "art-tra2021/arttra-git-workflow",
     githubLogin: "rozwer",
     owners: ["rozwer", "art-tra2021"],
     apiBaseUrl: "https://github.example/api/v3",

@@ -1,4 +1,4 @@
-# arttra-git-lab
+# ART-TRA Git Workflow
 
 人間には短いTUI、AIと自動化には非対話引数を提供するGitワークフロー実験場です。
 
@@ -8,8 +8,8 @@
 `mise.lock`に固定した`gh`、`hk`、lint/security toolは`mise install`で揃います。
 
 ```console
-git clone git@github.com:rozwer/arttra-git-lab.git
-cd arttra-git-lab
+git clone git@github.com:art-tra2021/arttra-git-workflow.git
+cd arttra-git-workflow
 mise trust
 mise install
 mise run setup
