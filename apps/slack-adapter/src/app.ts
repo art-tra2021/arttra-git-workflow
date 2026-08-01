@@ -1,6 +1,9 @@
-import { randomUUID } from "node:crypto";
 import { App, type Receiver } from "@slack/bolt";
-import { canApproveIssue, canBypassIssueApproval, requiresIssueApproval } from "./approval.ts";
+import {
+  canBypassIssueApproval,
+  type IssueApprovalService,
+  requiresIssueApproval,
+} from "./approval.ts";
 import { buildCreateIssueCommand } from "./issue-command.ts";
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
 import { workItemBlocks } from "./presentation.ts";
@@ -12,6 +15,7 @@ export interface SlackAdapterDependencies {
   loadWorkItems(slackUserId: string): Promise<HumanWorkItem[]>;
   claimIssue(issueNumber: number, slackUserId: string): Promise<HumanWorkItem>;
   createIssue(command: CreateIssueCommand): Promise<CreatedIssue>;
+  validateIssueAuthorization(command: CreateIssueCommand): Promise<void>;
 }
 
 export interface SlackAppOptions {
@@ -21,14 +25,10 @@ export interface SlackAppOptions {
   socketMode?: boolean;
   approverUserIds?: string[];
   selfApproverUserIds?: string[];
+  approvalService: IssueApprovalService;
   syncCanvas?: (channelId: string) => Promise<{ canvasId: string; itemCount: number }>;
   receiver?: Receiver;
   tokenVerificationEnabled?: boolean;
-}
-
-interface PendingIssueApproval {
-  command: CreateIssueCommand;
-  requester: string;
 }
 
 export function createSlackApp(
@@ -37,7 +37,6 @@ export function createSlackApp(
 ): App {
   const approvers = new Set(options.approverUserIds ?? []);
   const selfApprovers = new Set(options.selfApproverUserIds ?? []);
-  const pendingApprovals = new Map<string, PendingIssueApproval>();
   const app = new App({
     token: options.token,
     ...(options.signingSecret ? { signingSecret: options.signingSecret } : {}),
@@ -51,6 +50,17 @@ export function createSlackApp(
 
   app.command("/ar", async ({ ack, client, command, respond }) => {
     await ack();
+    const approvalMatch = command.text.trim().match(/^approval\s+([A-Za-z0-9-]+)$/i);
+    if (approvalMatch?.[1]) {
+      const approval = await options.approvalService.status(approvalMatch[1]);
+      await respond({
+        response_type: "ephemeral",
+        text: approval
+          ? `\`\`\`${JSON.stringify(approval, null, 2)}\`\`\``
+          : "指定された承認申請は見つかりません。",
+      });
+      return;
+    }
     if (["canvas", "canvas sync"].includes(command.text.trim().toLowerCase())) {
       if (!options.syncCanvas) {
         await respond({ response_type: "ephemeral", text: "Canvas同期が設定されていません。" });
@@ -147,9 +157,8 @@ export function createSlackApp(
         if (approvers.size === 0) {
           throw new Error("このマージ方式には承認が必要ですが、承認者が設定されていません。");
         }
-        const approvalId = randomUUID();
-        pendingApprovals.set(approvalId, { command, requester: body.user.id });
-        await requestIssueApproval(metadata.responseUrl, approvalId, command, approvers);
+        const approval = await options.approvalService.request(command, body.user.id);
+        await requestIssueApproval(metadata.responseUrl, approval.id, command, approvers);
         return;
       }
       const issue = await dependencies.createIssue(command);
@@ -170,28 +179,24 @@ export function createSlackApp(
     if (action.type !== "button" || !action.value) {
       return;
     }
-    const pending = pendingApprovals.get(action.value);
-    if (!pending) {
-      await respond({
-        response_type: "ephemeral",
-        text: "この承認申請は失効しています。再申請してください。",
-      });
-      return;
-    }
-    if (!canApproveIssue(pending.requester, body.user.id, approvers, selfApprovers)) {
-      await respond({ response_type: "ephemeral", text: "この申請を承認する権限がありません。" });
-      return;
-    }
-    pendingApprovals.delete(action.value);
     try {
-      const issue = await dependencies.createIssue(pending.command);
+      const approval = await options.approvalService.approve(
+        action.value,
+        body.user.id,
+        { approvers, selfApprovers },
+        (command) => dependencies.validateIssueAuthorization(command),
+        (command) => dependencies.createIssue(command),
+      );
+      const issue = approval.issue;
+      if (!issue) {
+        throw new Error("承認済みIssueの作成結果を読み取れませんでした。");
+      }
       await respond({
         response_type: "in_channel",
         replace_original: true,
         text: `<@${body.user.id}> が承認し、Issue #${issue.number}を作成しました: ${issue.url}`,
       });
     } catch (error) {
-      pendingApprovals.set(action.value, pending);
       await respond({
         response_type: "ephemeral",
         text: error instanceof Error ? error.message : "Issueを作成できませんでした。",
@@ -204,21 +209,22 @@ export function createSlackApp(
     if (action.type !== "button" || !action.value) {
       return;
     }
-    const pending = pendingApprovals.get(action.value);
-    if (!pending) {
-      await respond({ response_type: "ephemeral", text: "この承認申請はすでに失効しています。" });
-      return;
+    try {
+      const approval = await options.approvalService.reject(action.value, body.user.id, {
+        approvers,
+        selfApprovers,
+      });
+      await respond({
+        response_type: "in_channel",
+        replace_original: true,
+        text: `<@${body.user.id}> がIssue作成申請を却下しました。申請者: <@${approval.requester}>`,
+      });
+    } catch (error) {
+      await respond({
+        response_type: "ephemeral",
+        text: error instanceof Error ? error.message : "Issue作成申請を却下できませんでした。",
+      });
     }
-    if (!canApproveIssue(pending.requester, body.user.id, approvers, selfApprovers)) {
-      await respond({ response_type: "ephemeral", text: "この申請を却下する権限がありません。" });
-      return;
-    }
-    pendingApprovals.delete(action.value);
-    await respond({
-      response_type: "in_channel",
-      replace_original: true,
-      text: `<@${body.user.id}> がIssue作成申請を却下しました。申請者: <@${pending.requester}>`,
-    });
   });
 
   app.action("ar.claim", async ({ ack, action, body, respond }) => {

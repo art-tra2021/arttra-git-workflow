@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "check": "bun run typecheck && bun run lint && bun run test",
+    "approval:status": "node --env-file-if-exists=.env src/approval-status.ts",
     "canvas:sync": "node --env-file-if-exists=.env src/sync-canvas.ts",
     "lint": "biome check .",
     "start": "node --env-file-if-exists=.env src/start.ts",

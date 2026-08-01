@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { canApproveIssue, canBypassIssueApproval, requiresIssueApproval } from "../src/approval.ts";
+import { mkdtemp, readdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  canApproveIssue,
+  canBypassIssueApproval,
+  IssueApprovalService,
+  requiresIssueApproval,
+} from "../src/approval.ts";
+import { LocalStateStore } from "../src/state-store.ts";
 import type { CreateIssueCommand } from "../src/types.ts";
 
 function command(merge: string): CreateIssueCommand {
@@ -36,3 +45,93 @@ describe("Issue approval policy", () => {
     expect(canApproveIssue("U_PL", "U_PL", new Set(), selfApprovers)).toBe(true);
   });
 });
+
+describe("IssueApprovalService", () => {
+  test("再起動相当の別serviceから承認待ちを復元して完了する", async () => {
+    const root = await mkdtemp(join(tmpdir(), "arttra-approval-"));
+    const first = service(root);
+    const requested = await first.request(privilegedCommand(), "U_REQUESTER");
+    const second = service(root);
+    expect((await second.status(requested.id))?.status).toBe("pending");
+
+    const approved = await second.approve(
+      requested.id,
+      "U_APPROVER",
+      policy(),
+      async () => {},
+      async () => ({ number: 27, title: "永続化", url: "https://example.test/issues/27" }),
+    );
+    expect(approved.status).toBe("approved");
+    expect(approved.issue?.number).toBe(27);
+    const auditDirectory = join(root, Buffer.from("issue-approval-audit").toString("base64url"));
+    expect(await readdir(auditDirectory)).toHaveLength(3);
+  });
+
+  test("明示されていない申請者本人の承認を拒否する", async () => {
+    const root = await mkdtemp(join(tmpdir(), "arttra-approval-"));
+    const approvals = service(root);
+    const requested = await approvals.request(privilegedCommand(), "U_APPROVER");
+    expect(
+      approvals.approve(
+        requested.id,
+        "U_APPROVER",
+        policy(),
+        async () => {},
+        async () => ({ number: 1, title: "nope", url: "https://example.test/1" }),
+      ),
+    ).rejects.toThrow("権限がありません");
+  });
+
+  test("期限を過ぎた申請を永続的にexpiredへ遷移する", async () => {
+    const root = await mkdtemp(join(tmpdir(), "arttra-approval-"));
+    let now = Date.parse("2026-08-01T00:00:00Z");
+    const approvals = new IssueApprovalService(new LocalStateStore(root), {
+      ttlMilliseconds: 60_000,
+      now: () => now,
+      id: () => "A-EXPIRE",
+    });
+    await approvals.request(privilegedCommand(), "U_REQUESTER");
+    now += 60_001;
+    expect((await approvals.status("A-EXPIRE"))?.status).toBe("expired");
+    expect((await service(root).status("A-EXPIRE"))?.status).toBe("expired");
+  });
+
+  test("同時承認でもIssueを一度だけ作成する", async () => {
+    const root = await mkdtemp(join(tmpdir(), "arttra-approval-"));
+    const approvals = service(root);
+    const requested = await approvals.request(privilegedCommand(), "U_REQUESTER");
+    let creates = 0;
+    const attempt = () =>
+      approvals.approve(
+        requested.id,
+        "U_APPROVER",
+        policy(),
+        async () => {},
+        async () => {
+          creates += 1;
+          return { number: 27, title: "永続化", url: "https://example.test/issues/27" };
+        },
+      );
+    const results = await Promise.allSettled([attempt(), attempt()]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(creates).toBe(1);
+  });
+});
+
+function service(root: string): IssueApprovalService {
+  return new IssueApprovalService(new LocalStateStore(root), {
+    now: () => Date.parse("2026-08-01T00:00:00Z"),
+    id: () => "A-PERSIST",
+  });
+}
+
+function policy() {
+  return {
+    approvers: new Set(["U_APPROVER"]),
+    selfApprovers: new Set<string>(),
+  };
+}
+
+function privilegedCommand(): CreateIssueCommand {
+  return command("自分でマージ可");
+}

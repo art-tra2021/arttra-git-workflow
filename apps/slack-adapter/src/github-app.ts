@@ -22,6 +22,7 @@ interface GitHubAppConfig {
 interface InstallationToken {
   token: string;
   expires_at: string;
+  permissions?: Record<string, string>;
 }
 
 interface InstallationRepositories {
@@ -47,6 +48,7 @@ interface ContentEntry {
 interface CachedToken {
   value: string;
   expiresAt: number;
+  permissions: Record<string, string>;
 }
 
 export class GitHubAppDependencies implements SlackAdapterDependencies {
@@ -160,6 +162,24 @@ export class GitHubAppDependencies implements SlackAdapterDependencies {
     return { number: issue.number, title: issue.title, url: issue.html_url };
   }
 
+  async validateIssueAuthorization(command: CreateIssueCommand): Promise<void> {
+    await this.installationToken();
+    const permissions = this.token?.permissions ?? {};
+    if (permissions.issues !== "write") {
+      throw new Error("GitHub AppにIssues write権限がありません。App設定を確認してください。");
+    }
+    if (permissions.contents !== "read" && permissions.contents !== "write") {
+      throw new Error("GitHub AppにContents read権限がありません。App設定を確認してください。");
+    }
+    await this.api<unknown>(`/repos/${command.repository}`);
+    const template = (await this.listIssueTemplates(command.repository)).find(
+      (candidate) => candidate.id === command.template,
+    );
+    if (!template) {
+      throw new Error(`Issue templateが見つかりません: ${command.template}`);
+    }
+  }
+
   private async listIssues(limit: number, assignee?: string): Promise<ApiIssue[]> {
     const query = new URLSearchParams({ state: "open", per_page: String(limit) });
     if (assignee) {
@@ -232,7 +252,7 @@ export class GitHubAppDependencies implements SlackAdapterDependencies {
     if (!created.token || !Number.isFinite(expiresAt)) {
       throw new Error("GitHub Appのinstallation token応答を読み取れませんでした。");
     }
-    this.token = { value: created.token, expiresAt };
+    this.token = { value: created.token, expiresAt, permissions: created.permissions ?? {} };
     return created.token;
   }
 }

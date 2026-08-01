@@ -44,8 +44,17 @@ mise run slack:canvas
 申請者本人による承認を許すPL等は、`AR_SLACK_SELF_APPROVER_IDS`にも明示する。
 通常レビューのIssueは即時作成し、権限昇格を伴うIssueだけをSlackの承認ボタンへ送る。
 
-テスト基盤では承認待ちをプロセス内に保持する。
-adapter再起動後の申請は安全のため失効するため、本番化時は`PendingIssueApproval`を永続ストアへ差し替える。
+承認待ちと監査eventは共通state storeへ保存する。
+本番のFirestoreでは原子的なrevision更新により、Slackのボタンが二重実行されてもIssueを一度だけ作成する。
+有効期限は`AR_APPROVAL_TTL_MINUTES`で設定し、既定は24時間である。
+申請・処理開始・承認・却下・失効・失敗を追記型監査eventとして記録する。
+承認ボタンを押した時点でGitHub Appまたは`gh`の権限とIssue templateを再検証する。
+
+Slackでは`/ar approval <approval-id>`、AIや運用scriptでは次のcommandから、同じversion付きJSON statusを確認できる。
+
+```sh
+mise run slack:approval -- <approval-id>
+```
 
 依存管理とtestにはBunを使い、Socket Modeの実行にはmise管理のNode.jsを使う。
 テスト時のGitHub操作には認証済みの`gh`を使う。本番では同じdependency interfaceをGitHub App実装へ差し替える。

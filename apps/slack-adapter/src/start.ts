@@ -1,6 +1,7 @@
 import { ExpressReceiver } from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
 import { createSlackApp } from "./app.ts";
+import { IssueApprovalService } from "./approval.ts";
 import type { CanvasClient } from "./canvas.ts";
 import { CanvasSyncService } from "./canvas-service.ts";
 import { GitHubAppDependencies } from "./github-app.ts";
@@ -37,6 +38,11 @@ const dependencies =
       })
     : new GitHubCliDependencies(repository, githubLogin, owners);
 const store = createStateStoreFromEnvironment();
+const approvalService = new IssueApprovalService(store, {
+  ttlMilliseconds:
+    positiveInteger(process.env.AR_APPROVAL_TTL_MINUTES ?? "1440", "AR_APPROVAL_TTL_MINUTES") *
+    60_000,
+});
 const canvasService = new CanvasSyncService(
   new WebClient(botToken) as unknown as CanvasClient,
   dependencies,
@@ -62,6 +68,7 @@ const app = createSlackApp(dependencies, {
     : { receiver: defined(receiver, "HTTP receiver") }),
   approverUserIds,
   selfApproverUserIds,
+  approvalService,
   syncCanvas: (channelId) => canvasService.sync(channelId),
   tokenVerificationEnabled: process.env.AR_SLACK_TOKEN_VERIFICATION !== "off",
 });

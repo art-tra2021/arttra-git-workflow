@@ -188,6 +188,26 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
       "number,title,url",
     ]);
   }
+
+  async validateIssueAuthorization(command: CreateIssueCommand): Promise<void> {
+    const canWrite = (
+      await gh([
+        "api",
+        `repos/${command.repository}`,
+        "--jq",
+        ".permissions.push // .permissions.admin // false",
+      ])
+    ).trim();
+    if (canWrite !== "true") {
+      throw new Error(`GitHubで${command.repository}のIssueを作成する権限がありません。`);
+    }
+    const template = (await this.listIssueTemplates(command.repository)).find(
+      (candidate) => candidate.id === command.template,
+    );
+    if (!template) {
+      throw new Error(`Issue templateが見つかりません: ${command.template}`);
+    }
+  }
 }
 
 function toSnapshot(issue: GhIssue): WorkItemSnapshot {

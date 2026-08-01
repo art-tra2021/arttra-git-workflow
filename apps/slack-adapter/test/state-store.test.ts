@@ -23,4 +23,15 @@ describe("LocalStateStore", () => {
       result: "first",
     });
   });
+
+  test("compareAndSetは同じrevisionを一度だけ更新する", async () => {
+    const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-state-")));
+    await store.set("approval", "A1", { revision: 1, status: "pending" });
+    const [first, second] = await Promise.all([
+      store.compareAndSet("approval", "A1", 1, { revision: 2, status: "approved" }),
+      store.compareAndSet("approval", "A1", 1, { revision: 2, status: "rejected" }),
+    ]);
+    expect([first, second].filter(Boolean)).toHaveLength(1);
+    expect((await store.get<{ revision: number }>("approval", "A1"))?.revision).toBe(2);
+  });
 });

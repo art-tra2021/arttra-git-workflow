@@ -7,8 +7,18 @@ export interface StateStore {
   get<T>(namespace: string, key: string): Promise<T | null>;
   set<T>(namespace: string, key: string, value: T): Promise<void>;
   create<T>(namespace: string, key: string, value: T): Promise<boolean>;
+  compareAndSet<T extends RevisionedState>(
+    namespace: string,
+    key: string,
+    expectedRevision: number,
+    value: T,
+  ): Promise<boolean>;
   remove(namespace: string, key: string): Promise<void>;
   append<T>(namespace: string, value: T): Promise<string>;
+}
+
+export interface RevisionedState {
+  revision: number;
 }
 
 interface StoredValue<T> {
@@ -19,6 +29,7 @@ interface StoredValue<T> {
 
 export class LocalStateStore implements StateStore {
   private readonly rootDirectory: string;
+  private readonly locks = new Map<string, Promise<void>>();
 
   constructor(rootDirectory: string) {
     this.rootDirectory = rootDirectory;
@@ -56,6 +67,23 @@ export class LocalStateStore implements StateStore {
     }
   }
 
+  async compareAndSet<T extends RevisionedState>(
+    namespace: string,
+    key: string,
+    expectedRevision: number,
+    value: T,
+  ): Promise<boolean> {
+    const path = this.path(namespace, key);
+    return this.withLock(path, async () => {
+      const current = await this.get<RevisionedState>(namespace, key);
+      if (!current || current.revision !== expectedRevision) {
+        return false;
+      }
+      await writeAtomic(path, serialize(value));
+      return true;
+    });
+  }
+
   async remove(namespace: string, key: string): Promise<void> {
     try {
       await unlink(this.path(namespace, key));
@@ -74,6 +102,25 @@ export class LocalStateStore implements StateStore {
 
   private path(namespace: string, key: string): string {
     return join(this.rootDirectory, safeSegment(namespace), `${safeSegment(key)}.json`);
+  }
+
+  private async withLock<T>(key: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.locks.get(key) ?? Promise.resolve();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.then(() => gate);
+    this.locks.set(key, queued);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.locks.get(key) === queued) {
+        this.locks.delete(key);
+      }
+    }
   }
 }
 
@@ -112,6 +159,27 @@ export class FirestoreStateStore implements StateStore {
       }
       throw error;
     }
+  }
+
+  async compareAndSet<T extends RevisionedState>(
+    namespace: string,
+    key: string,
+    expectedRevision: number,
+    value: T,
+  ): Promise<boolean> {
+    return this.firestore.runTransaction(async (transaction) => {
+      const reference = this.document(namespace, key);
+      const snapshot = await transaction.get(reference);
+      if (!snapshot.exists) {
+        return false;
+      }
+      const current = (snapshot.data() as StoredValue<RevisionedState>).value;
+      if (current.revision !== expectedRevision) {
+        return false;
+      }
+      transaction.set(reference, envelope(value));
+      return true;
+    });
   }
 
   async remove(namespace: string, key: string): Promise<void> {

@@ -67,13 +67,20 @@ describe("GitHub App adapter", () => {
     const client = dependencies(async (input, init) => {
       const url = String(input);
       if (url.endsWith("/app/installations/99/access_tokens")) {
-        return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
+        return json({
+          token: "installation-token",
+          expires_at: "2026-08-01T01:00:00Z",
+          permissions: { issues: "write", contents: "read" },
+        });
       }
       if (url.endsWith("/contents/.github/ISSUE_TEMPLATE")) {
         return json([{ name: "work.yml", path: ".github/ISSUE_TEMPLATE/work.yml", type: "file" }]);
       }
       if (url.endsWith("/contents/.github/ISSUE_TEMPLATE/work.yml")) {
         return new Response(issueForm(), { status: 200 });
+      }
+      if (url.endsWith("/repos/rozwer/arttra-git-lab")) {
+        return json({ full_name: "rozwer/arttra-git-lab" });
       }
       if (url.endsWith("/repos/rozwer/arttra-git-lab/issues")) {
         createdBody = JSON.parse(String(init?.body));
@@ -97,6 +104,7 @@ describe("GitHub App adapter", () => {
       actor: "U123",
     };
 
+    await client.validateIssueAuthorization(command);
     expect(await client.createIssue(command)).toEqual({
       number: 42,
       title: "[作業] API接続",
