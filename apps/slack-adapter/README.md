@@ -24,6 +24,12 @@ mise run slack:check
 `.env.example`を`.env`へコピーし、SlackのBot token、`connections:write`を持つApp token、GitHub repositoryとloginを設定する。
 `AR_GITHUB_OWNERS`には、Slackから選択を許可するOrganizationまたは個人ownerをカンマ区切りで設定する。
 
+最初に各利用者が`/ar connect github`を実行し、GitHub OAuthで本人確認する。
+署名済みstateをSlack team/user IDへ結び付け、検証したGitHub user IDとloginだけをstate storeへ保存する。
+OAuth access tokenは本人確認直後に破棄し、メール、表示名、同名userからmappingを推測しない。
+連携解除は`/ar disconnect github`で行う。
+Issue modalでは実在するSlackメンバーを担当者と予定レビュワーに選択でき、未連携者がいれば本人へのmentionと連携commandを返す。
+
 ```sh
 mise run slack:dev
 ```
@@ -84,8 +90,12 @@ Secret ManagerからCloud Run環境変数へ次のsecretを注入する。
 - `SLACK_BOT_TOKEN`
 - `SLACK_SIGNING_SECRET`
 - `GITHUB_APP_PRIVATE_KEY`
+- `GITHUB_OAUTH_CLIENT_SECRET`
+- `AR_OAUTH_STATE_SECRET`
 
 GitHub App IDとinstallation IDは`GITHUB_APP_ID`、`GITHUB_APP_INSTALLATION_ID`へ設定する。
+GitHub AppのClient IDは`GITHUB_OAUTH_CLIENT_ID`へ、公開HTTPS URLは`AR_PUBLIC_BASE_URL`へ設定する。
+GitHub Appのcallback URLは`AR_PUBLIC_BASE_URL/github/callback`である。
 private keyは改行を含むPEM文字列、または改行を`\\n`に置換したSecret Managerの値を受け付ける。
 GitHub Appには対象repositoryに対するMetadata read、Contents read、Issues read/writeを与える。
 

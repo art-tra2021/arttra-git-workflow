@@ -18,6 +18,7 @@ export interface IssueCreateInput {
   title: string;
   body: string;
   labels: string[];
+  assignees: string[];
 }
 
 export function parseIssueForm(id: string, source: string): IssueTemplateSchema | null {
@@ -74,6 +75,11 @@ export function buildIssueCreateInput(
     "## 作成元",
     "",
     "Slack `/ar new`",
+    "",
+    "## 予定レビュワー",
+    "",
+    `<!-- ar:reviewers:v1 ${JSON.stringify(command.reviewerGitHubUsers ?? [])} -->`,
+    (command.reviewerGitHubLogins ?? []).map((login) => `@${login}`).join(" ") || "未設定",
   ].join("\n");
   const labels = schema.labels.filter(
     (label) => command.template !== "work" || !label.startsWith("merge/"),
@@ -86,5 +92,10 @@ export function buildIssueCreateInput(
     };
     labels.push(mergeLabel[command.fields.merge ?? ""] ?? "merge/review");
   }
-  return { title: `${schema.titlePrefix}${command.title}`, body, labels };
+  return {
+    title: `${schema.titlePrefix}${command.title}`,
+    body,
+    labels,
+    assignees: command.assigneeGitHubLogins ?? [],
+  };
 }

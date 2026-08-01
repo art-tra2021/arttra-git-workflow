@@ -69,6 +69,12 @@ export interface CreateIssueCommand {
   title: string;
   fields: Record<string, string>;
   actor: string;
+  slackTeamId?: string;
+  assigneeSlackUserIds?: string[];
+  reviewerSlackUserIds?: string[];
+  assigneeGitHubLogins?: string[];
+  reviewerGitHubLogins?: string[];
+  reviewerGitHubUsers?: Array<{ id: number; login: string }>;
 }
 
 export interface CreatedIssue {

@@ -9,7 +9,7 @@ features:
   slash_commands:
     - command: /ar
       description: 自分が次に行う仕事を表示する
-      usage_hint: "my | issue <number> | new"
+      usage_hint: "new | connect github | disconnect github | approval <id> | canvas sync"
       should_escape: false
 oauth_config:
   scopes:
@@ -17,6 +17,7 @@ oauth_config:
       - canvases:write
       - chat:write
       - commands
+      - users:read
 settings:
   interactivity:
     is_enabled: true

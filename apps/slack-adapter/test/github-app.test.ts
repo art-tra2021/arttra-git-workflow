@@ -102,6 +102,9 @@ describe("GitHub App adapter", () => {
       title: "API接続",
       fields: { outcome: "Cloud Runから作成できる", merge: "自分でマージ可" },
       actor: "U123",
+      assigneeGitHubLogins: ["octocat"],
+      reviewerGitHubLogins: ["reviewer"],
+      reviewerGitHubUsers: [{ id: 456, login: "reviewer" }],
     };
 
     await client.validateIssueAuthorization(command);
@@ -113,7 +116,12 @@ describe("GitHub App adapter", () => {
     expect(createdBody).toMatchObject({
       title: "[作業] API接続",
       labels: ["type/work", "merge/self"],
+      assignees: ["octocat"],
     });
+    expect(createdBody).toHaveProperty("body");
+    expect((createdBody as { body: string }).body).toContain(
+      '<!-- ar:reviewers:v1 [{"id":456,"login":"reviewer"}] -->',
+    );
   });
 });
 

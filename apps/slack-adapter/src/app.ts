@@ -4,6 +4,7 @@ import {
   type IssueApprovalService,
   requiresIssueApproval,
 } from "./approval.ts";
+import type { GitHubIdentityService } from "./identity-service.ts";
 import { buildCreateIssueCommand } from "./issue-command.ts";
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
 import { workItemBlocks } from "./presentation.ts";
@@ -26,6 +27,7 @@ export interface SlackAppOptions {
   approverUserIds?: string[];
   selfApproverUserIds?: string[];
   approvalService: IssueApprovalService;
+  identityService: GitHubIdentityService;
   syncCanvas?: (channelId: string) => Promise<{ canvasId: string; itemCount: number }>;
   receiver?: Receiver;
   tokenVerificationEnabled?: boolean;
@@ -50,6 +52,40 @@ export function createSlackApp(
 
   app.command("/ar", async ({ ack, client, command, respond }) => {
     await ack();
+    const normalized = command.text.trim().toLowerCase();
+    if (normalized === "connect github") {
+      const url = await options.identityService.connectUrl(command.team_id, command.user_id);
+      await respond({
+        response_type: "ephemeral",
+        text: `GitHubアカウントを連携してください: ${url}`,
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: "GitHubで本人確認すると、Slackの担当者・予定レビュワー選択をGitHubへ安全に反映できます。",
+            },
+            accessory: {
+              type: "button",
+              text: { type: "plain_text", text: "GitHubと連携" },
+              url,
+              action_id: "ar.github.connect.open",
+            },
+          },
+        ],
+      });
+      return;
+    }
+    if (normalized === "disconnect github") {
+      const removed = await options.identityService.disconnect(command.team_id, command.user_id);
+      await respond({
+        response_type: "ephemeral",
+        text: removed
+          ? "GitHubアカウント連携を解除しました。"
+          : "GitHubアカウントは連携されていません。",
+      });
+      return;
+    }
     const approvalMatch = command.text.trim().match(/^approval\s+([A-Za-z0-9-]+)$/i);
     if (approvalMatch?.[1]) {
       const approval = await options.approvalService.status(approvalMatch[1]);
@@ -61,7 +97,7 @@ export function createSlackApp(
       });
       return;
     }
-    if (["canvas", "canvas sync"].includes(command.text.trim().toLowerCase())) {
+    if (["canvas", "canvas sync"].includes(normalized)) {
       if (!options.syncCanvas) {
         await respond({ response_type: "ephemeral", text: "Canvas同期が設定されていません。" });
         return;
@@ -80,11 +116,16 @@ export function createSlackApp(
       }
       return;
     }
-    if (["new", "issue"].includes(command.text.trim().toLowerCase())) {
+    if (["new", "issue"].includes(normalized)) {
       const repositories = await dependencies.listRepositories();
       await client.views.open({
         trigger_id: command.trigger_id,
-        view: issueRepositoryModal(command.channel_id, command.response_url, repositories),
+        view: issueRepositoryModal(
+          command.channel_id,
+          command.response_url,
+          command.team_id,
+          repositories,
+        ),
       });
       return;
     }
@@ -101,6 +142,10 @@ export function createSlackApp(
       text: `次に確認する仕事は${visible.length}件です。`,
       blocks: visible.slice(0, 5).flatMap(workItemBlocks),
     });
+  });
+
+  app.action("ar.github.connect.open", async ({ ack }) => {
+    await ack();
   });
 
   app.view("ar.issue.repository", async ({ ack, view }) => {
@@ -151,6 +196,9 @@ export function createSlackApp(
           ]),
         ),
         actor: body.user.id,
+        slackTeamId: metadata.slackTeamId,
+        assigneeSlackUserIds: selectedUsers(view.state.values, "assignees", "value"),
+        reviewerSlackUserIds: selectedUsers(view.state.values, "reviewers", "value"),
         schema,
       });
       if (requiresIssueApproval(command) && !canBypassIssueApproval(body.user.id, selfApprovers)) {
@@ -161,7 +209,8 @@ export function createSlackApp(
         await requestIssueApproval(metadata.responseUrl, approval.id, command, approvers);
         return;
       }
-      const issue = await dependencies.createIssue(command);
+      const resolved = await options.identityService.resolveCommand(command, metadata.slackTeamId);
+      const issue = await dependencies.createIssue(resolved);
       await respondToCommand(
         metadata.responseUrl,
         `Issue #${issue.number}を作成しました: ${issue.url}`,
@@ -180,12 +229,25 @@ export function createSlackApp(
       return;
     }
     try {
+      let resolvedCommand: CreateIssueCommand | null = null;
       const approval = await options.approvalService.approve(
         action.value,
         body.user.id,
         { approvers, selfApprovers },
-        (command) => dependencies.validateIssueAuthorization(command),
-        (command) => dependencies.createIssue(command),
+        async (command) => {
+          const teamId = command.slackTeamId;
+          if (!teamId) {
+            throw new Error("承認申請のSlack workspace IDを読み取れませんでした。");
+          }
+          resolvedCommand = await options.identityService.resolveCommand(command, teamId);
+          await dependencies.validateIssueAuthorization(resolvedCommand);
+        },
+        async () => {
+          if (!resolvedCommand) {
+            throw new Error("Issueの担当者・予定レビュワーを解決できませんでした。");
+          }
+          return dependencies.createIssue(resolvedCommand);
+        },
       );
       const issue = approval.issue;
       if (!issue) {
@@ -253,11 +315,17 @@ export function createSlackApp(
 interface IssueModalMetadata {
   channelId: string;
   responseUrl: string;
+  slackTeamId: string;
   repository: string;
   template: IssueTemplateId;
 }
 
-function issueRepositoryModal(channelId: string, responseUrl: string, repositories: string[]) {
+function issueRepositoryModal(
+  channelId: string,
+  responseUrl: string,
+  slackTeamId: string,
+  repositories: string[],
+) {
   if (repositories.length === 0) {
     throw new Error("Issueを作成できるrepositoryがありません");
   }
@@ -265,7 +333,7 @@ function issueRepositoryModal(channelId: string, responseUrl: string, repositori
   return {
     type: "modal" as const,
     callback_id: "ar.issue.repository",
-    private_metadata: JSON.stringify({ channelId, responseUrl }),
+    private_metadata: JSON.stringify({ channelId, responseUrl, slackTeamId }),
     title: { type: "plain_text" as const, text: "Issueを作成" },
     submit: { type: "plain_text" as const, text: "次へ" },
     close: { type: "plain_text" as const, text: "キャンセル" },
@@ -342,6 +410,8 @@ function issueDetailModal(metadata: IssueModalMetadata, schema: IssueTemplateSch
               field.initialValue,
             ),
       ),
+      issueMembers("assignees", "担当者"),
+      issueMembers("reviewers", "予定レビュワー"),
     ],
   };
 }
@@ -382,6 +452,20 @@ function issueSelect(blockId: string, label: string, options: string[], required
   };
 }
 
+function issueMembers(blockId: string, label: string) {
+  return {
+    type: "input" as const,
+    block_id: blockId,
+    optional: true,
+    label: { type: "plain_text" as const, text: label },
+    element: {
+      type: "multi_users_select" as const,
+      action_id: "value",
+      placeholder: { type: "plain_text" as const, text: "Slackメンバーから選択" },
+    },
+  };
+}
+
 function option(text: string, value: string) {
   return { text: { type: "plain_text" as const, text }, value };
 }
@@ -402,11 +486,20 @@ function selectedValue(
   return values[blockId]?.[actionId]?.selected_option?.value ?? "intake";
 }
 
+function selectedUsers(
+  values: Record<string, Record<string, { selected_users?: string[] }>>,
+  blockId: string,
+  actionId: string,
+): string[] {
+  return values[blockId]?.[actionId]?.selected_users ?? [];
+}
+
 function parseMetadata(value: string): IssueModalMetadata {
   const parsed = JSON.parse(value) as Partial<IssueModalMetadata>;
   return {
     channelId: parsed.channelId ?? "",
     responseUrl: parsed.responseUrl ?? "",
+    slackTeamId: parsed.slackTeamId ?? "",
     repository: parsed.repository ?? "",
     template: parsed.template ?? "intake",
   };

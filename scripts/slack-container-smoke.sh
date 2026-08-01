@@ -20,6 +20,10 @@ docker run --detach --rm \
 	--env GITHUB_APP_ID=1 \
 	--env GITHUB_APP_INSTALLATION_ID=1 \
 	--env GITHUB_APP_PRIVATE_KEY=smoke-not-used-by-healthcheck \
+	--env GITHUB_OAUTH_CLIENT_ID=smoke \
+	--env GITHUB_OAUTH_CLIENT_SECRET=smoke \
+	--env AR_OAUTH_STATE_SECRET=smoke-state-secret-at-least-32-characters \
+	--env AR_PUBLIC_BASE_URL=http://localhost:8080 \
 	--env AR_STATE_BACKEND=local \
 	arttra-slack-adapter:test >/dev/null
 

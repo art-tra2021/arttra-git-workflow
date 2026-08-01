@@ -7,6 +7,9 @@ export interface CreateIssueInput {
   title: string;
   fields: Record<string, string>;
   actor: string;
+  slackTeamId?: string;
+  assigneeSlackUserIds?: string[];
+  reviewerSlackUserIds?: string[];
   schema: IssueTemplateSchema;
 }
 
@@ -44,5 +47,14 @@ export function buildCreateIssueCommand(input: CreateIssueInput): CreateIssueCom
     title,
     fields,
     actor: input.actor,
+    ...(input.slackTeamId ? { slackTeamId: input.slackTeamId } : {}),
+    assigneeSlackUserIds: uniqueSlackUserIds(input.assigneeSlackUserIds ?? []),
+    reviewerSlackUserIds: uniqueSlackUserIds(input.reviewerSlackUserIds ?? []),
   };
+}
+
+function uniqueSlackUserIds(values: string[]): string[] {
+  return [
+    ...new Set(values.map((value) => value.trim()).filter((value) => /^U[A-Z0-9]+$/.test(value))),
+  ];
 }

@@ -176,6 +176,7 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
         "--body",
         input.body,
         ...input.labels.flatMap((label) => ["--label", label]),
+        ...input.assignees.flatMap((assignee) => ["--assignee", assignee]),
       ])
     ).trim();
     return ghJson<CreatedIssue>([
@@ -195,7 +196,7 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
         "api",
         `repos/${command.repository}`,
         "--jq",
-        ".permissions.push // .permissions.admin // false",
+        ".permissions.triage or .permissions.push or .permissions.maintain or .permissions.admin",
       ])
     ).trim();
     if (canWrite !== "true") {

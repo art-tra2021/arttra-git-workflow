@@ -34,6 +34,8 @@ describe("Issue作成command", () => {
         target_date: "2026-08-15",
       },
       actor: "U123",
+      assigneeSlackUserIds: [],
+      reviewerSlackUserIds: [],
     });
   });
 

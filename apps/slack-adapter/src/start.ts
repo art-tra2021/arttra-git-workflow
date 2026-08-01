@@ -6,6 +6,7 @@ import type { CanvasClient } from "./canvas.ts";
 import { CanvasSyncService } from "./canvas-service.ts";
 import { GitHubAppDependencies } from "./github-app.ts";
 import { GitHubCliDependencies } from "./github-cli.ts";
+import { GitHubIdentityService } from "./identity-service.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
 
 const transport = (process.env.AR_SLACK_TRANSPORT ?? "socket").trim().toLowerCase();
@@ -38,6 +39,13 @@ const dependencies =
       })
     : new GitHubCliDependencies(repository, githubLogin, owners);
 const store = createStateStoreFromEnvironment();
+const identityService = new GitHubIdentityService({
+  clientId: required("GITHUB_OAUTH_CLIENT_ID"),
+  clientSecret: required("GITHUB_OAUTH_CLIENT_SECRET"),
+  stateSecret: required("AR_OAUTH_STATE_SECRET"),
+  publicBaseUrl: required("AR_PUBLIC_BASE_URL"),
+  store,
+});
 const approvalService = new IssueApprovalService(store, {
   ttlMilliseconds:
     positiveInteger(process.env.AR_APPROVAL_TTL_MINUTES ?? "1440", "AR_APPROVAL_TTL_MINUTES") *
@@ -61,6 +69,29 @@ receiver?.router.get("/healthz", (_request, response) => {
   response.status(200).json({ ok: true, schemaVersion: 1 });
 });
 
+receiver?.router.get("/github/callback", async (request, response) => {
+  const code = typeof request.query.code === "string" ? request.query.code : "";
+  const state = typeof request.query.state === "string" ? request.query.state : "";
+  if (!code || !state) {
+    response.status(400).type("text/plain").send("GitHub連携に必要なcodeまたはstateがありません。");
+    return;
+  }
+  try {
+    const identity = await identityService.complete(code, state);
+    response
+      .status(200)
+      .type("text/html")
+      .send(
+        `<!doctype html><html lang="ja"><meta charset="utf-8"><title>GitHub連携完了</title><body><h1>GitHub連携が完了しました</h1><p>@${identity.githubLogin} とSlackアカウントを対応付けました。この画面を閉じてSlackへ戻ってください。</p></body></html>`,
+      );
+  } catch (error) {
+    response
+      .status(400)
+      .type("text/plain")
+      .send(error instanceof Error ? error.message : "GitHub連携に失敗しました。");
+  }
+});
+
 const app = createSlackApp(dependencies, {
   token: botToken,
   ...(transport === "socket"
@@ -69,6 +100,7 @@ const app = createSlackApp(dependencies, {
   approverUserIds,
   selfApproverUserIds,
   approvalService,
+  identityService,
   syncCanvas: (channelId) => canvasService.sync(channelId),
   tokenVerificationEnabled: process.env.AR_SLACK_TOKEN_VERIFICATION !== "off",
 });
