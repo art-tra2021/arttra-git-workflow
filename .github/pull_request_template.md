@@ -24,7 +24,7 @@ Closes #
 関連Issueに次のいずれか一つを付けます。
 - merge/review: 作成者以外の承認が1件必要（既定）
 - merge/self: 承認なしで本人マージ可
-- merge/emergency: hotfix branch限定。事後レビューIssueを自動作成
+- merge/emergency: hotfix branch限定。事後レビューIssueを自動作成し、翌営業日までに確認
 -->
 
 ## 競合しそうな変更
