@@ -64,10 +64,10 @@ export interface HumanWorkItem {
 export interface CreateIssueCommand {
   schemaVersion: 1;
   kind: "issue.create";
-  issueType: "intake" | "work" | "business";
+  repository: string;
+  template: string;
   title: string;
-  purpose: string;
-  completionConditions: string[];
+  fields: Record<string, string>;
   actor: string;
 }
 

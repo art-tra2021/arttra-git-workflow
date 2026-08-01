@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Git管理外のSlack adapter用ローカル認証情報"
+paths = ['''^apps/slack-adapter/\.env$''']

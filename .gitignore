@@ -1,5 +1,6 @@
 /target/
 /apps/slack-adapter/node_modules/
+/apps/slack-adapter/.env
 /.idea/
 /.vscode/
 .DS_Store

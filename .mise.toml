@@ -7,6 +7,7 @@ lockfile = true
 [tools]
 rust = { version = "1.93.0", components = "clippy,rustfmt" }
 bun = "1.3.14"
+node = "24.18.1"
 gh = "2.97.0"
 hk = "1.54.0"
 jq = "1.8.2"
@@ -81,6 +82,11 @@ run = "bun install --cwd apps/slack-adapter --frozen-lockfile"
 description = "Type-check, lint, and test the Slack adapter"
 depends = ["slack:install"]
 run = "bun run --cwd apps/slack-adapter check"
+
+[tasks."slack:dev"]
+description = "Slack adapterをSocket Modeで起動する"
+depends = ["slack:install"]
+run = "bun run --cwd apps/slack-adapter start"
 
 [tasks.quick]
 description = "Run fast checks while editing"
