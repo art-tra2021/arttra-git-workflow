@@ -1,23 +1,23 @@
-# arttra-git-lab
+# ART-TRA Git Workflow
 
 人間には短いTUI、AIと自動化には非対話引数を提供するGitワークフロー実験場です。
 
 ## セットアップ
 
 必要なのはGitと[mise](https://mise.jdx.dev/)だけです。
-`mise.lock`に固定した`gh`、`hk`、lint/security toolは`mise install`で揃います。
+`mise.lock`に固定した`gh`、`hk`、lint/security toolは`mise run setup-ar`が揃えます。
 
 ```console
-git clone git@github.com:rozwer/arttra-git-lab.git
-cd arttra-git-lab
+git clone git@github.com:art-tra2021/arttra-git-workflow.git
+cd arttra-git-workflow
 mise trust
-mise install
-mise run setup
+mise run setup-ar
 ```
 
-`mise install`は全toolを正確なversionで導入し、外部CLIには`mise.lock`のURL/checksumを利用します。
+通常利用者が実行するのは、clone、`mise trust`、`mise run setup-ar`の3段階です。
+`setup-ar`は全toolを正確なversionで導入し、外部CLIには`mise.lock`のURL/checksumを利用します。
 core runtimeのRustはversion固定ですが、miseのlock対象外なのでartifact lockは行いません。
-`mise run setup`はRust CLIをインストールし、mise経由の`hk`とClaude/Codexのローカルhookを有効にします。
+`mise run setup-ar`はRust CLIをインストールし、mise経由の`hk`とClaude/Codexのローカルhookを有効にします。
 既存の`core.hooksPath=.githooks`だけは自動移行し、それ以外の独自hook設定は上書きせず日本語で停止します。
 Claude向けの`CLAUDE.md`も共有templateから生成します。
 `CLAUDE.md`、Claude/Codexの端末別設定、telemetryはGit管理外なので、個人調整が共有差分へ混ざりません。

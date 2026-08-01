@@ -11,6 +11,15 @@ pr_json="$(
 author="$(jq -r '.author.login' <<<"$pr_json")"
 head_ref="$(jq -r '.headRefName' <<<"$pr_json")"
 issue_number="$(jq -r '.closingIssuesReferences[0].number // empty' <<<"$pr_json")"
+
+# GitHubが検証した依存更新Appだけは、Issueを別途作らずCIを正本にする。
+# branch名だけでは信用せず、Appのloginとprefixの両方を照合する。
+if [[ "$author" == "app/dependabot" && "$head_ref" == dependabot/* ]] ||
+	[[ "$author" == "app/renovate" && "$head_ref" == renovate/* ]]; then
+	echo "✓ ${author}: 自動依存更新PR（Issue関連付けを免除）"
+	exit 0
+fi
+
 if [[ -z "$issue_number" ]]; then
 	echo "AR-PR-001: PRにIssueが関連付いていません。本文へ \`Closes #123\` を追加してください。" >&2
 	exit 1

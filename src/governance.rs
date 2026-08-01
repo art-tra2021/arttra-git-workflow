@@ -303,6 +303,12 @@ fn validate_properties(properties: &[PropertyDefinition]) -> Result<()> {
                 property.value_type
             );
         }
+        if property.required && property.default_value.is_none() {
+            bail!(
+                "required Custom Propertyにはdefault_valueが必要です: {}",
+                property.property_name
+            );
+        }
         if matches!(
             property.value_type.as_str(),
             "single_select" | "multi_select"
@@ -383,7 +389,11 @@ mod tests {
             property_name: name.into(),
             value_type: value_type.into(),
             required: true,
-            default_value: None,
+            default_value: Some(if value_type == "single_select" {
+                "one".into()
+            } else {
+                "default".into()
+            }),
             description: None,
             allowed_values: if value_type == "single_select" {
                 vec!["one".into()]
@@ -425,6 +435,9 @@ mod tests {
         assert!(validate_organization("art-tra2021").is_ok());
         assert!(validate_organization("../other").is_err());
         assert!(validate_properties(&[property("owner_team", "string")]).is_ok());
+        let mut required_without_default = property("owner_team", "string");
+        required_without_default.default_value = None;
+        assert!(validate_properties(&[required_without_default]).is_err());
         assert!(validate_properties(&[property("name", "unknown")]).is_err());
         let duplicate = property("same", "string");
         assert!(validate_properties(&[duplicate.clone(), duplicate]).is_err());

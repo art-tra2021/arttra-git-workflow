@@ -13,6 +13,7 @@
       "property_name": "owner_team",
       "value_type": "string",
       "required": true,
+      "default_value": "unassigned",
       "description": "Repositoryの責任チーム"
     },
     {
@@ -27,8 +28,9 @@
       "property_name": "ci_profile",
       "value_type": "single_select",
       "required": true,
+      "default_value": "unmanaged",
       "description": "共通CIの言語profile",
-      "allowed_values": ["python", "typescript", "rust", "mixed", "documents"]
+      "allowed_values": ["unmanaged", "python", "typescript", "rust", "mixed", "documents"]
     },
     {
       "property_name": "review_policy",
