@@ -3,6 +3,7 @@ import { WebClient } from "@slack/web-api";
 import { createSlackApp } from "./app.ts";
 import type { CanvasClient } from "./canvas.ts";
 import { CanvasSyncService } from "./canvas-service.ts";
+import { GitHubAppDependencies } from "./github-app.ts";
 import { GitHubCliDependencies } from "./github-cli.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
 
@@ -20,7 +21,21 @@ const owners = (process.env.AR_GITHUB_OWNERS ?? repository.split("/")[0] ?? gith
   .filter(Boolean);
 const approverUserIds = csv("AR_SLACK_APPROVER_IDS");
 const selfApproverUserIds = csv("AR_SLACK_SELF_APPROVER_IDS");
-const dependencies = new GitHubCliDependencies(repository, githubLogin, owners);
+const githubBackend = (process.env.AR_GITHUB_BACKEND ?? "cli").trim().toLowerCase();
+if (githubBackend !== "cli" && githubBackend !== "app") {
+  throw new Error("AR_GITHUB_BACKENDはcliまたはappを指定してください。");
+}
+const dependencies =
+  githubBackend === "app"
+    ? new GitHubAppDependencies({
+        appId: required("GITHUB_APP_ID"),
+        installationId: required("GITHUB_APP_INSTALLATION_ID"),
+        privateKey: required("GITHUB_APP_PRIVATE_KEY"),
+        repository,
+        githubLogin,
+        owners,
+      })
+    : new GitHubCliDependencies(repository, githubLogin, owners);
 const store = createStateStoreFromEnvironment();
 const canvasService = new CanvasSyncService(
   new WebClient(botToken) as unknown as CanvasClient,
@@ -54,7 +69,9 @@ const app = createSlackApp(dependencies, {
 if (transport === "http") {
   const port = positiveInteger(process.env.PORT ?? "8080", "PORT");
   await app.start(port);
-  console.log(`⚡ Slack adapter HTTPを起動しました: port=${port} repository=${repository}`);
+  console.log(
+    `⚡ Slack adapter HTTPを起動しました: port=${port} repository=${repository} github=${githubBackend}`,
+  );
 } else {
   await app.start();
   console.log(`⚡ Slack adapter Socket Modeを起動しました: ${repository}`);

@@ -54,6 +54,8 @@ adapter再起動後の申請は安全のため失効するため、本番化時�
 ## Cloud Run runtime
 
 本番では`AR_SLACK_TRANSPORT=http`を指定し、`/slack/events`でSlash Commandとinteractionを受信する。
+`AR_GITHUB_BACKEND=app`を指定し、GitHub Appのinstallation token経由でGitHub REST APIを利用する。
+production imageに`gh`は含めず、個人のGitHub tokenにも依存しない。
 `/healthz`はCloud Runのstartup、liveness、readiness確認に利用できる。
 Slackのrequest署名は`SLACK_SIGNING_SECRET`で検証する。
 
@@ -72,7 +74,11 @@ Secret ManagerからCloud Run環境変数へ次のsecretを注入する。
 
 - `SLACK_BOT_TOKEN`
 - `SLACK_SIGNING_SECRET`
-- GitHub Appのprivate key
+- `GITHUB_APP_PRIVATE_KEY`
+
+GitHub App IDとinstallation IDは`GITHUB_APP_ID`、`GITHUB_APP_INSTALLATION_ID`へ設定する。
+private keyは改行を含むPEM文字列、または改行を`\\n`に置換したSecret Managerの値を受け付ける。
+GitHub Appには対象repositoryに対するMetadata read、Contents read、Issues read/writeを与える。
 
 Cloud Runへのdeploy pipelineは各projectのCDが担当する。
 本repositoryはcontainer、health contract、環境変数、永続化境界までを提供する。

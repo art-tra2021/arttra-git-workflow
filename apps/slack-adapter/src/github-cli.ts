@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { parse } from "yaml";
 import type { SlackAdapterDependencies } from "./app.ts";
-import type { IssueFieldSchema, IssueTemplateSchema } from "./issue-schema.ts";
+import { buildIssueCreateInput, parseIssueForm } from "./github-shared.ts";
+import type { IssueTemplateSchema } from "./issue-schema.ts";
 import { toHumanWorkItem } from "./read-model.ts";
 import type { CreatedIssue, CreateIssueCommand, HumanWorkItem, WorkItemSnapshot } from "./types.ts";
 
@@ -23,18 +23,6 @@ interface GhContentEntry {
   name: string;
   path: string;
   type: string;
-}
-
-interface RawIssueForm {
-  name?: string;
-  title?: string;
-  labels?: string[];
-  body?: Array<{
-    type?: string;
-    id?: string;
-    attributes?: { label?: string; options?: string[]; value?: string };
-    validations?: { required?: boolean };
-  }>;
 }
 
 const execFileAsync = promisify(execFile);
@@ -176,29 +164,7 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
     if (!schema) {
       throw new Error(`Issue templateが見つかりません: ${command.template}`);
     }
-    const body = [
-      ...schema.fields.flatMap((field) => [
-        `## ${field.label}`,
-        "",
-        command.fields[field.id] || "未設定",
-        "",
-      ]),
-      "## 作成元",
-      "",
-      "Slack `/ar new`",
-    ].join("\n");
-    const labels = schema.labels.filter(
-      (label) => command.template !== "work" || !label.startsWith("merge/"),
-    );
-    if (command.template === "work") {
-      const mergeLabel: Record<string, string> = {
-        "通常レビュー（既定）": "merge/review",
-        自分でマージ可: "merge/self",
-        "緊急マージ（事後レビュー必須）": "merge/emergency",
-      };
-      const mergeMode = command.fields.merge ?? "";
-      labels.push(mergeLabel[mergeMode] ?? "merge/review");
-    }
+    const input = buildIssueCreateInput(command, schema);
     const url = (
       await gh([
         "issue",
@@ -206,10 +172,10 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
         "--repo",
         command.repository,
         "--title",
-        `${schema.titlePrefix}${command.title}`,
+        input.title,
         "--body",
-        body,
-        ...labels.flatMap((label) => ["--label", label]),
+        input.body,
+        ...input.labels.flatMap((label) => ["--label", label]),
       ])
     ).trim();
     return ghJson<CreatedIssue>([
@@ -256,44 +222,4 @@ async function gh(args: string[]): Promise<string> {
 
 async function ghJson<T>(args: string[]): Promise<T> {
   return JSON.parse(await gh(args)) as T;
-}
-
-function parseIssueForm(id: string, source: string): IssueTemplateSchema | null {
-  const raw = parse(source) as RawIssueForm;
-  if (!raw.name || !raw.body) {
-    return null;
-  }
-  const fields = raw.body.flatMap<IssueFieldSchema>((item) => {
-    if (!item.id || !item.attributes?.label) {
-      return [];
-    }
-    const kind =
-      item.type === "dropdown"
-        ? "select"
-        : item.type === "textarea"
-          ? "textarea"
-          : item.type === "input"
-            ? "input"
-            : null;
-    if (!kind) {
-      return [];
-    }
-    return [
-      {
-        id: item.id,
-        label: item.attributes.label,
-        kind,
-        required: item.validations?.required ?? false,
-        ...(item.attributes.options ? { options: item.attributes.options } : {}),
-        ...(item.attributes.value ? { initialValue: item.attributes.value } : {}),
-      },
-    ];
-  });
-  return {
-    id,
-    name: raw.name,
-    titlePrefix: raw.title ?? "",
-    labels: raw.labels ?? [],
-    fields,
-  };
 }

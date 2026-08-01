@@ -17,6 +17,9 @@ docker run --detach --rm \
 	--env AR_SLACK_TOKEN_VERIFICATION=off \
 	--env AR_GITHUB_REPO=example/repo \
 	--env AR_GITHUB_LOGIN=smoke \
+	--env GITHUB_APP_ID=1 \
+	--env GITHUB_APP_INSTALLATION_ID=1 \
+	--env GITHUB_APP_PRIVATE_KEY=smoke-not-used-by-healthcheck \
 	--env AR_STATE_BACKEND=local \
 	arttra-slack-adapter:test >/dev/null
 
