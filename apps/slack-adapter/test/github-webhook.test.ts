@@ -4,6 +4,7 @@ import { GitHubWebhookProcessor } from "../src/github-webhook-processor.ts";
 import { CloudTasksGitHubJobQueue, signJob, verifyJobSignature } from "../src/job-queue.ts";
 import type { PullRequestReviewService } from "../src/review-service.ts";
 import type { StateStore } from "../src/state-store.ts";
+import type { WorkNotificationService } from "../src/work-notification-service.ts";
 
 describe("GitHub webhook gateway", () => {
   test("GitHub HMACとheaderを検証してversion付きjobへ変換する", () => {
@@ -137,5 +138,36 @@ describe("GitHubWebhookProcessor", () => {
     });
 
     expect(syncCount).toBe(2);
+  });
+
+  test("CI結果の変更で人間向け即時通知を再評価する", async () => {
+    const values = new Map<string, unknown>();
+    const store = {
+      get: async (_namespace: string, key: string) => values.get(key) ?? null,
+      create: async (_namespace: string, key: string, value: unknown) => {
+        if (values.has(key)) return false;
+        values.set(key, value);
+        return true;
+      },
+    } as unknown as StateStore;
+    let notificationCount = 0;
+    const notifications = {
+      notifyImmediate: async () => {
+        notificationCount += 1;
+        return 1;
+      },
+    } as unknown as WorkNotificationService;
+    const processor = new GitHubWebhookProcessor(null, store, undefined, notifications);
+    const job = {
+      schemaVersion: 1 as const,
+      deliveryId: "delivery-check",
+      event: "check_run",
+      payload: { action: "completed" },
+    };
+
+    await processor.process(job);
+    await processor.process(job);
+
+    expect(notificationCount).toBe(1);
   });
 });

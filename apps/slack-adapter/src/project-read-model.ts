@@ -10,6 +10,21 @@ query ArttraWorkItems($owner: String!, $name: String!, $limit: Int!, $assignee: 
         url
         labels(first: 20) { nodes { name } }
         assignees(first: 10) { nodes { login } }
+        blockedBy(first: 20) { nodes { number title url state } }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) {
+          nodes {
+            number
+            url
+            state
+            mergeable
+            reviewRequests(first: 20) {
+              nodes { requestedReviewer { ... on User { login } } }
+            }
+            commits(last: 1) {
+              nodes { commit { statusCheckRollup { state } } }
+            }
+          }
+        }
         projectItems(first: 10) {
           nodes {
             fieldValues(first: 30) {
@@ -58,6 +73,21 @@ query ArttraOrganizationProjectItems($owner: String!, $number: Int!, $limit: Int
               state
               labels(first: 20) { nodes { name } }
               assignees(first: 10) { nodes { login } }
+              blockedBy(first: 20) { nodes { number title url state } }
+              closedByPullRequestsReferences(first: 10, includeClosedPrs: false) {
+                nodes {
+                  number
+                  url
+                  state
+                  mergeable
+                  reviewRequests(first: 20) {
+                    nodes { requestedReviewer { ... on User { login } } }
+                  }
+                  commits(last: 1) {
+                    nodes { commit { statusCheckRollup { state } } }
+                  }
+                }
+              }
             }
           }
         }
@@ -72,6 +102,23 @@ export interface ProjectIssueNode {
   url: string;
   labels: { nodes: Array<{ name: string }> };
   assignees: { nodes: Array<{ login: string }> };
+  blockedBy?: {
+    nodes: Array<{ number: number; title: string; url: string; state?: string }>;
+  };
+  closedByPullRequestsReferences?: {
+    nodes: Array<{
+      number: number;
+      url: string;
+      state?: string;
+      mergeable?: string;
+      reviewRequests?: {
+        nodes: Array<{ requestedReviewer?: { login?: string } | null }>;
+      };
+      commits?: {
+        nodes: Array<{ commit?: { statusCheckRollup?: { state?: string } | null } }>;
+      };
+    }>;
+  };
   projectItems: {
     nodes: Array<{
       fieldValues: {
@@ -178,8 +225,39 @@ export function projectIssueSnapshot(issue: ProjectIssueNode): WorkItemSnapshot 
       owner: issue.assignees.nodes[0]?.login ?? null,
       targetDate: fieldDate(fields, "Target date"),
     },
-    relationships: { blockedBy: [] },
-    pullRequest: null,
+    relationships: {
+      blockedBy: (issue.blockedBy?.nodes ?? [])
+        .filter((item) => !item.state || item.state.toUpperCase() === "OPEN")
+        .map((item) => ({ number: item.number, title: item.title, url: item.url })),
+    },
+    pullRequest: pullRequestSnapshot(issue),
+  };
+}
+
+function pullRequestSnapshot(issue: ProjectIssueNode): WorkItemSnapshot["pullRequest"] {
+  const pullRequest = (issue.closedByPullRequestsReferences?.nodes ?? []).find(
+    (candidate) => !candidate.state || candidate.state.toUpperCase() === "OPEN",
+  );
+  if (!pullRequest) return null;
+  const checkState = pullRequest.commits?.nodes.at(-1)?.commit?.statusCheckRollup?.state;
+  const checks: NonNullable<WorkItemSnapshot["pullRequest"]>["checks"] =
+    checkState === "SUCCESS"
+      ? "passed"
+      : checkState === "FAILURE" || checkState === "ERROR"
+        ? "failed"
+        : checkState
+          ? "pending"
+          : "none";
+  const mergeable = pullRequest.mergeable?.toUpperCase();
+  return {
+    number: pullRequest.number,
+    url: pullRequest.url,
+    checks,
+    mergeState:
+      mergeable === "CONFLICTING" ? "conflicting" : mergeable === "MERGEABLE" ? "clean" : "unknown",
+    requestedReviewers: (pullRequest.reviewRequests?.nodes ?? []).flatMap((request) =>
+      request.requestedReviewer?.login ? [request.requestedReviewer.login] : [],
+    ),
   };
 }
 

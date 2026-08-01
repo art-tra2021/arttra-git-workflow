@@ -19,7 +19,9 @@ import type { ProjectListClient } from "./project-list.ts";
 import { ProjectListSyncService, parseProjectListSyncCommand } from "./project-list-service.ts";
 import { PullRequestReviewService } from "./review-service.ts";
 import { SlackReviewNotifier } from "./slack-review-notifier.ts";
+import { SlackWorkNotifier } from "./slack-work-notifier.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
+import { WorkNotificationService } from "./work-notification-service.ts";
 
 const transport = (process.env.AR_SLACK_TRANSPORT ?? "socket").trim().toLowerCase();
 if (transport !== "socket" && transport !== "http") {
@@ -92,6 +94,14 @@ const projectListService = new ProjectListSyncService(
   },
 );
 const projectListChannelId = optional("AR_SLACK_PROJECT_LIST_CHANNEL_ID");
+const workNotificationChannelId = optional("AR_SLACK_WORK_CHANNEL_ID") ?? projectListChannelId;
+const workNotificationService = workNotificationChannelId
+  ? new WorkNotificationService(
+      dependencies,
+      store,
+      new SlackWorkNotifier(slackClient, workNotificationChannelId),
+    )
+  : null;
 const receiver =
   transport === "http"
     ? new ExpressReceiver({
@@ -118,11 +128,12 @@ const reviewService =
       )
     : null;
 const webhookProcessor =
-  reviewService || projectListChannelId
+  reviewService || projectListChannelId || workNotificationService
     ? new GitHubWebhookProcessor(
         reviewService,
         store,
         projectListChannelId ? () => projectListService.sync(projectListChannelId) : undefined,
+        workNotificationService,
       )
     : null;
 const jobSecret = strongSecret("AR_JOB_SECRET");
@@ -209,6 +220,34 @@ receiver?.router.post(
     } catch (error) {
       console.error(error instanceof Error ? error.message : "Project List同期に失敗しました。");
       response.status(500).json({ ok: false, error: "project_list_sync_failed" });
+    }
+  },
+);
+
+receiver?.router.post(
+  "/internal/work-digest",
+  raw({ type: "application/json", limit: "1kb" }),
+  async (request, response) => {
+    if (!workNotificationService) {
+      response.status(503).json({ ok: false, error: "work_notification_channel_required" });
+      return;
+    }
+    const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
+    if (!verifyJobSignature(body, request.header("x-ar-job-signature") ?? "", jobSecret)) {
+      response.status(401).json({ ok: false, error: "invalid_job_signature" });
+      return;
+    }
+    try {
+      const command = JSON.parse(body) as { schemaVersion?: number; kind?: string };
+      if (command.schemaVersion !== 1 || command.kind !== "work.digest") {
+        response.status(400).json({ ok: false, error: "invalid_digest_command" });
+        return;
+      }
+      const itemCount = await workNotificationService.sendDigest();
+      response.status(200).json({ ok: true, itemCount, schemaVersion: 1 });
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "作業ダイジェストに失敗しました。");
+      response.status(500).json({ ok: false, error: "digest_failed" });
     }
   },
 );

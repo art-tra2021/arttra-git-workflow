@@ -19,6 +19,38 @@ describe("GitHub Projects read model", () => {
                 url: "https://github.example/issues/42",
                 labels: { nodes: [{ name: "type/work" }, { name: "priority/P3" }] },
                 assignees: { nodes: [{ login: "alice" }] },
+                blockedBy: {
+                  nodes: [
+                    {
+                      number: 40,
+                      title: "API契約を決める",
+                      url: "https://github.example/issues/40",
+                      state: "OPEN",
+                    },
+                    {
+                      number: 39,
+                      title: "完了済み",
+                      url: "https://github.example/issues/39",
+                      state: "CLOSED",
+                    },
+                  ],
+                },
+                closedByPullRequestsReferences: {
+                  nodes: [
+                    {
+                      number: 51,
+                      url: "https://github.example/pull/51",
+                      state: "OPEN",
+                      mergeable: "CONFLICTING",
+                      reviewRequests: {
+                        nodes: [{ requestedReviewer: { login: "bob" } }],
+                      },
+                      commits: {
+                        nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }],
+                      },
+                    },
+                  ],
+                },
                 projectItems: {
                   nodes: [
                     {
@@ -46,6 +78,15 @@ describe("GitHub Projects read model", () => {
         priority: "P1",
         owner: "alice",
         targetDate: "2026-08-10",
+      },
+      relationships: {
+        blockedBy: [{ number: 40, title: "API契約を決める" }],
+      },
+      pullRequest: {
+        number: 51,
+        checks: "failed",
+        mergeState: "conflicting",
+        requestedReviewers: ["bob"],
       },
     });
   });

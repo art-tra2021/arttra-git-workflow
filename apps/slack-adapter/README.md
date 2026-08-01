@@ -127,21 +127,27 @@ GitHub App IDとinstallation IDは`GITHUB_APP_ID`、`GITHUB_APP_INSTALLATION_ID`
 GitHub AppのClient IDは`GITHUB_OAUTH_CLIENT_ID`へ、公開HTTPS URLは`AR_PUBLIC_BASE_URL`へ設定する。
 GitHub Appのcallback URLは`AR_PUBLIC_BASE_URL/github/callback`である。
 private keyは改行を含むPEM文字列、または改行を`\\n`に置換したSecret Managerの値を受け付ける。
-GitHub Appには対象repositoryに対するMetadata read、Contents read、Issues read/writeを与える。
+GitHub Appには対象repositoryに対するMetadata read、Contents read、Issues read/write、Checks readを与える。
 ProjectsのStatus、Priority、Target dateを読むため、Organization permissionsのProjects readも与える。
 ローカルの`gh` backendでは`gh auth refresh -s read:project`で同等のscopeを追加する。
 PR reviewer自動設定にはPull requests read/write、Ruleset確認にはAdministration readも与える。
-Webhook URLは`AR_PUBLIC_BASE_URL/github/events`とし、`issues`、`projects_v2_item`、`pull_request`、`pull_request_review`を購読する。
+Webhook URLは`AR_PUBLIC_BASE_URL/github/events`とし、`issues`、`projects_v2_item`、`pull_request`、`pull_request_review`、`check_run`、`check_suite`を購読する。
 `GITHUB_WEBHOOK_SECRET`でGitHub署名を検証し、生payloadをSlackへ表示しない。
 
 本番gatewayは検証済みwebhookをCloud Tasksへ積み、`/internal/github-events`のworker処理と分離する。
 `AR_JOB_QUEUE=cloud-tasks`を指定し、project、location、queue、任意のOIDC service accountを設定する。
 job本文は`AR_JOB_SECRET`でも署名し、GitHub delivery IDをCloud Tasks task IDに利用して重複投入を抑止する。
 Project項目、Issue、PR、reviewの変更を処理したworkerはGitHub Projectsを再取得し、設定済みSlack Listへ反映する。
+同じ再取得結果から、未着手・緊急、Blocked、CI失敗、conflictだけを`AR_SLACK_WORK_CHANNEL_ID`へ即時通知する。
+通知済み状態はIssue URLと判定内容のfingerprintで重複排除し、通常の進行中作業は即時投稿しない。
 
 Webhookの取りこぼしを修復する定期同期は、固定JSON `{"schemaVersion":1,"kind":"project-list.sync"}` を`/internal/project-list-sync`へ送る。
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
 定期同期と`/ar project sync`は同じ同期serviceと決定的なrow変換を使用する。
+
+日次作業一覧は、固定JSON `{"schemaVersion":1,"kind":"work.digest"}` を`/internal/work-digest`へ送る。
+本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から一日一回実行する。
+優先度、期限、次の行動で整列した未完了作業を一投稿へまとめ、生のGitHub eventを連続投稿しない。
 
 PR作成・更新時は、linked Issueのversion付き予定reviewer、変更fileに最後に一致するCODEOWNERS、active Rulesetの必要承認数をGitHubから再取得する。
 GitHubへ正式なuser/team review requestを設定した後、検証済みaccount mappingを持つ利用者だけSlackでmentionする。
