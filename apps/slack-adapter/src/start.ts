@@ -140,7 +140,7 @@ const jobSecret = strongSecret("AR_JOB_SECRET");
 const githubWebhookSecret = strongSecret("GITHUB_WEBHOOK_SECRET");
 const jobQueue = createJobQueue(webhookProcessor, jobSecret);
 
-receiver?.router.get("/healthz", (_request, response) => {
+receiver?.router.get("/health", (_request, response) => {
   response.status(200).json({ ok: true, schemaVersion: 1 });
 });
 
