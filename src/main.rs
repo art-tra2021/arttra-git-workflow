@@ -5,6 +5,7 @@ mod policy;
 mod presence;
 mod scheduler;
 mod setup;
+mod status;
 mod tasks;
 mod telemetry;
 
@@ -57,6 +58,15 @@ enum Commands {
     Issue(IssueArgs),
     /// Emit minimal repository context for AI or automation.
     Context {
+        /// Return machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the current work and the next recommended action.
+    Status {
+        /// Read this Issue instead of inferring it from the branch name.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        issue: Option<u64>,
         /// Return machine-readable output.
         #[arg(long)]
         json: bool,
@@ -521,6 +531,9 @@ fn run() -> Result<()> {
         Some(Commands::Branch(args)) => branch_command(args),
         Some(Commands::Issue(args)) => issue(args),
         Some(Commands::Context { json }) => context(json),
+        Some(Commands::Status { issue, json }) => {
+            status::show(issue, json, &Policy::load()?.branch)
+        }
         Some(Commands::Policy { json }) => show_policy(json),
         Some(Commands::Guard(args)) => guard(args),
         Some(Commands::Presence(args)) => presence(args),
@@ -566,6 +579,7 @@ fn tui() -> Result<()> {
     let action = Select::new(
         "何をしますか？",
         vec![
+            "今やることを見る",
             "commitを作る",
             "branchを作る",
             "Issueを作る",
@@ -581,6 +595,7 @@ fn tui() -> Result<()> {
     .prompt()?;
 
     match action {
+        "今やることを見る" => status::show(None, false, &Policy::load()?.branch),
         "commitを作る" => commit(CommitArgs::default()),
         "branchを作る" => branch_command(BranchArgs::default()),
         "Issueを作る" => issue(IssueArgs::default()),

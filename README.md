@@ -34,10 +34,13 @@ branch作成では種類、Issue番号、内容、担当者を選ぶだけで、
 作成時は`gh issue develop`を使うため、branchとIssueの関係もGitHubへ記録されます。
 
 ```console
+git ar status
 git ar branch
 mise run tasks
 ```
 
+`git ar status`は現在のbranchに紐づくIssue本文、blocked-by、PR、check、作業ツリー、upstreamを読み、次に行う操作とその理由を表示します。
+branch名からIssue番号を判定できない場合は、`git ar status --issue 123`で明示できます。
 `mise run tasks`は任意導入の`gh-dash`を開き、未導入・起動失敗時は組み込みの簡易表示へ戻ります。
 AIは常に`git ar tasks --json`を使い、TUIやextensionの有無に依存しません。
 
@@ -46,6 +49,7 @@ AIは常に`git ar tasks --json`を使い、TUIやextensionの有無に依存し
 TUIを操作する必要はありません。
 
 ```console
+git ar status --json
 git ar context --json
 git ar check --json
 git ar presence check --json
@@ -183,6 +187,7 @@ mise run presence:uninstall
 
 miseはruntime、CLI、短い入口を管理し、hkはmise環境内で実行します。
 Issue、Task、PR、担当、期限等の正本はGitHub Projectsとし、`git ar tasks`は担当IssueをTUIまたはJSONで表示します。
+現在の作業で次に行うことは`git ar status`、AIからは`git ar status --json`で確認します。
 Projectsを読むにはGitHub CLIへ`read:project` scopeが必要です。
 
 Rulesetの実効結果は`mise run rules`、AIや集計は`mise run rules:json`で確認します。

@@ -16,6 +16,8 @@ TUIは便利な入力手段であり、正本ではありません。
 ## 境界
 
 - `git ar context --json`は、AIへ渡せる最小限の状態を決定的に生成する。
+- `git ar status`はbranchに紐づくIssue、PR、Git作業ツリーを構造化し、固定優先度から次の行動を返す。
+- `git ar status --json`は人間向け表示と同じ判定結果をschema version付きで返す。
 - `git ar commit`はTUIと引数から同じcommit候補を生成する。
 - `git ar issue`はTUIと引数から同じIssue本文を生成する。
 - `git ar branch`はTUIと引数から同じbranch名を生成し、`pre-push`も同じvalidatorを呼ぶ。

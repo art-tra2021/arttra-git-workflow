@@ -48,6 +48,8 @@ GitHub Ruleset側の承認数は0にし、`policy` checkがこの差を機械判
 ## 人間とAI
 
 人間は`git ar`のTUI、AIと自動化は同じ処理の引数とJSONを使います。
+日常作業の入口は`git ar status`とし、Issueの目的・完了条件・blocked-by、PR、check、ローカル変更から次の行動を確認します。
+AIは同じ判定を`git ar status --json`で取得します。
 commitは`git ar commit`だけを入口にし、hookは`AR-Commit: git-ar/v1` trailerを確認します。
 branch命名違反とツールチェーン違反は、安定したerror code、日本語説明、実行可能な修正コマンドを返します。
 
