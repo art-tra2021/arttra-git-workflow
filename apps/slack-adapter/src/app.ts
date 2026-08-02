@@ -208,15 +208,13 @@ export function createSlackApp(
       return;
     }
     if (["new", "issue"].includes(normalized)) {
-      const repositories = await dependencies.listRepositories();
-      await client.views.open({
-        trigger_id: command.trigger_id,
-        view: issueRepositoryModal(
-          command.channel_id,
-          command.response_url,
-          command.team_id,
-          repositories,
-        ),
+      await openIssueRepositoryFlow({
+        views: client.views as unknown as IssueModalViews,
+        listRepositories: () => dependencies.listRepositories(),
+        triggerId: command.trigger_id,
+        channelId: command.channel_id,
+        responseUrl: command.response_url,
+        slackTeamId: command.team_id,
       });
       return;
     }
@@ -427,6 +425,80 @@ interface IssueModalMetadata {
   slackTeamId: string;
   repository: string;
   template: IssueTemplateId;
+}
+
+interface IssueModalViews {
+  open(input: { trigger_id: string; view: unknown }): Promise<{
+    view?: { id?: string | null } | null;
+  }>;
+  update(input: { view_id: string; view: unknown }): Promise<unknown>;
+}
+
+interface IssueRepositoryFlowOptions {
+  views: IssueModalViews;
+  listRepositories(): Promise<string[]>;
+  triggerId: string;
+  channelId: string;
+  responseUrl: string;
+  slackTeamId: string;
+}
+
+export async function openIssueRepositoryFlow(options: IssueRepositoryFlowOptions): Promise<void> {
+  const opened = await options.views.open({
+    trigger_id: options.triggerId,
+    view: issueRepositoryLoadingModal(),
+  });
+  const viewId = opened.view?.id;
+  if (!viewId) {
+    throw new Error("Issue作成モーダルのIDをSlackから取得できませんでした。");
+  }
+
+  let nextView: unknown;
+  try {
+    const repositories = await options.listRepositories();
+    nextView = issueRepositoryModal(
+      options.channelId,
+      options.responseUrl,
+      options.slackTeamId,
+      repositories,
+    );
+  } catch (error) {
+    nextView = issueRepositoryErrorModal(
+      error instanceof Error ? error.message : "repository一覧を取得できませんでした。",
+    );
+  }
+  await options.views.update({ view_id: viewId, view: nextView });
+}
+
+function issueRepositoryLoadingModal() {
+  return {
+    type: "modal" as const,
+    title: { type: "plain_text" as const, text: "Issueを作成" },
+    close: { type: "plain_text" as const, text: "キャンセル" },
+    blocks: [
+      {
+        type: "section" as const,
+        text: { type: "plain_text" as const, text: "Repositoryを取得しています…" },
+      },
+    ],
+  };
+}
+
+function issueRepositoryErrorModal(message: string) {
+  return {
+    type: "modal" as const,
+    title: { type: "plain_text" as const, text: "Issueを作成" },
+    close: { type: "plain_text" as const, text: "閉じる" },
+    blocks: [
+      {
+        type: "section" as const,
+        text: {
+          type: "plain_text" as const,
+          text: `${message.slice(0, 2500)}\n\n少し待ってから /ar new を再実行してください。`,
+        },
+      },
+    ],
+  };
 }
 
 function issueRepositoryModal(
