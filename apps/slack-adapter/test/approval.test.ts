@@ -40,10 +40,11 @@ describe("Issue approval policy", () => {
     );
   });
 
-  test("明示された自己承認可能者だけは直通できる", () => {
+  test("自己承認可能者は直通できるが承認待ちを自己承認しない", () => {
     const selfApprovers = new Set(["U_PL"]);
     expect(canBypassIssueApproval("U_PL", selfApprovers)).toBe(true);
-    expect(canApproveIssue("U_PL", "U_PL", new Set(), selfApprovers)).toBe(true);
+    expect(canApproveIssue("U_PL", "U_PL", new Set(), selfApprovers)).toBe(false);
+    expect(canApproveIssue("U_MEMBER", "U_PL", new Set(), selfApprovers)).toBe(true);
   });
 
   test("本人マージはSlack設定とGitHub write権限の両方がある場合だけ直通する", () => {
@@ -100,6 +101,22 @@ describe("IssueApprovalService", () => {
         async () => ({ number: 1, title: "nope", url: "https://example.test/1" }),
       ),
     ).rejects.toThrow("権限がありません");
+  });
+
+  test("申請後に自己承認設定へ変わっても本人承認を拒否する", async () => {
+    const root = await mkdtemp(join(tmpdir(), "arttra-approval-"));
+    const approvals = service(root);
+    const requested = await approvals.request(privilegedCommand(), "U_PL");
+    expect(
+      approvals.approve(
+        requested.id,
+        "U_PL",
+        { approvers: new Set(), selfApprovers: new Set(["U_PL"]) },
+        async () => {},
+        async () => ({ number: 1, title: "nope", url: "https://example.test/1" }),
+      ),
+    ).rejects.toThrow("権限がありません");
+    expect((await approvals.status(requested.id))?.status).toBe("pending");
   });
 
   test("期限を過ぎた申請を永続的にexpiredへ遷移する", async () => {
