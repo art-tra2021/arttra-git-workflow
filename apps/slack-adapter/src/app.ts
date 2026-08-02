@@ -328,14 +328,7 @@ export function createSlackApp(
         repository: metadata.repository,
         template: metadata.template,
         title: inputValue(view.state.values, "title", "value"),
-        fields: Object.fromEntries(
-          schema.fields.map((field) => [
-            field.id,
-            field.kind === "select"
-              ? selectedValue(view.state.values, field.id, "value")
-              : inputValue(view.state.values, field.id, "value"),
-          ]),
-        ),
+        fields: issueFieldValues(view.state.values, schema),
         actor: body.user.id,
         slackTeamId: metadata.slackTeamId,
         assigneeSlackUserIds: selectedUsers(view.state.values, "assignees", "value"),
@@ -840,6 +833,31 @@ function inputValue(
   actionId: string,
 ): string {
   return values[blockId]?.[actionId]?.value ?? "";
+}
+
+export function issueFieldValues(
+  values: Record<
+    string,
+    Record<
+      string,
+      {
+        value?: string | null;
+        selected_option?: { value: string } | null;
+      }
+    >
+  >,
+  schema: IssueTemplateSchema,
+): Record<string, string> {
+  return Object.fromEntries(
+    schema.fields
+      .filter((field) => field.id !== "merge")
+      .map((field) => [
+        field.id,
+        field.kind === "select"
+          ? selectedValue(values, field.id, "value")
+          : inputValue(values, field.id, "value"),
+      ]),
+  );
 }
 
 export function selectedValue(
