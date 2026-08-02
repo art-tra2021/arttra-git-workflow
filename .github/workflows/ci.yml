@@ -70,6 +70,6 @@ jobs:
         shell: pwsh
         run: |
           git ar check --quick --json | jq -e '.schema_version == 1 and .task == "quick" and .ok == true'
-          git ar tasks --json | jq -e 'type == "array"'
+          git ar tasks --json | jq -e '.schema_version == 1 and (.items | type == "array")'
           git ar issue --kind task --title smoke --background smoke --goal smoke --done smoke --parent 12 --blocked-by 10 --blocking 12 --json |
             jq -e '.parent == 12 and .blocked_by == [10] and .blocking == [12]'

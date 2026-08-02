@@ -34,6 +34,11 @@ runtime_manager = "mise"
 mode = "local"
 path = ".arttra/local/events.jsonl"
 
+[tasks]
+# 自分の仕事一覧は単一repositoryではなくOrganization Projectを正本にする。
+project_owner = "art-tra2021"
+project_number = 8
+
 [presence]
 # 共有するのはファイルパス、状態、branch、時刻だけ。diff本文は送らない。
 # この実験リポジトリでは有効。新規テンプレートでは導入時に明示選択させる。

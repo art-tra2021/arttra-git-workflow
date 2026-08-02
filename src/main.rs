@@ -569,7 +569,7 @@ fn run() -> Result<()> {
             json,
             open,
             dashboard,
-        }) => tasks::show(json, open, dashboard),
+        }) => tasks::show(json, open, dashboard, &Policy::load()?.tasks),
         Some(Commands::Telemetry { json }) => {
             let root = guard::repository_root()?;
             telemetry::report(&Policy::load()?, &root, json)
@@ -631,7 +631,7 @@ fn tui() -> Result<()> {
             let policy = Policy::load()?;
             presence::check(&policy.presence, false)
         }
-        "自分のタスクを見る" => tasks::show(false, false, true),
+        "自分のタスクを見る" => tasks::show(false, false, true, &Policy::load()?.tasks),
         "一括チェックする" => check(false, false),
         "Rules Insightsを見る" => governance::rules(10, None, false),
         "環境を診断する" => doctor(false),
