@@ -10,6 +10,7 @@ import { GitHubWebhookProcessor } from "./github-webhook-processor.ts";
 import { completeGoogleCalendarCallback } from "./google-calendar-callback.ts";
 import { GoogleCalendarService } from "./google-calendar-service.ts";
 import { type GitHubIdentity, GitHubIdentityService } from "./identity-service.ts";
+import { IssueMetadataCache } from "./issue-metadata-cache.ts";
 import {
   CloudTasksGitHubJobQueue,
   type GitHubJobQueue,
@@ -75,6 +76,7 @@ const dependencies =
         },
       })
     : new GitHubCliDependencies(repository, githubLogin, owners, project);
+const issueMetadata = new IssueMetadataCache(dependencies, store);
 const googleCalendarSettings = googleCalendarConfig();
 const googleCalendarService = googleCalendarSettings
   ? new GoogleCalendarService({
@@ -251,6 +253,30 @@ receiver?.router.post(
 );
 
 receiver?.router.post(
+  "/internal/issue-metadata-sync",
+  raw({ type: "application/json", limit: "1kb" }),
+  async (request, response) => {
+    const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
+    if (!verifyJobSignature(body, request.header("x-ar-job-signature") ?? "", jobSecret)) {
+      response.status(401).json({ ok: false, error: "invalid_job_signature" });
+      return;
+    }
+    try {
+      const command = JSON.parse(body) as { schemaVersion?: number; kind?: string };
+      if (command.schemaVersion !== 1 || command.kind !== "issue-metadata.sync") {
+        response.status(400).json({ ok: false, error: "invalid_issue_metadata_command" });
+        return;
+      }
+      const result = await issueMetadata.refresh([repository]);
+      response.status(200).json({ ok: true, schemaVersion: 1, ...result });
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "Issue metadata同期に失敗しました。");
+      response.status(500).json({ ok: false, error: "issue_metadata_sync_failed" });
+    }
+  },
+);
+
+receiver?.router.post(
   "/internal/project-list-sync",
   raw({ type: "application/json", limit: "1kb" }),
   async (request, response) => {
@@ -390,6 +416,7 @@ const app = createSlackApp(dependencies, {
   selfApproverUserIds,
   approvalService,
   identityService,
+  issueMetadata,
   ...(googleCalendarService ? { googleCalendarService } : {}),
   syncProjectList: (channelId, requesterUserId) =>
     projectListService.sync(channelId, requesterUserId),

@@ -7,6 +7,7 @@ import {
 import type { GoogleCalendarService } from "./google-calendar-service.ts";
 import type { GitHubIdentityService } from "./identity-service.ts";
 import { buildCreateIssueCommand } from "./issue-command.ts";
+import type { IssueMetadataSource } from "./issue-metadata-cache.ts";
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
 import { workItemBlocks } from "./presentation.ts";
 import type { CreatedIssue, CreateIssueCommand, HumanWorkItem } from "./types.ts";
@@ -30,6 +31,7 @@ export interface SlackAppOptions {
   approvalService: IssueApprovalService;
   identityService: GitHubIdentityService;
   googleCalendarService?: GoogleCalendarService;
+  issueMetadata?: IssueMetadataSource;
   syncProjectList?: (
     channelId: string,
     requesterUserId?: string,
@@ -50,6 +52,7 @@ export function createSlackApp(
 ): App {
   const approvers = new Set(options.approverUserIds ?? []);
   const selfApprovers = new Set(options.selfApproverUserIds ?? []);
+  const issueMetadata = options.issueMetadata ?? dependencies;
   const app = new App({
     token: options.token,
     ...(options.signingSecret ? { signingSecret: options.signingSecret } : {}),
@@ -210,7 +213,7 @@ export function createSlackApp(
     if (["new", "issue"].includes(normalized)) {
       await openIssueRepositoryFlow({
         views: client.views as unknown as IssueModalViews,
-        listRepositories: () => dependencies.listRepositories(),
+        listRepositories: () => issueMetadata.listRepositories(),
         triggerId: command.trigger_id,
         channelId: command.channel_id,
         responseUrl: command.response_url,
@@ -254,7 +257,7 @@ export function createSlackApp(
       viewId: view.id,
       loadingText: "Issue種別を取得しています…",
       loadNextView: async () => {
-        const templates = await dependencies.listIssueTemplates(repository);
+        const templates = await issueMetadata.listIssueTemplates(repository);
         return issueTemplateModal({ ...metadata, repository }, templates);
       },
     });
@@ -269,7 +272,7 @@ export function createSlackApp(
       viewId: view.id,
       loadingText: "入力項目を取得しています…",
       loadNextView: async () => {
-        const schema = (await dependencies.listIssueTemplates(metadata.repository)).find(
+        const schema = (await issueMetadata.listIssueTemplates(metadata.repository)).find(
           (candidate) => candidate.id === template,
         );
         if (!schema) {
@@ -284,7 +287,7 @@ export function createSlackApp(
     const metadata = parseMetadata(view.private_metadata);
     await ack();
     try {
-      const schema = (await dependencies.listIssueTemplates(metadata.repository)).find(
+      const schema = (await issueMetadata.listIssueTemplates(metadata.repository)).find(
         (candidate) => candidate.id === metadata.template,
       );
       if (!schema) {
