@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   issueDetailModal,
+  issueFieldValues,
   issueRepositoryPickerModal,
   openIssueRepositoryFlow,
   repositoryOptions,
   selectedValue,
   transitionIssueModal,
 } from "../src/app.ts";
-import type { IssueTemplateSchema } from "../src/issue-schema.ts";
+import { type IssueTemplateSchema, issueTemplate } from "../src/issue-schema.ts";
 
 describe("Slack Issue modal flow", () => {
   test("初回モーダルを外部API待ちなしで開きrepository cacheを検索する", () => {
@@ -79,6 +80,27 @@ describe("Slack Issue modal flow", () => {
     expect(rendered).toContain("自分でマージ可");
     expect(rendered).toContain("緊急マージ（事後レビュー必須）");
     expect(rendered).toContain("許可できる人へ承認依頼");
+  });
+
+  test("work templateの旧merge項目を送信時に二重読取しない", () => {
+    expect(
+      issueFieldValues(
+        {
+          background: { value: { value: "背景" } },
+          outcome: { value: { value: "成果" } },
+          done: { value: { value: "- [ ] 完了" } },
+          blocked_by: { value: { value: "" } },
+          target_date: { value: { value: "2026-08-04" } },
+        },
+        issueTemplate("work"),
+      ),
+    ).toEqual({
+      background: "背景",
+      outcome: "成果",
+      done: "- [ ] 完了",
+      blocked_by: "",
+      target_date: "2026-08-04",
+    });
   });
 
   test("短寿命のtrigger_idをrepository取得より先に使用する", async () => {
