@@ -131,7 +131,9 @@ Google OAuthのcallback URLは`AR_PUBLIC_BASE_URL/google/callback`である。
 
 依存管理とtestにはBunを使い、Socket Modeの実行にはmise管理のNode.jsを使う。
 テスト時のGitHub操作には認証済みの`gh`を使う。本番では同じdependency interfaceをGitHub App実装へ差し替える。
-`/ar new`はFirestoreへ永続化したrepository一覧とIssue templateを読み、実際のfieldからmodalを生成する。
+`/ar new`はGitHub待ちなしで最初のmodalを開き、Repository欄のSlack external selectからFirestoreへ永続化した一覧を検索する。
+Slash Commandへ応答した後のbackground処理へ依存しないため、Cloud Runのrequest終了後にCPUが停止してもloading画面で止まらない。
+Repository決定後はFirestoreへ永続化したIssue templateを読み、実際のfieldからmodalを生成する。
 Cloud Runのinstanceが切り替わっても同じcacheを利用し、操作のたびにGitHub APIの応答を待たない。
 未登録repositoryのtemplateだけは初回選択時にGitHubから取得して永続化する。
 
