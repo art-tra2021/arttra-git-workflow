@@ -94,7 +94,7 @@ describe("Slack Project List", () => {
     await ensureProjectListDefinition(client, "FPROJECTLIST");
 
     expect(updateCalls).toEqual([
-      expect.objectContaining({ id: "FPROJECTLIST", name: "ART-TRA Work", todo_mode: true }),
+      expect.objectContaining({ id: "FPROJECTLIST", name: "仕事一覧", todo_mode: true }),
     ]);
   });
 

@@ -62,7 +62,7 @@ mise run slack:list:json
 2回目以降はGitHub Issue URLを安定キーとして、既存行の更新、新規行の追加、Projectから外れた行の削除を行う。
 GitHub OAuthで対応付け済みの担当者はSlackのnative user列へ反映する。
 未連携者の担当者欄は空欄とし、表示名やメールから推測しない。
-旧9列版は削除せず`ART-TRA Work（旧表示）`へ改名し、新しい5列版を別Listとして作成する。
+旧版は削除せず`ART-TRA Work（旧表示）`へ改名し、Slack標準の担当者・期限日を使う5列版の`仕事一覧`を別Listとして作成する。
 起動中のadapterでは、同期先channelから`/ar project sync`を実行しても同じ処理を呼び出せる。
 `/ar list sync`と従来の`/ar canvas sync`も移行用aliasとして同じ処理を呼ぶ。
 同じchannelへの同期はleaseで直列化し、Webhook、定期同期、人間の手動操作が重なって行を重複作成しない。
@@ -73,7 +73,7 @@ GitHub OAuthで対応付け済みの担当者はSlackのnative user列へ反映�
 /invite @ART-TRA Work Lab
 ```
 
-初回同期後、作成された`ART-TRA Work` Listをchannel tabへ一度だけ追加する。
+初回同期後、作成された`仕事一覧` Listをchannel tabへ一度だけ追加する。
 SlackのLists APIはpaid planでのみ利用できるため、未対応planでは同期を開始しない。
 
 Issue modalの担当者と予定レビュワーはSlackのネイティブなメンバー選択を使う。
