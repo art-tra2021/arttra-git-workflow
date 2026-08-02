@@ -8,6 +8,7 @@
     "approval:status": "node --env-file-if-exists=.env src/approval-status.ts",
     "review:status": "node --env-file-if-exists=.env src/review-status.ts",
     "project-list:sync": "node --env-file-if-exists=.env src/sync-project-list.ts",
+    "calendar:sync": "node --env-file-if-exists=.env src/sync-google-calendar.ts",
     "lint": "biome check .",
     "start": "node --env-file-if-exists=.env src/start.ts",
     "test": "bun test",

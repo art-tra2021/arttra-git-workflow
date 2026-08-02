@@ -98,6 +98,11 @@ description = "GitHub ProjectsからSlack Listへ同期し、AI向けJSON結果�
 depends = ["slack:install"]
 run = "bun run --cwd apps/slack-adapter project-list:sync -- --json"
 
+[tasks."slack:calendar"]
+description = "本人担当の期限付きProjects項目をGoogle Calendarへ同期する"
+depends = ["slack:install"]
+run = "bun run --cwd apps/slack-adapter calendar:sync --"
+
 [tasks."slack:canvas"]
 description = "slack:listの移行用alias"
 run = "mise run slack:list"

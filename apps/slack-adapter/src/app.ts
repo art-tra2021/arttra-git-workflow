@@ -4,6 +4,7 @@ import {
   type IssueApprovalService,
   requiresIssueApproval,
 } from "./approval.ts";
+import type { GoogleCalendarService } from "./google-calendar-service.ts";
 import type { GitHubIdentityService } from "./identity-service.ts";
 import { buildCreateIssueCommand } from "./issue-command.ts";
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
@@ -28,6 +29,7 @@ export interface SlackAppOptions {
   selfApproverUserIds?: string[];
   approvalService: IssueApprovalService;
   identityService: GitHubIdentityService;
+  googleCalendarService?: GoogleCalendarService;
   syncProjectList?: (
     channelId: string,
     requesterUserId?: string,
@@ -95,6 +97,81 @@ export function createSlackApp(
       });
       return;
     }
+    if (normalized === "connect google") {
+      if (!options.googleCalendarService) {
+        await respond({
+          response_type: "ephemeral",
+          text: "Google Calendar連携はまだ管理者により設定されていません。",
+        });
+        return;
+      }
+      const url = await options.googleCalendarService.connectUrl(command.team_id, command.user_id);
+      await respond({
+        response_type: "ephemeral",
+        text: `Google Calendarを連携してください: ${url}`,
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: "本人がGitHub Projectsで担当する未完了・期限付き項目だけを、専用の `ART-TRA Work` カレンダーへ同期します。既存の予定は読みません。",
+            },
+            accessory: {
+              type: "button",
+              text: { type: "plain_text", text: "Calendarと連携" },
+              url,
+              action_id: "ar.google.connect.open",
+            },
+          },
+        ],
+      });
+      return;
+    }
+    if (normalized === "disconnect google") {
+      if (!options.googleCalendarService) {
+        await respond({
+          response_type: "ephemeral",
+          text: "Google Calendar連携はまだ管理者により設定されていません。",
+        });
+        return;
+      }
+      const removed = await options.googleCalendarService.disconnect(
+        command.team_id,
+        command.user_id,
+      );
+      await respond({
+        response_type: "ephemeral",
+        text: removed
+          ? "Google Calendar連携を解除しました。作成済みの専用カレンダーは履歴として残ります。"
+          : "Google Calendarは連携されていません。",
+      });
+      return;
+    }
+    if (["calendar", "calendar sync"].includes(normalized)) {
+      if (!options.googleCalendarService) {
+        await respond({
+          response_type: "ephemeral",
+          text: "Google Calendar連携はまだ管理者により設定されていません。",
+        });
+        return;
+      }
+      try {
+        const result = await options.googleCalendarService.syncUser(
+          command.team_id,
+          command.user_id,
+        );
+        await respond({
+          response_type: "ephemeral",
+          text: `自分のCalendarを同期しました。対象${result.itemCount}件 / 新規${result.created}件 / 更新${result.updated}件 / 予定から除外${result.deleted}件`,
+        });
+      } catch (error) {
+        await respond({
+          response_type: "ephemeral",
+          text: error instanceof Error ? error.message : "Google Calendarを同期できませんでした。",
+        });
+      }
+      return;
+    }
     const approvalMatch = command.text.trim().match(/^approval\s+([A-Za-z0-9-]+)$/i);
     if (approvalMatch?.[1]) {
       const approval = await options.approvalService.status(approvalMatch[1]);
@@ -159,6 +236,10 @@ export function createSlackApp(
   });
 
   app.action("ar.github.connect.open", async ({ ack }) => {
+    await ack();
+  });
+
+  app.action("ar.google.connect.open", async ({ ack }) => {
     await ack();
   });
 

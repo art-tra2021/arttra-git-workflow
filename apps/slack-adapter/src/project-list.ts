@@ -1,20 +1,11 @@
 import type { HumanWorkItem } from "./types.ts";
 
-export type ProjectListColumnKey =
-  | "task"
-  | "status"
-  | "priority"
-  | "assignee"
-  | "github_owner"
-  | "target_date"
-  | "next_action"
-  | "repository"
-  | "github";
+export type ProjectListColumnKey = "task" | "status" | "assignee" | "target_date" | "github";
 
 export type ProjectListColumns = Record<ProjectListColumnKey, string>;
 
 export interface ProjectListState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   listId: string;
   columns: ProjectListColumns;
 }
@@ -88,18 +79,21 @@ export type ResolveSlackUserId = (githubLogin: string) => Promise<string | null>
 
 const projectListColumnKeys: ProjectListColumnKey[] = [
   "task",
-  "status",
-  "priority",
   "assignee",
-  "github_owner",
   "target_date",
-  "next_action",
-  "repository",
+  "status",
   "github",
 ];
 
 export const projectListSchema: ProjectListSchemaColumn[] = [
   { key: "task", name: "タスク", type: "text", is_primary_column: true },
+  {
+    key: "assignee",
+    name: "担当者",
+    type: "user",
+    options: { format: "single_entity", show_member_name: true, notify_users: false },
+  },
+  { key: "target_date", name: "期限", type: "date", options: { date_format: "YYYY/MM/DD" } },
   {
     key: "status",
     name: "状態",
@@ -117,31 +111,7 @@ export const projectListSchema: ProjectListSchemaColumn[] = [
       ],
     },
   },
-  {
-    key: "priority",
-    name: "優先度",
-    type: "select",
-    options: {
-      format: "single_select",
-      choices: [
-        { value: "P0", label: "P0", color: "red" },
-        { value: "P1", label: "P1", color: "orange" },
-        { value: "P2", label: "P2", color: "yellow" },
-        { value: "P3", label: "P3", color: "gray" },
-      ],
-    },
-  },
-  {
-    key: "assignee",
-    name: "Slack担当者",
-    type: "user",
-    options: { format: "single_entity", show_member_name: true, notify_users: false },
-  },
-  { key: "github_owner", name: "GitHub担当者", type: "text" },
-  { key: "target_date", name: "期限日", type: "date", options: { date_format: "YYYY/MM/DD" } },
-  { key: "next_action", name: "次の行動", type: "text" },
-  { key: "repository", name: "リポジトリ", type: "text" },
-  { key: "github", name: "GitHub", type: "link" },
+  { key: "github", name: "詳細", type: "link" },
 ];
 
 export async function createProjectList(
@@ -173,7 +143,7 @@ export async function createProjectList(
       user_ids: [requesterUserId],
     });
   }
-  return { schemaVersion: 1, listId, columns };
+  return { schemaVersion: 2, listId, columns };
 }
 
 export async function ensureProjectListDefinition(
@@ -184,6 +154,26 @@ export async function ensureProjectListDefinition(
     id: listId,
     name: "ART-TRA Work",
     description_blocks: projectListDescription(),
+    todo_mode: true,
+  });
+}
+
+export async function markLegacyProjectList(
+  client: ProjectListClient,
+  listId: string,
+): Promise<void> {
+  await client.slackLists.update({
+    id: listId,
+    name: "ART-TRA Work（旧表示）",
+    description_blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: "新しい読みやすいListへ移行済みです。このListは履歴確認のため残しています。",
+        },
+      },
+    ],
     todo_mode: true,
   });
 }
@@ -256,14 +246,13 @@ async function projectListFields(
 ): Promise<Array<Record<string, unknown>>> {
   const slackUserId = item.owner ? await resolveSlackUserId(item.owner) : null;
   return [
-    textField(columns.task, `${repositoryLabel(item.url)}#${item.issueNumber} ${item.title}`),
-    { column_id: columns.status, select: [item.status] },
-    { column_id: columns.priority, select: [item.priority] },
+    textField(
+      columns.task,
+      `${item.priority === "P2" ? "" : `[${item.priority}] `}${repositoryLabel(item.url)}#${item.issueNumber} ${item.title}`,
+    ),
     { column_id: columns.assignee, user: slackUserId ? [slackUserId] : [] },
-    textField(columns.github_owner, item.owner ?? "未設定"),
     { column_id: columns.target_date, date: item.targetDate ? [item.targetDate] : [] },
-    textField(columns.next_action, item.nextAction),
-    textField(columns.repository, repositoryLabel(item.url)),
+    { column_id: columns.status, select: [item.status] },
     {
       column_id: columns.github,
       link: [{ original_url: item.url, display_as_url: false, display_name: "Issueを開く" }],
@@ -336,7 +325,7 @@ function assertChannelId(channelId: string): void {
 }
 
 function assertState(state: ProjectListState): void {
-  if (state.schemaVersion !== 1 || !/^F[A-Z0-9]+$/.test(state.listId)) {
+  if (state.schemaVersion !== 2 || !/^F[A-Z0-9]+$/.test(state.listId)) {
     throw new Error("Slack Listの保存状態が不正です。");
   }
   columnsFromSchema(
