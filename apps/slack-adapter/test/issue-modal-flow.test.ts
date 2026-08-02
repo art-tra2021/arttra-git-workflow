@@ -4,6 +4,7 @@ import {
   issueRepositoryPickerModal,
   openIssueRepositoryFlow,
   repositoryOptions,
+  selectedValue,
   transitionIssueModal,
 } from "../src/app.ts";
 import type { IssueTemplateSchema } from "../src/issue-schema.ts";
@@ -33,6 +34,25 @@ describe("Slack Issue modal flow", () => {
         value: "art-tra2021/frontend",
       },
     ]);
+  });
+
+  test("外部選択のaction IDからrepositoryを読み取り欠落を拒否する", () => {
+    expect(
+      selectedValue(
+        {
+          repository: {
+            "ar.issue.repository.options": {
+              selected_option: { value: "art-tra2021/arttra-git-workflow" },
+            },
+          },
+        },
+        "repository",
+        "ar.issue.repository.options",
+      ),
+    ).toBe("art-tra2021/arttra-git-workflow");
+    expect(() => selectedValue({}, "repository", "ar.issue.repository.options")).toThrow(
+      "repositoryが選択されていません",
+    );
   });
 
   test("work templateの内容に依存せずPR確認方法を明示する", () => {
