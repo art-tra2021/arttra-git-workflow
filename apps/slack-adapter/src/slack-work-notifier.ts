@@ -1,7 +1,11 @@
 import type { WebClient } from "@slack/web-api";
 import { workItemBlocks } from "./presentation.ts";
 import type { HumanWorkItem } from "./types.ts";
-import type { WorkNotifier } from "./work-notification-service.ts";
+import type {
+  WorkNotificationContext,
+  WorkNotificationResult,
+  WorkNotifier,
+} from "./work-notification-service.ts";
 
 export class SlackWorkNotifier implements WorkNotifier {
   private readonly client: Pick<WebClient, "chat">;
@@ -12,14 +16,32 @@ export class SlackWorkNotifier implements WorkNotifier {
     this.channelId = channelId;
   }
 
-  async notify(item: HumanWorkItem): Promise<void> {
-    await this.client.chat.postMessage({
+  async notify(
+    item: HumanWorkItem,
+    context: WorkNotificationContext,
+  ): Promise<WorkNotificationResult> {
+    const mention = context.slackUserId ? `<@${context.slackUserId}> ` : "";
+    const response = await this.client.chat.postMessage({
       channel: this.channelId,
-      text: `#${item.issueNumber} ${item.title}: ${item.nextAction}`,
-      blocks: workItemBlocks(item),
+      text: `${mention}#${item.issueNumber} ${item.title}: ${item.nextAction}`,
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `${mention}*${context.kind === "deadline" ? "期限のお知らせ" : "作業状況の更新"}*`,
+          },
+        },
+        ...workItemBlocks(item),
+      ],
+      ...(context.threadTs ? { thread_ts: context.threadTs, reply_broadcast: false } : {}),
       unfurl_links: false,
       unfurl_media: false,
     });
+    if (!response.ts) {
+      throw new Error("Slack作業通知のmessage tsを取得できませんでした。");
+    }
+    return { messageTs: response.ts };
   }
 
   async digest(items: HumanWorkItem[]): Promise<void> {

@@ -55,6 +55,9 @@ export interface HumanWorkItem {
     | "CHECKS_FAILED"
     | "CONFLICTING"
     | "REVIEW_REQUESTED"
+    | "DUE_SOON"
+    | "DUE_TODAY"
+    | "OVERDUE"
     | "ACTIVE_WORK"
     | "COMPLETED";
   nextActor: string;

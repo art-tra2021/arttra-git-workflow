@@ -3,15 +3,30 @@ import type { StateStore } from "./state-store.ts";
 import type { HumanWorkItem } from "./types.ts";
 
 const NOTIFICATION_NAMESPACE = "work-notification";
+const DEADLINE_NAMESPACE = "work-deadline-notification";
+const THREAD_NAMESPACE = "work-thread";
+const DAY_MILLISECONDS = 24 * 60 * 60 * 1000;
 
 export interface WorkItemSource {
   loadProjectItems(): Promise<HumanWorkItem[]>;
 }
 
 export interface WorkNotifier {
-  notify(item: HumanWorkItem): Promise<void>;
+  notify(item: HumanWorkItem, context: WorkNotificationContext): Promise<WorkNotificationResult>;
   digest(items: HumanWorkItem[]): Promise<void>;
 }
+
+export interface WorkNotificationContext {
+  kind: "state" | "deadline";
+  threadTs: string | null;
+  slackUserId: string | null;
+}
+
+export interface WorkNotificationResult {
+  messageTs: string;
+}
+
+export type ResolveSlackUserId = (githubLogin: string) => Promise<string | null>;
 
 interface WorkNotificationState {
   schemaVersion: 1;
@@ -20,22 +35,48 @@ interface WorkNotificationState {
   notifiedAt: string;
 }
 
+type DeadlineStage = "due-soon" | "due-today" | "overdue";
+
+interface WorkDeadlineNotificationState {
+  schemaVersion: 1;
+  issueUrl: string;
+  targetDate: string;
+  stage: DeadlineStage;
+  notifiedAt: string;
+}
+
+interface WorkThreadState {
+  schemaVersion: 1;
+  issueUrl: string;
+  rootTs: string;
+  createdAt: string;
+}
+
 export class WorkNotificationService {
   private readonly source: WorkItemSource;
   private readonly store: StateStore;
   private readonly notifier: WorkNotifier;
   private readonly now: () => number;
+  private readonly resolveSlackUserId: ResolveSlackUserId;
+  private readonly deadlineLeadDays: number;
 
   constructor(
     source: WorkItemSource,
     store: StateStore,
     notifier: WorkNotifier,
     now: () => number = Date.now,
+    resolveSlackUserId: ResolveSlackUserId = async () => null,
+    deadlineLeadDays = 3,
   ) {
+    if (!Number.isSafeInteger(deadlineLeadDays) || deadlineLeadDays < 1 || deadlineLeadDays > 30) {
+      throw new Error("期限通知の日数は1日から30日で指定してください。");
+    }
     this.source = source;
     this.store = store;
     this.notifier = notifier;
     this.now = now;
+    this.resolveSlackUserId = resolveSlackUserId;
+    this.deadlineLeadDays = deadlineLeadDays;
   }
 
   async notifyImmediate(): Promise<number> {
@@ -54,11 +95,41 @@ export class WorkNotificationService {
       if (previous?.fingerprint === fingerprint) {
         continue;
       }
-      await this.notifier.notify(item);
+      await this.notifyThreaded(item, "state");
       await this.store.set<WorkNotificationState>(NOTIFICATION_NAMESPACE, item.url, {
         schemaVersion: 1,
         issueUrl: item.url,
         fingerprint,
+        notifiedAt: new Date(this.now()).toISOString(),
+      });
+      notified += 1;
+    }
+    return notified;
+  }
+
+  async notifyDeadlines(): Promise<number> {
+    const items = await this.source.loadProjectItems();
+    const today = dateInTokyo(this.now());
+    let notified = 0;
+    for (const item of items) {
+      const stage = deadlineStage(item, today, this.deadlineLeadDays);
+      if (!stage || !item.targetDate) {
+        await this.store.remove(DEADLINE_NAMESPACE, item.url);
+        continue;
+      }
+      const previous = await this.store.get<WorkDeadlineNotificationState>(
+        DEADLINE_NAMESPACE,
+        item.url,
+      );
+      if (previous?.targetDate === item.targetDate && previous.stage === stage) {
+        continue;
+      }
+      await this.notifyThreaded(deadlineWorkItem(item, stage, today), "deadline");
+      await this.store.set<WorkDeadlineNotificationState>(DEADLINE_NAMESPACE, item.url, {
+        schemaVersion: 1,
+        issueUrl: item.url,
+        targetDate: item.targetDate,
+        stage,
         notifiedAt: new Date(this.now()).toISOString(),
       });
       notified += 1;
@@ -75,6 +146,82 @@ export class WorkNotificationService {
     }
     return items.length;
   }
+
+  private async notifyThreaded(
+    item: HumanWorkItem,
+    kind: WorkNotificationContext["kind"],
+  ): Promise<void> {
+    const thread = await this.store.get<WorkThreadState>(THREAD_NAMESPACE, item.url);
+    const slackUserId = item.owner ? await this.resolveSlackUserId(item.owner) : null;
+    const result = await this.notifier.notify(item, {
+      kind,
+      threadTs: thread?.rootTs ?? null,
+      slackUserId,
+    });
+    if (!thread) {
+      await this.store.create<WorkThreadState>(THREAD_NAMESPACE, item.url, {
+        schemaVersion: 1,
+        issueUrl: item.url,
+        rootTs: result.messageTs,
+        createdAt: new Date(this.now()).toISOString(),
+      });
+    }
+  }
+}
+
+function deadlineStage(item: HumanWorkItem, today: string, leadDays: number): DeadlineStage | null {
+  if (item.status === "done" || item.delivery === "silent" || !item.owner || !item.targetDate) {
+    return null;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(item.targetDate)) return null;
+  const target = Date.parse(`${item.targetDate}T00:00:00Z`);
+  const current = Date.parse(`${today}T00:00:00Z`);
+  if (!Number.isFinite(target) || !Number.isFinite(current)) return null;
+  const remainingDays = Math.round((target - current) / DAY_MILLISECONDS);
+  if (remainingDays < 0) return "overdue";
+  if (remainingDays === 0) return "due-today";
+  if (remainingDays <= leadDays) return "due-soon";
+  return null;
+}
+
+function deadlineWorkItem(item: HumanWorkItem, stage: DeadlineStage, today: string): HumanWorkItem {
+  const content: Record<
+    DeadlineStage,
+    Pick<HumanWorkItem, "reasonCode" | "nextAction" | "reason">
+  > = {
+    "due-soon": {
+      reasonCode: "DUE_SOON",
+      nextAction: "期限までに完了できるか確認する",
+      reason: `目標日 ${item.targetDate} が近づいています。`,
+    },
+    "due-today": {
+      reasonCode: "DUE_TODAY",
+      nextAction: "今日中に完了するか、期限を見直す",
+      reason: `目標日は今日（${today}）です。`,
+    },
+    overdue: {
+      reasonCode: "OVERDUE",
+      nextAction: "進捗を確認し、完了または期限変更を行う",
+      reason: `目標日 ${item.targetDate} を過ぎています。`,
+    },
+  };
+  return {
+    ...item,
+    delivery: "immediate",
+    ...content[stage],
+  };
+}
+
+function dateInTokyo(nowMilliseconds: number): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(nowMilliseconds));
+  const value = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
 function workFingerprint(item: HumanWorkItem): string {
