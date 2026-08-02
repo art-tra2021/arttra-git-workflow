@@ -228,7 +228,7 @@ export function canApproveIssue(
   if (!approvers.has(actor) && !selfApprovers.has(actor)) {
     return false;
   }
-  return requester !== actor || selfApprovers.has(actor);
+  return requester !== actor;
 }
 
 export function canBypassIssueApproval(
