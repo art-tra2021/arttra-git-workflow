@@ -17,6 +17,7 @@ describe("GitHub Projects read model", () => {
                 number: 42,
                 title: "Projectsを読む",
                 url: "https://github.example/issues/42",
+                repository: { nameWithOwner: "art-tra2021/work" },
                 labels: { nodes: [{ name: "type/work" }, { name: "priority/P3" }] },
                 assignees: { nodes: [{ login: "alice" }] },
                 blockedBy: {
@@ -73,6 +74,7 @@ describe("GitHub Projects read model", () => {
     if (!issue) throw new Error("test fixtureからIssueを読み取れませんでした");
     expect(projectIssueSnapshot(issue)).toMatchObject({
       issue: { number: 42, type: "work" },
+      repository: "art-tra2021/work",
       project: {
         status: "in-progress",
         priority: "P1",

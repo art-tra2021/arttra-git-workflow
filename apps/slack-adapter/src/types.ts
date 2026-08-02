@@ -13,6 +13,8 @@ export type RepositoryPermission = "admin" | "maintain" | "write" | "triage" | "
 
 export interface WorkItemSnapshot {
   schemaVersion: 1;
+  /** GitHub GraphQLのrepository.nameWithOwner。旧snapshotでは欠落し得る。 */
+  repository?: string | null;
   issue: {
     number: number;
     title: string;
@@ -41,6 +43,8 @@ export type Delivery = "immediate" | "digest" | "silent";
 
 export interface HumanWorkItem {
   schemaVersion: 1;
+  /** URL推測に依存しない投影scope判定用。旧read modelとの互換のためoptional。 */
+  repository?: string | null;
   issueNumber: number;
   title: string;
   url: string;

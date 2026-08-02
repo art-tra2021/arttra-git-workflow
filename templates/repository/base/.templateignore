@@ -1,0 +1,16 @@
+# 個人環境・認証情報・生成物はテンプレートへ含めない。
+.env
+.env.*
+!.env.example
+.arttra/local/
+.claude/settings.local.json
+.codex/
+*.pem
+*.key
+credentials.json
+service-account*.json
+target/
+node_modules/
+.venv/
+dist/
+build/

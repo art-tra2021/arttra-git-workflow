@@ -1,0 +1,9 @@
+{
+  "name": "__REPOSITORY_NAME__",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "bun run lint"
+  },
+  "devDependencies": {}
+}

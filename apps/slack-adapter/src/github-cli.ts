@@ -42,23 +42,31 @@ interface GhContentEntry {
 
 const execFileAsync = promisify(execFile);
 
+interface CachedIssueTemplates {
+  templates: IssueTemplateSchema[];
+  expiresAt: number;
+}
+
 export class GitHubCliDependencies implements SlackAdapterDependencies {
   private readonly repository: string;
   private readonly githubLogin: string;
   private readonly owners: string[];
   private readonly project: { owner: string; number: number } | null;
-  private readonly templateCache = new Map<string, IssueTemplateSchema[]>();
+  private readonly authorizedSlackUserId: string | null;
+  private readonly templateCache = new Map<string, CachedIssueTemplates>();
 
   constructor(
     repository: string,
     githubLogin: string,
     owners = [repository.split("/")[0] ?? githubLogin],
     project: { owner: string; number: number } | null = null,
+    authorizedSlackUserId: string | null = null,
   ) {
     this.repository = repository;
     this.githubLogin = githubLogin;
     this.owners = owners;
     this.project = project;
+    this.authorizedSlackUserId = authorizedSlackUserId?.trim() || null;
   }
 
   async listRepositories(): Promise<string[]> {
@@ -87,11 +95,30 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
     return [this.repository, ...repositories.sort()];
   }
 
+  async listRepositoriesForViewer(githubLogin: string): Promise<string[]> {
+    if (githubLogin.trim().toLowerCase() !== this.githubLogin.toLowerCase()) {
+      throw new Error(
+        "CLI backendでは、ghで認証中のGitHub利用者以外のrepository権限を確認できません。",
+      );
+    }
+    return this.listRepositories();
+  }
+
+  async listIssueTemplatesForViewer(
+    githubLogin: string,
+    repository: string,
+  ): Promise<IssueTemplateSchema[]> {
+    const repositories = await this.listRepositoriesForViewer(githubLogin);
+    if (!repositories.some((candidate) => candidate.toLowerCase() === repository.toLowerCase())) {
+      throw new Error(`GitHub @${githubLogin} は${repository}を参照できません。`);
+    }
+    return this.listIssueTemplates(repository);
+  }
+
   async listIssueTemplates(repository: string): Promise<IssueTemplateSchema[]> {
     const cached = this.templateCache.get(repository);
-    if (cached) {
-      return cached;
-    }
+    if (cached && cached.expiresAt > Date.now()) return [...cached.templates];
+    if (cached) this.templateCache.delete(repository);
     const entries = await ghJson<GhContentEntry[]>([
       "api",
       `repos/${repository}/contents/.github/ISSUE_TEMPLATE`,
@@ -115,11 +142,19 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
         ),
     );
     const templates = forms.filter((form): form is IssueTemplateSchema => form !== null);
-    this.templateCache.set(repository, templates);
+    this.templateCache.set(repository, {
+      templates,
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    });
     return templates;
   }
 
-  async loadWorkItems(): Promise<HumanWorkItem[]> {
+  async loadWorkItems(slackUserId: string): Promise<HumanWorkItem[]> {
+    if (!this.authorizedSlackUserId || slackUserId !== this.authorizedSlackUserId) {
+      throw new Error(
+        "CLI backendの個人作業はAR_SLACK_CLI_USER_IDで固定したSlack利用者だけが参照できます。",
+      );
+    }
     const issues = await this.workIssues(100, this.githubLogin);
     return issues.map((issue) => toHumanWorkItem(projectIssueSnapshot(issue), this.githubLogin));
   }
@@ -130,7 +165,23 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
     );
   }
 
-  async claimIssue(repository: string, issueNumber: number): Promise<HumanWorkItem> {
+  async claimIssue(
+    repository: string,
+    issueNumber: number,
+    _slackUserId?: string,
+    viewerGitHubLogin?: string,
+  ): Promise<HumanWorkItem> {
+    if (!viewerGitHubLogin || viewerGitHubLogin.toLowerCase() !== this.githubLogin.toLowerCase()) {
+      throw new Error("現在のgh認証とIssue担当者のGitHub loginが一致しません。");
+    }
+    await this.listRepositoriesForViewer(viewerGitHubLogin);
+    if (
+      !(await this.listRepositories()).some(
+        (value) => value.toLowerCase() === repository.toLowerCase(),
+      )
+    ) {
+      throw new Error(`GitHub @${viewerGitHubLogin} は${repository}を参照できません。`);
+    }
     await gh([
       "issue",
       "edit",

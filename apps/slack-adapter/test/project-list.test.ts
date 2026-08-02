@@ -50,6 +50,25 @@ describe("Slack Project List", () => {
     ]);
   });
 
+  test("個人Listはslash commandのDM channelへ共有せずuser ACLだけを使う", async () => {
+    const accessCalls: unknown[] = [];
+    const client = clientStub({
+      accessSet: async (input) => void accessCalls.push(input),
+    });
+
+    const personal = await createProjectList(client, "D123", "U123", {
+      teamId: "T123",
+      viewerId: "U123",
+      target: { kind: "user", id: "U123" },
+      scope: { kind: "all-accessible" },
+    });
+
+    expect(personal.binding?.target).toEqual({ kind: "user", id: "U123" });
+    expect(accessCalls).toEqual([
+      { list_id: "FPROJECTLIST", access_level: "read", user_ids: ["U123"] },
+    ]);
+  });
+
   test("Issueをnative担当者とGitHubリンクを持つ行へ変換する", async () => {
     const createCalls: Array<{ initial_fields: Array<Record<string, unknown>> }> = [];
     const client = clientStub({

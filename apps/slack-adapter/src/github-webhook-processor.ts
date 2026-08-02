@@ -300,7 +300,7 @@ function reviewTarget(job: GitHubWebhookJob): {
   };
   const allowedActions =
     job.event === "pull_request"
-      ? new Set(["opened", "reopened", "ready_for_review", "synchronize"])
+      ? new Set(["opened", "reopened", "ready_for_review", "review_requested", "synchronize"])
       : new Set(["submitted", "dismissed"]);
   if (!payload.action || !allowedActions.has(payload.action)) {
     return null;

@@ -4,6 +4,7 @@ import {
   issueFieldValues,
   issueRepositoryPickerModal,
   openIssueRepositoryFlow,
+  parseProjectProjectionCommand,
   repositoryOptions,
   selectedValue,
   transitionIssueModal,
@@ -11,6 +12,23 @@ import {
 import { type IssueTemplateSchema, issueTemplate } from "../src/issue-schema.ts";
 
 describe("Slack Issue modal flow", () => {
+  test("Project投影commandをrepo/allとList/Canvasへ決定的に変換する", () => {
+    expect(parseProjectProjectionCommand("project", "art-tra2021/default")).toEqual({
+      kind: "list",
+      scope: { kind: "repo", repository: "art-tra2021/default" },
+    });
+    expect(parseProjectProjectionCommand("canvas repo art-tra2021/sales")).toEqual({
+      kind: "canvas",
+      scope: { kind: "repo", repository: "art-tra2021/sales" },
+    });
+    expect(parseProjectProjectionCommand("canvas all")).toEqual({
+      kind: "canvas",
+      scope: { kind: "all-accessible" },
+    });
+    expect(() => parseProjectProjectionCommand("project")).toThrow("repositoryを指定");
+    expect(parseProjectProjectionCommand("unknown command")).toBeNull();
+  });
+
   test("初回モーダルを外部API待ちなしで開きrepository cacheを検索する", () => {
     const modal = issueRepositoryPickerModal(
       "C123",

@@ -1,13 +1,20 @@
 import { randomUUID } from "node:crypto";
 import {
+  clearProjectListItems,
   createProjectList,
   markLegacyProjectList,
   type ProjectListClient,
+  type ProjectListProjectionOptions,
   type ProjectListState,
   type ProjectListSyncResult,
   type ResolveSlackUserId,
   syncProjectList,
 } from "./project-list.ts";
+import {
+  filterItemsByAccessibleRepositories,
+  normalizeRepositoryScope,
+  projectionStateKey,
+} from "./project-scope.ts";
 import { RetryableWorkError } from "./retryable-error.ts";
 import type { StateStore } from "./state-store.ts";
 import type { HumanWorkItem } from "./types.ts";
@@ -30,6 +37,16 @@ export interface ProjectListWorkSource {
 export interface ProjectListSyncCommand {
   schemaVersion: 1;
   kind: "project-list.sync";
+}
+
+export interface ProjectListSyncOptions {
+  teamId: string;
+  viewerId?: string | null;
+  scope: ProjectListProjectionOptions["scope"];
+  /** viewerのGitHub権限で確認済みのrepository集合。指定時は必ずintersectionを取る。 */
+  accessibleRepositories?: string[];
+  /** Explicit target is useful for a private user List; channel is the default. */
+  target?: ProjectListProjectionOptions["target"];
 }
 
 export function parseProjectListSyncCommand(body: string): ProjectListSyncCommand {
@@ -70,38 +87,100 @@ export class ProjectListSyncService {
     this.resolveSlackUserId = resolveSlackUserId;
   }
 
-  async sync(channelId: string, requesterUserId?: string): Promise<ProjectListSyncResult> {
-    const leaseOwner = await this.acquireLease(channelId);
+  async revokeViewerAccess(teamId: string, viewerId: string): Promise<number> {
+    if (!this.client.slackLists.access.delete) {
+      throw new Error("Slack Listのaccess.deleteが利用できません。");
+    }
+    const states = await this.store.list<ProjectListState>(STATE_NAMESPACE);
+    const targets = states.filter(
+      (state) =>
+        state.binding?.teamId === teamId &&
+        state.binding.viewerId === viewerId &&
+        state.binding.target.kind === "user" &&
+        state.binding.target.id === viewerId &&
+        state.stateKey,
+    );
+    for (const state of targets) {
+      await this.client.slackLists.access.delete({ list_id: state.listId, user_ids: [viewerId] });
+      if (state.stateKey) await this.store.remove(STATE_NAMESPACE, state.stateKey);
+    }
+    return targets.length;
+  }
+
+  async sync(
+    channelId: string,
+    requesterUserId?: string,
+    options?: ProjectListSyncOptions,
+  ): Promise<ProjectListSyncResult> {
+    if (options && options.accessibleRepositories === undefined) {
+      throw new Error(
+        `${normalizeRepositoryScope(options.scope).kind}投影にはGitHubで確認済みのrepository集合が必要です。`,
+      );
+    }
+    const stateKey = options
+      ? projectionStateKey({
+          teamId: options.teamId,
+          viewerId: options.viewerId ?? requesterUserId ?? null,
+          target: options.target ?? { kind: "channel", id: channelId },
+          kind: "list",
+          scope: options.scope,
+        })
+      : channelId;
+    const leaseOwner = await this.acquireLease(stateKey);
     try {
-      return await this.syncWithLease(channelId, requesterUserId);
+      return await this.syncWithLease(channelId, requesterUserId, options, stateKey);
     } finally {
-      await this.releaseLease(channelId, leaseOwner);
+      await this.releaseLease(stateKey, leaseOwner);
     }
   }
 
   private async syncWithLease(
     channelId: string,
     requesterUserId?: string,
+    options?: ProjectListSyncOptions,
+    stateKey = channelId,
   ): Promise<ProjectListSyncResult> {
-    let state = await this.store.get<ProjectListState>(STATE_NAMESPACE, channelId);
+    await this.migrateLegacyChannelProjection(channelId, options, stateKey);
+    let state = await this.store.get<ProjectListState>(STATE_NAMESPACE, stateKey);
     try {
       if (state?.schemaVersion !== 3) {
         const legacyListId = state?.listId;
-        state = await createProjectList(this.client, channelId);
-        await this.store.set(STATE_NAMESPACE, channelId, state);
+        const createOptions: ProjectListProjectionOptions | undefined = options
+          ? {
+              teamId: options.teamId,
+              scope: options.scope,
+              ...(options.viewerId !== undefined ? { viewerId: options.viewerId } : {}),
+              ...(options.target ? { target: options.target } : {}),
+            }
+          : undefined;
+        state = await createProjectList(this.client, channelId, requesterUserId, createOptions);
+        await this.store.set(STATE_NAMESPACE, stateKey, state);
         if (legacyListId) {
           await markLegacyProjectList(this.client, legacyListId);
         }
       }
-      if (requesterUserId && state) {
+      if (
+        requesterUserId &&
+        state &&
+        (state.binding?.target.kind !== "user" || state.binding?.target.id !== requesterUserId)
+      ) {
         await this.client.slackLists.access.set({
           list_id: state.listId,
           access_level: "read",
           user_ids: [requesterUserId],
         });
       }
-      const items = await this.source.loadProjectItems();
-      return await syncProjectList(this.client, state, items, this.resolveSlackUserId);
+      const loadedItems = await this.source.loadProjectItems();
+      const items = options
+        ? filterItemsByAccessibleRepositories(loadedItems, options.accessibleRepositories ?? [])
+        : loadedItems;
+      return await syncProjectList(
+        this.client,
+        state,
+        items,
+        this.resolveSlackUserId,
+        options?.scope ?? state.binding?.scope,
+      );
     } catch (error) {
       const code = slackErrorCode(error);
       if (code === "missing_scope") {
@@ -123,7 +202,44 @@ export class ProjectListSyncService {
     }
   }
 
-  private async acquireLease(channelId: string): Promise<string> {
+  /**
+   * scope導入前のstate keyはchannel IDそのものだった。
+   * そのListへ全repositoryの行が残ったまま新しい投影だけを作ると情報漏えいになるため、
+   * channel ACLを先に外し、行を空にして旧表示として残す。
+   */
+  private async migrateLegacyChannelProjection(
+    channelId: string,
+    options: ProjectListSyncOptions | undefined,
+    scopedStateKey: string,
+  ): Promise<void> {
+    const target = options?.target ?? { kind: "channel" as const, id: channelId };
+    if (!options || target.kind !== "channel" || scopedStateKey === channelId) return;
+
+    await this.migrateLegacyChannelState(channelId);
+  }
+
+  async migrateLegacyChannelState(channelId: string): Promise<void> {
+    const owner = await this.acquireLease(channelId);
+    try {
+      const legacy = await this.store.get<{ listId?: string }>(STATE_NAMESPACE, channelId);
+      if (!legacy) return;
+      const listId = legacy.listId;
+      if (!listId || !/^F[A-Z0-9]+$/.test(listId)) {
+        throw new Error("旧Slack Listの保存状態が不正です。安全のため共有投影を停止しました。");
+      }
+      if (!this.client.slackLists.access.delete) {
+        throw new Error("旧Slack Listを安全に移行するためのaccess.deleteが利用できません。");
+      }
+      await this.client.slackLists.access.delete({ list_id: listId, channel_ids: [channelId] });
+      await clearProjectListItems(this.client, listId);
+      await markLegacyProjectList(this.client, listId);
+      await this.store.remove(STATE_NAMESPACE, channelId);
+    } finally {
+      await this.releaseLease(channelId, owner);
+    }
+  }
+
+  private async acquireLease(stateKey: string): Promise<string> {
     const owner = randomUUID();
     const fresh: ProjectListSyncLease = {
       schemaVersion: 1,
@@ -131,11 +247,11 @@ export class ProjectListSyncService {
       owner,
       expiresAt: new Date(Date.now() + LEASE_MILLISECONDS).toISOString(),
     };
-    if (await this.store.create(LEASE_NAMESPACE, channelId, fresh)) {
+    if (await this.store.create(LEASE_NAMESPACE, stateKey, fresh)) {
       return owner;
     }
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const current = await this.store.get<ProjectListSyncLease>(LEASE_NAMESPACE, channelId);
+      const current = await this.store.get<ProjectListSyncLease>(LEASE_NAMESPACE, stateKey);
       if (!current || Date.parse(current.expiresAt) > Date.now()) {
         throw new RetryableWorkError(
           "project_list_sync_in_progress",
@@ -146,7 +262,7 @@ export class ProjectListSyncService {
         ...fresh,
         revision: current.revision + 1,
       };
-      if (await this.store.compareAndSet(LEASE_NAMESPACE, channelId, current.revision, next)) {
+      if (await this.store.compareAndSet(LEASE_NAMESPACE, stateKey, current.revision, next)) {
         return owner;
       }
     }
@@ -156,10 +272,10 @@ export class ProjectListSyncService {
     );
   }
 
-  private async releaseLease(channelId: string, owner: string): Promise<void> {
-    const current = await this.store.get<ProjectListSyncLease>(LEASE_NAMESPACE, channelId);
+  private async releaseLease(stateKey: string, owner: string): Promise<void> {
+    const current = await this.store.get<ProjectListSyncLease>(LEASE_NAMESPACE, stateKey);
     if (!current || current.owner !== owner) return;
-    await this.store.compareAndSet(LEASE_NAMESPACE, channelId, current.revision, {
+    await this.store.compareAndSet(LEASE_NAMESPACE, stateKey, current.revision, {
       ...current,
       revision: current.revision + 1,
       expiresAt: new Date(0).toISOString(),

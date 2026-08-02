@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "repository": "__REPOSITORY_FULL_NAME__",
+  "values": {
+    "repo_kind": "__REPO_KIND__",
+    "owner_team": "__OWNER_TEAM__",
+    "risk_level": "__RISK_LEVEL__",
+    "ci_profile": "__CI_PROFILE__",
+    "review_policy": "__REVIEW_POLICY__",
+    "ai_ready": "true"
+  }
+}

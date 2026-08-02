@@ -1,3 +1,11 @@
+import {
+  filterItemsByRepositoryScope,
+  type ProjectionBinding,
+  type ProjectionTarget,
+  projectionStateKey,
+  type RepositoryScope,
+  validateProjectionBinding,
+} from "./project-scope.ts";
 import type { HumanWorkItem } from "./types.ts";
 
 export type ProjectListColumnKey = "task" | "status" | "assignee" | "target_date" | "github";
@@ -8,6 +16,16 @@ export interface ProjectListState {
   schemaVersion: 3;
   listId: string;
   columns: ProjectListColumns;
+  /** Optional on legacy state; present for repository/viewer-scoped state. */
+  binding?: ProjectionBinding;
+  stateKey?: string;
+}
+
+export interface ProjectListProjectionOptions {
+  teamId: string;
+  viewerId?: string | null;
+  scope: RepositoryScope;
+  target?: ProjectionTarget;
 }
 
 interface ProjectListSchemaColumn {
@@ -57,6 +75,11 @@ export interface ProjectListClient {
       todo_mode: boolean;
     }): Promise<unknown>;
     access: {
+      delete?(input: {
+        list_id: string;
+        channel_ids?: string[];
+        user_ids?: string[];
+      }): Promise<unknown>;
       set(input: {
         list_id: string;
         access_level: "read";
@@ -123,8 +146,23 @@ export async function createProjectList(
   client: ProjectListClient,
   channelId: string,
   requesterUserId?: string,
+  options?: ProjectListProjectionOptions,
 ): Promise<ProjectListState> {
-  assertChannelId(channelId);
+  const binding = options
+    ? validateProjectionBinding({
+        teamId: options.teamId,
+        viewerId: options.viewerId ?? requesterUserId ?? null,
+        target: options.target ?? { kind: "channel", id: channelId },
+        kind: "list",
+        scope: options.scope,
+      })
+    : undefined;
+  if (!binding || binding.target.kind === "channel") {
+    assertChannelId(channelId);
+  }
+  if (binding?.target.kind === "channel" && binding.target.id !== channelId) {
+    throw new Error("Project Listのchannel投影先が同期channelと一致しません。");
+  }
   const response = await client.slackLists.create({
     name: "仕事一覧",
     description_blocks: projectListDescription(),
@@ -136,19 +174,34 @@ export async function createProjectList(
     throw new Error("Slack Listの作成結果に有効なlist_idがありません。");
   }
   const columns = columnsFromSchema(response.list_metadata?.schema ?? []);
-  await client.slackLists.access.set({
-    list_id: listId,
-    access_level: "read",
-    channel_ids: [channelId],
-  });
-  if (requesterUserId) {
+  if (binding?.target.kind === "user") {
     await client.slackLists.access.set({
       list_id: listId,
       access_level: "read",
-      user_ids: [requesterUserId],
+      user_ids: [binding.target.id],
     });
+  } else {
+    await client.slackLists.access.set({
+      list_id: listId,
+      access_level: "read",
+      channel_ids: [channelId],
+    });
+    // Preserve the legacy one-off sharing behavior.  Scoped user projections
+    // use the binding above and do not need a duplicate ACL call.
+    if (requesterUserId && !binding) {
+      await client.slackLists.access.set({
+        list_id: listId,
+        access_level: "read",
+        user_ids: [requesterUserId],
+      });
+    }
   }
-  return { schemaVersion: 3, listId, columns };
+  return {
+    schemaVersion: 3,
+    listId,
+    columns,
+    ...(binding ? { binding, stateKey: projectionStateKey(binding) } : {}),
+  };
 }
 
 export async function ensureProjectListDefinition(
@@ -177,14 +230,33 @@ export async function markLegacyProjectList(
   });
 }
 
+/**
+ * 旧共有Listから、現在のscopeでは公開できない行が残り続けることを防ぐ。
+ * List本体は監査用に残し、行だけを空にする。
+ */
+export async function clearProjectListItems(
+  client: ProjectListClient,
+  listId: string,
+): Promise<number> {
+  const ids = (await listAllItems(client, listId)).map((item) => item.id);
+  for (const batch of chunks(ids, 100)) {
+    await client.slackLists.items.deleteMultiple({ list_id: listId, ids: batch });
+  }
+  return ids.length;
+}
+
 export async function syncProjectList(
   client: ProjectListClient,
   state: ProjectListState,
   items: HumanWorkItem[],
   resolveSlackUserId: ResolveSlackUserId,
+  scope?: RepositoryScope,
 ): Promise<ProjectListSyncResult> {
   assertState(state);
-  const active = items.filter((item) => item.delivery !== "silent");
+  const effectiveScope = scope ?? state.binding?.scope;
+  const active = (
+    effectiveScope ? filterItemsByRepositoryScope(items, effectiveScope) : items
+  ).filter((item) => item.delivery !== "silent");
   const existing = await listAllItems(client, state.listId);
   const rowsByUrl = new Map<string, ProjectListItem>();
   const rowsToDelete: string[] = [];
@@ -390,6 +462,12 @@ function assertState(state: ProjectListState): void {
       type: "text",
     })),
   );
+  if (state.binding) {
+    const key = projectionStateKey(state.binding);
+    if (state.stateKey && state.stateKey !== key) {
+      throw new Error("Slack Listの保存state keyが投影bindingと一致しません。");
+    }
+  }
 }
 
 function chunks<T>(values: T[], size: number): T[][] {

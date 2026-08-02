@@ -61,6 +61,55 @@ Issueの親子、blocked-by、blockingはGitHub CLI 2.94以降のnative relation
 本文の自由記述から依存を推測せず、`git ar issue --blocked-by`またはcore `gh issue create/edit`で登録します。
 TUIでは任意の詳細設定、AIでは`--parent`、`--blocked-by`、`--blocking`を使います。
 
+## Slackから見るProject
+
+GitHub Projectsを正本とし、Slack ListとCanvasは閲覧用の投影として扱います。
+Slack側の行や本文を直接編集してProjectの状態を変える運用は行いません。
+
+投影範囲は、単一repositoryを示す`repo`と、利用者本人が参照できるrepositoryの集合を示す`all-accessible`に分けます。
+GitHub Appが参照できるrepository一覧を、そのままSlack利用者へ表示してはいけません。
+Slack利用者と連携したGitHub loginのeffective permissionを確認し、確認できないrepositoryは候補と投影から除外します。
+
+`all-accessible`は閲覧者によって内容が異なるため、共有channelのListまたはCanvasへ投影しません。
+本人だけにread権限を与えた個人用の投影を作ります。
+repository別の共有投影は、管理者がSlack channelとrepositoryの対応およびchannel参加者を管理する場合だけ有効にします。
+
+共有投影の手動CLI、定期HTTP同期、Webhook同期は同じ固定channel／単一repository bindingを検証します。
+scope導入前の共有Listは、channel accessと既存行を除去してから旧表示へ移し、private項目を残しません。
+
+Slack利用者が別のGitHubアカウントへ再連携する場合は、新しいidentityを有効にする前に旧identity用の個人List／Canvas accessを失効させます。
+
+人間はSlackで次のコマンドを使います。
+
+```text
+/ar project repo art-tra2021/example
+/ar project all
+/ar canvas repo art-tra2021/example
+/ar canvas all
+```
+
+AIと定期処理は同じscopeを非対話コマンドで指定します。
+
+```text
+mise run slack:canvas -- --repo art-tra2021/example --user U0123456789
+mise run slack:canvas:json -- --user U0123456789
+```
+
+Canvas同期は内容のhashを保存し、Projectの表示内容が変わらない限り`canvases.edit`を呼びません。
+これにより、定期同期が更新履歴と通知を増やす問題を避けます。
+
+## 新規repositoryの開設
+
+新規repositoryは、中央repositoryの「Repository開設申請」Issueから依頼します。
+管理者は申請内容を`plan`と`dry-run`で確認し、`apply`を明示した場合だけ作成します。
+
+既定では全社GitHub Projectを正本とし、repository別の保存Viewをリンクします。
+顧客分離など権限境界が異なる場合だけ、Organization Project Templateから独立Projectを作ります。
+
+Repository Templateは`minimal`、`python`、`typescript`、`business`の4種類です。
+各Templateはmise、hook、Issue Form、PR、CI、AI向け規則を共有しますが、秘密情報、個人のAI設定、CD設定は含めません。
+詳細は[Repository Template](repository-template.md)と[Repository開設手順](repository-provisioning.md)を参照します。
+
 ## 段階導入
 
 1. テンプレート、mise、hooks、CI、警告を導入する。

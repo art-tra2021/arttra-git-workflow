@@ -23,6 +23,8 @@ mise run slack:check
 ## Socket Modeで試す
 
 `.env.example`を`.env`へコピーし、SlackのBot token、`connections:write`を持つApp token、GitHub repositoryとloginを設定する。
+CLI backendは単一利用者のローカル検証専用であり、`AR_SLACK_CLI_USER_ID`へ設定したSlack利用者だけが個人の仕事とCalendar同期を利用できる。
+複数利用者の運用ではGitHub App backendを使用する。
 `AR_GITHUB_OWNERS`には、Slackから選択を許可するOrganizationまたは個人ownerをカンマ区切りで設定する。
 
 最初に各利用者が`/ar connect github`を実行し、GitHub OAuthで本人確認する。
@@ -38,6 +40,10 @@ mise run slack:dev
 ## Project Listを同期する
 
 `AR_GITHUB_PROJECT_OWNER`と`AR_GITHUB_PROJECT_NUMBER`を設定すると、単一repositoryのIssue一覧ではなくOrganization Projectを正本として複数repositoryの項目を取得する。
+
+共有Slack channelへListや通知を出す場合は、`AR_SLACK_SHARED_REPOSITORY`でそのchannelへの公開を許可する単一repositoryを必ず指定する。
+未指定のまま共有channelを設定するとadapterは起動を拒否する。
+利用者ごとの全repository投影は共有channelへ出さず、本人のGitHub連携を確認した個人List／Canvasだけに作成する。
 ART-TRAではownerを`art-tra2021`、Project番号を`8`とする。
 
 `AR_SLACK_PROJECT_LIST_CHANNEL_ID`へ同期先channel IDを設定する。
@@ -63,7 +69,8 @@ mise run slack:list:json
 2回目以降はGitHub Issue URLを安定キーとして、既存行の更新、新規行の追加、Projectから外れた行の削除を行う。
 GitHub OAuthで対応付け済みの担当者はSlackのnative user列へ反映する。
 未連携者の担当者欄は空欄とし、表示名やメールから推測しない。
-旧版は削除せず`ART-TRA Work（旧表示）`へ改名し、Slack標準の担当者・期限日を使う5列版の`仕事一覧`を別Listとして作成する。
+旧版のList本体は削除せず`ART-TRA Work（旧表示）`へ改名する。
+scope導入前の共有Listは、過去のprivate項目を残さないようchannel accessと全行を除去してから、Slack標準の担当者・期限日を使う5列版の`仕事一覧`へ切り替える。
 起動中のadapterでは、同期先channelから`/ar project sync`を実行しても同じ処理を呼び出せる。
 `/ar list sync`と従来の`/ar canvas sync`も移行用aliasとして同じ処理を呼ぶ。
 同じchannelへの同期はleaseで直列化し、Webhook、定期同期、人間の手動操作が重なって行を重複作成しない。
@@ -87,6 +94,8 @@ Issue modalの担当者と予定レビュワーはSlackのネイティブなメ�
 申請者本人による直通を許すPL等は、`AR_SLACK_SELF_APPROVER_IDS`にも明示する。
 直通にはこのSlack設定に加え、OAuthで確認したGitHub loginが対象repositoryで`write`、`maintain`、`admin`のいずれかを持つことを要求する。
 未設定者、GitHub未連携者、権限不足者、権限を確認できない場合は拒否せず、理由と申請者・repository・マージ方針を示したnative mentionと承認ボタンを承認者へ送る。
+承認時にも申請者のGitHub連携とrepository accessを再確認し、申請後に失効した権限を流用しない。
+別のGitHubアカウントへ再連携する場合は、新しい対応付けを保存する前に旧アカウント用の個人List／Canvas accessとstateを失効させる。
 通常レビューのIssueは即時作成する。
 
 承認待ちと監査eventは共通state storeへ保存する。

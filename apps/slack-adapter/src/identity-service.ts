@@ -19,6 +19,25 @@ export interface GitHubIdentity {
   verifiedAt: string;
 }
 
+export type BeforeGitHubIdentityReplacement = (
+  previous: GitHubIdentity,
+  replacement: GitHubIdentity,
+) => Promise<void>;
+
+/** OAuth設定を必要としない定期処理向けに、保存済みの本人連携だけを読む。 */
+export async function requireStoredGitHubLogin(
+  store: StateStore,
+  slackTeamId: string,
+  slackUserId: string,
+): Promise<string> {
+  const identity = await store.get<GitHubIdentity>(
+    IDENTITY_NAMESPACE,
+    slackKey(slackTeamId, slackUserId),
+  );
+  if (!identity) throw new MissingGitHubIdentityError([slackUserId]);
+  return identity.githubLogin;
+}
+
 export class MissingGitHubIdentityError extends Error {
   readonly slackUserIds: string[];
 
@@ -110,7 +129,11 @@ export class GitHubIdentityService {
     return `${this.githubBaseUrl}/login/oauth/authorize?${query.toString()}`;
   }
 
-  async complete(code: string, signedState: string): Promise<GitHubIdentity> {
+  async complete(
+    code: string,
+    signedState: string,
+    beforeReplacement?: BeforeGitHubIdentityReplacement,
+  ): Promise<GitHubIdentity> {
     const state = this.verifyState(signedState);
     if (state.expiresAt <= this.now()) {
       throw new Error("GitHub連携の有効期限が切れました。Slackからもう一度実行してください。");
@@ -151,6 +174,14 @@ export class GitHubIdentityService {
       githubLogin: user.login,
       verifiedAt: new Date(this.now()).toISOString(),
     };
+    if (previous && previous.githubUserId !== user.id) {
+      if (!beforeReplacement) {
+        throw new Error(
+          "GitHubアカウントを変更するには旧Canvas/Listの権限失効処理が必要です。運用設定を確認してください。",
+        );
+      }
+      await beforeReplacement(previous, identity);
+    }
     await this.config.store.set(
       IDENTITY_NAMESPACE,
       slackKey(state.slackTeamId, state.slackUserId),
@@ -190,6 +221,22 @@ export class GitHubIdentityService {
       IDENTITY_NAMESPACE,
       slackKey(slackTeamId, slackUserId),
     );
+  }
+
+  /**
+   * Slack利用者を、保存済みのGitHub loginへ変換する。
+   *
+   * OAuth access tokenは連携完了時に破棄しており、ここでは永続化した
+   * GitHub user ID/loginだけを参照する。連携がない場合は呼び出し側が
+   * 一覧・作成処理を安全側で中断できるよう、MissingGitHubIdentityError
+   * を投げる。
+   */
+  async requireGitHubLogin(slackTeamId: string, slackUserId: string): Promise<string> {
+    const identity = await this.get(slackTeamId, slackUserId);
+    if (!identity) {
+      throw new MissingGitHubIdentityError([slackUserId]);
+    }
+    return identity.githubLogin;
   }
 
   async findByGitHubUserId(

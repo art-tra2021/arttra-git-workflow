@@ -74,6 +74,7 @@ export class LifecycleNotificationService {
   private readonly notifier: LifecycleNotifier;
   private readonly resolveSlackUserId: ResolveLifecycleSlackUserId;
   private readonly now: () => number;
+  private readonly allowedRepositories: Set<string> | null;
 
   constructor(
     github: GitHubLifecycleClient,
@@ -82,6 +83,7 @@ export class LifecycleNotificationService {
     notifier: LifecycleNotifier,
     resolveSlackUserId: ResolveLifecycleSlackUserId,
     now: () => number = Date.now,
+    allowedRepositories: readonly string[] | null = null,
   ) {
     this.github = github;
     this.store = store;
@@ -89,9 +91,16 @@ export class LifecycleNotificationService {
     this.notifier = notifier;
     this.resolveSlackUserId = resolveSlackUserId;
     this.now = now;
+    this.allowedRepositories = allowedRepositories
+      ? new Set(allowedRepositories.map((repository) => repository.toLowerCase()))
+      : null;
   }
 
   async process(job: GitHubWebhookJob): Promise<number> {
+    if (this.allowedRepositories) {
+      const repository = repositoryName(objectPayload(job)).toLowerCase();
+      if (!this.allowedRepositories.has(repository)) return 0;
+    }
     switch (job.event) {
       case "issues":
         return this.processIssue(job);

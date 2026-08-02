@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "template_id": "arttra-repository",
+  "profile": "__PROFILE__",
+  "baseline_version": "2026.08.0",
+  "source_commit": "__SOURCE_COMMIT__",
+  "materialized_at": "__MATERIALIZED_AT__",
+  "managed_paths": [
+    "AGENTS.md",
+    ".github",
+    ".mise.toml",
+    "hk.pkl",
+    "arttra.toml",
+    "governance/repository-values.json",
+    "template.lock.json"
+  ],
+  "local_paths": [
+    ".arttra/local",
+    ".claude/settings.local.json",
+    ".codex"
+  ],
+  "sync_policy": "pull-request",
+  "secret_policy": "never-copy"
+}

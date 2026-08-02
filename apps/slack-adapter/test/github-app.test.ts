@@ -64,6 +64,148 @@ describe("GitHub App adapter", () => {
     expect(calls.filter((url) => url.includes("access_tokens"))).toHaveLength(1);
   });
 
+  test("viewer-aware repository一覧はpublic readとprivateのeffective permissionだけを返す", async () => {
+    const collaboratorCalls: string[] = [];
+    const client = dependencies(async (input) => {
+      if (input.endsWith("/app/installations/99/access_tokens")) {
+        return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
+      }
+      if (input.includes("/installation/repositories")) {
+        return json({
+          total_count: 4,
+          repositories: [
+            { full_name: "art-tra2021/public", archived: false, private: false },
+            { full_name: "art-tra2021/private", archived: false, private: true },
+            { full_name: "art-tra2021/denied", archived: false, private: true },
+            { full_name: "outside/nope", archived: false, private: false },
+          ],
+        });
+      }
+      if (input.includes("/collaborators/alice/permission")) {
+        collaboratorCalls.push(input);
+        if (input.includes("/private/")) return json({ permission: "triage" });
+        return new Response(JSON.stringify({ message: "forbidden" }), { status: 403 });
+      }
+      throw new Error(`予期しないrequest: ${input}`);
+    });
+
+    expect(await client.listRepositoriesForViewer("alice")).toEqual([
+      "art-tra2021/private",
+      "art-tra2021/public",
+    ]);
+    expect(collaboratorCalls).toEqual([
+      "https://github.example/api/v3/repos/art-tra2021/private/collaborators/alice/permission",
+      "https://github.example/api/v3/repos/art-tra2021/denied/collaborators/alice/permission",
+    ]);
+    expect(await client.assertRepositoryAccess("art-tra2021/public", "alice")).toMatchObject({
+      permission: "read",
+      visibility: "public",
+    });
+    await expect(client.assertRepositoryAccess("art-tra2021/denied", "alice")).rejects.toThrow(
+      "参照する権限がありません",
+    );
+  });
+
+  test("Issue作成はslack commandのviewerを解決してrepository権限を再確認する", async () => {
+    const calls: string[] = [];
+    const client = new GitHubAppDependencies({
+      ...baseConfig(),
+      resolveGitHubLogin: async (slackUserId) => {
+        expect(slackUserId).toBe("U_ALICE");
+        return "alice";
+      },
+      fetch: async (input, init) => {
+        calls.push(input);
+        if (input.endsWith("/app/installations/99/access_tokens")) {
+          return json({
+            token: "installation-token",
+            expires_at: "2026-08-01T01:00:00Z",
+            permissions: { issues: "write", contents: "read" },
+          });
+        }
+        if (input.includes("/installation/repositories")) {
+          return json({
+            total_count: 1,
+            repositories: [{ full_name: "art-tra2021/private", archived: false, private: true }],
+          });
+        }
+        if (input.endsWith("/collaborators/alice/permission")) {
+          return json({ permission: "read" });
+        }
+        if (input.endsWith("/contents/.github/ISSUE_TEMPLATE")) {
+          return json([
+            { name: "work.yml", path: ".github/ISSUE_TEMPLATE/work.yml", type: "file" },
+          ]);
+        }
+        if (input.endsWith("/contents/.github/ISSUE_TEMPLATE/work.yml")) {
+          return new Response(issueForm(), { status: 200 });
+        }
+        if (input.endsWith("/repos/art-tra2021/private/issues")) {
+          return json({
+            number: 7,
+            title: "[作業] viewer check",
+            html_url: "https://github.example/issues/7",
+            labels: [],
+            assignees: [],
+          });
+        }
+        throw new Error(`予期しないrequest: ${input} ${String(init?.body ?? "")}`);
+      },
+    });
+    const command: CreateIssueCommand = {
+      schemaVersion: 1,
+      kind: "issue.create",
+      repository: "art-tra2021/private",
+      template: "work",
+      title: "viewer check",
+      fields: { outcome: "権限確認" },
+      actor: "U_ALICE",
+      slackTeamId: "T123",
+    };
+
+    expect(await client.createIssue(command)).toMatchObject({ number: 7 });
+    expect(calls.some((input) => input.endsWith("/collaborators/alice/permission"))).toBe(true);
+  });
+
+  test("Issue担当ボタンもviewer権限を再確認して本人をassigneeにする", async () => {
+    let patchedBody: unknown;
+    const client = dependencies(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app/installations/99/access_tokens")) {
+        return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
+      }
+      if (url.includes("/installation/repositories")) {
+        return json({
+          total_count: 1,
+          repositories: [{ full_name: "art-tra2021/private", archived: false, private: true }],
+        });
+      }
+      if (url.endsWith("/collaborators/alice/permission")) {
+        return json({ permission: "triage" });
+      }
+      if (url.endsWith("/repos/art-tra2021/private/issues/7")) {
+        patchedBody = JSON.parse(String(init?.body));
+        return json({
+          number: 7,
+          title: "private work",
+          html_url: "https://github.com/art-tra2021/private/issues/7",
+          body: "",
+          state: "open",
+          user: { login: "author" },
+          labels: [],
+          assignees: [{ login: "alice" }],
+        });
+      }
+      throw new Error(`予期しないrequest: ${url}`);
+    });
+
+    expect(await client.claimIssue("art-tra2021/private", 7, "U_ALICE", "alice")).toMatchObject({
+      issueNumber: 7,
+      owner: "alice",
+    });
+    expect(patchedBody).toEqual({ assignees: ["alice"] });
+  });
+
   test("共有commandをGitHub Issue APIへ送る", async () => {
     let createdBody: unknown;
     const client = dependencies(async (input, init) => {
@@ -281,6 +423,15 @@ describe("GitHub App adapter", () => {
 
 function dependencies(fetchImpl: GitHubFetch): GitHubAppDependencies {
   return new GitHubAppDependencies({
+    ...baseConfig(),
+    apiBaseUrl: "https://github.example/api/v3",
+    fetch: fetchImpl,
+    now: () => NOW,
+  });
+}
+
+function baseConfig() {
+  return {
     appId: "12345",
     installationId: "99",
     privateKey,
@@ -288,9 +439,8 @@ function dependencies(fetchImpl: GitHubFetch): GitHubAppDependencies {
     githubLogin: "rozwer",
     owners: ["rozwer", "art-tra2021"],
     apiBaseUrl: "https://github.example/api/v3",
-    fetch: fetchImpl,
     now: () => NOW,
-  });
+  };
 }
 
 function json(value: unknown): Response {

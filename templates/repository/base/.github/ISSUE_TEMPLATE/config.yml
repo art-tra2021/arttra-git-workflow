@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: ART-TRA運用マニュアル
+    url: https://github.com/art-tra2021/arttra-git-workflow/blob/main/docs/workflow-v2.md
+    about: Issueの種類や依存関係を確認する

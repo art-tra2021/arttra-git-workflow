@@ -9,12 +9,13 @@ features:
   slash_commands:
     - command: /ar
       description: 自分が次に行う仕事を表示する
-      usage_hint: "new | connect github | disconnect github | approval <id> | project sync"
+      usage_hint: "new | project [repo owner/name|all] | canvas [repo owner/name|all] | connect github"
       should_escape: false
 oauth_config:
   scopes:
     bot:
       - channels:read
+      - canvases:write
       - chat:write
       - commands
       - groups:read

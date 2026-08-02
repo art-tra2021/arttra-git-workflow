@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "base": {
+    "id": "arttra-repository-base",
+    "path": "templates/repository/base",
+    "source_of_truth": "arttra-git-workflow"
+  },
+  "repository_profiles": [
+    {"profile": "minimal", "path": "templates/repository/wrappers/minimal/template.json"},
+    {"profile": "python", "path": "templates/repository/wrappers/python/template.json"},
+    {"profile": "typescript", "path": "templates/repository/wrappers/typescript/template.json"},
+    {"profile": "business", "path": "templates/repository/wrappers/business/template.json"}
+  ],
+  "project": {
+    "id": "arttra-project-standard",
+    "path": "templates/project/standard-project.json",
+    "default_mode": "shared-view"
+  },
+  "sync": {
+    "mode": "pull-request",
+    "managed_paths": ["templates/", "governance/"],
+    "never_copy": [".env", "*.pem", "*.key", "credentials.json", ".arttra/local/", ".claude/settings.local.json", ".codex/"]
+  }
+}

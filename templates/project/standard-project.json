@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "template_id": "arttra-project-standard",
+  "display_name": "ART-TRA Standard Project",
+  "source_of_truth": "github_projects_v2",
+  "default_mode": "shared-view",
+  "views": [
+    {"name": "My work", "layout": "table", "filter": "assignee:@me"},
+    {"name": "Intake", "layout": "table", "filter": "status:Issue"},
+    {"name": "Urgent", "layout": "board", "filter": "priority:P0,P1"},
+    {"name": "Blocked", "layout": "table", "filter": "status:Blocked"},
+    {"name": "Schedule", "layout": "roadmap", "filter": "target_date:*"},
+    {"name": "Review", "layout": "board", "filter": "status:In review"}
+  ],
+  "fields": {
+    "Status": ["Intake", "Ready", "Urgent (unstarted)", "In progress", "Blocked", "In review", "Done"],
+    "Priority": ["P0", "P1", "P2", "P3"],
+    "Size": ["S", "M", "L", "XL"],
+    "Start date": {"type": "date"},
+    "Target date": {"type": "date"},
+    "Repository": {"type": "text", "required": true},
+    "Owner team": {"type": "text", "required": true},
+    "Blocked by": {"type": "text"}
+  },
+  "workflows": {
+    "item_added": "Status=Intake",
+    "pull_request_opened": "Status=In progress",
+    "pull_request_ready_for_review": "Status=In review",
+    "pull_request_merged": "Status=Done"
+  },
+  "auto_add": false,
+  "copy_policy": "views-fields-workflows-draft-items",
+  "notes": [
+    "shared-viewではこのProjectを正本とし、Repositoryごとに保存Viewを作る。",
+    "isolated-templateを選んだ場合だけこの定義を独立Projectへコピーする。",
+    "GitHubのProject templateはauto-add設定をコピーしないため、管理者がRepository linkを明示する。"
+  ]
+}

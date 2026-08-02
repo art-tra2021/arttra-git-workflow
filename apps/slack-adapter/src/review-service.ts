@@ -26,6 +26,7 @@ interface ReviewServiceOptions {
   slackTeamId: string;
   reminderMilliseconds?: number;
   now?: () => number;
+  allowedRepositories?: readonly string[];
 }
 
 interface ReviewerCandidate {
@@ -46,6 +47,7 @@ export class PullRequestReviewService {
   private readonly slackTeamId: string;
   private readonly reminderMilliseconds: number;
   private readonly now: () => number;
+  private readonly allowedRepositories: Set<string> | null;
 
   constructor(
     github: GitHubReviewClient,
@@ -61,6 +63,9 @@ export class PullRequestReviewService {
     this.slackTeamId = options.slackTeamId;
     this.reminderMilliseconds = options.reminderMilliseconds ?? 24 * 60 * 60 * 1000;
     this.now = options.now ?? Date.now;
+    this.allowedRepositories = options.allowedRepositories
+      ? new Set(options.allowedRepositories.map((repository) => repository.toLowerCase()))
+      : null;
   }
 
   async process(
@@ -68,6 +73,9 @@ export class PullRequestReviewService {
     pullRequestNumber: number,
     options: ReviewProcessOptions = {},
   ): Promise<ReviewRequestReadModel | null> {
+    if (this.allowedRepositories && !this.allowedRepositories.has(repository.toLowerCase())) {
+      return null;
+    }
     const context = await this.github.loadPullRequestReviewContext(repository, pullRequestNumber);
     if (context.draft || context.state !== "open") {
       return null;
@@ -204,6 +212,12 @@ export function collectReviewerCandidates(context: PullRequestReviewContext): {
 } {
   const users = new Map<string, ReviewerCandidate>();
   const teams = new Map<string, Set<string>>();
+  for (const login of context.requestedReviewerLogins) {
+    addUser(users, login, "GitHubで指定されたreviewer");
+  }
+  for (const slug of context.requestedTeamSlugs) {
+    addReason(teams, slug, "GitHubで指定されたreviewer team");
+  }
   for (const issue of context.linkedIssues) {
     for (const reviewer of parsePlannedReviewers(issue.body)) {
       addUser(users, reviewer.login, `Issue #${issue.number}の予定レビュワー`, reviewer.id);

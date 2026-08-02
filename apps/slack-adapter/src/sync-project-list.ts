@@ -3,15 +3,26 @@ import { GitHubCliDependencies } from "./github-cli.ts";
 import type { GitHubIdentity } from "./identity-service.ts";
 import type { ProjectListClient } from "./project-list.ts";
 import { ProjectListSyncService } from "./project-list-service.ts";
+import {
+  assertSharedProjectionBinding,
+  filterItemsByAccessibleRepositories,
+  repositoryScope,
+} from "./project-scope.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
 
 const botToken = required("SLACK_BOT_TOKEN");
 const repository = required("AR_GITHUB_REPO");
+const sharedRepository = required("AR_SLACK_SHARED_REPOSITORY");
 const githubLogin = required("AR_GITHUB_LOGIN");
-const channelId =
-  argument("--channel") ??
-  process.env.AR_SLACK_PROJECT_LIST_CHANNEL_ID?.trim() ??
-  required("AR_SLACK_CANVAS_CHANNEL_ID");
+const configuredChannelId =
+  optional("AR_SLACK_PROJECT_LIST_CHANNEL_ID") ?? required("AR_SLACK_CANVAS_CHANNEL_ID");
+const channelId = argument("--channel") ?? configuredChannelId;
+assertSharedProjectionBinding({
+  channelId,
+  configuredChannelId,
+  repository: sharedRepository,
+  configuredRepository: sharedRepository,
+});
 const managerUserId =
   argument("--user") ?? optional("AR_SLACK_PROJECT_LIST_MANAGER_ID") ?? undefined;
 const slackTeamId = required("AR_SLACK_TEAM_ID");
@@ -24,9 +35,21 @@ const dependencies = new GitHubCliDependencies(
   owners.length > 0 ? owners : undefined,
   project,
 );
+const accessibleRepositories = await dependencies.listRepositoriesForViewer(githubLogin);
+if (
+  !accessibleRepositories.some(
+    (candidate) => candidate.toLowerCase() === sharedRepository.toLowerCase(),
+  )
+) {
+  throw new Error(`GitHub @${githubLogin} は${sharedRepository}を参照できません。`);
+}
+const sharedSource = {
+  loadProjectItems: async () =>
+    filterItemsByAccessibleRepositories(await dependencies.loadProjectItems(), [sharedRepository]),
+};
 const service = new ProjectListSyncService(
   new WebClient(botToken) as unknown as ProjectListClient,
-  dependencies,
+  sharedSource,
   store,
   async (githubLoginToFind) => {
     const identities = await store.list<GitHubIdentity>("github-identity");
@@ -39,7 +62,12 @@ const service = new ProjectListSyncService(
     );
   },
 );
-const result = await service.sync(channelId, managerUserId);
+const result = await service.sync(channelId, managerUserId, {
+  teamId: slackTeamId,
+  scope: repositoryScope(sharedRepository),
+  target: { kind: "channel", id: channelId },
+  accessibleRepositories: [sharedRepository],
+});
 
 if (process.argv.includes("--json")) {
   console.log(

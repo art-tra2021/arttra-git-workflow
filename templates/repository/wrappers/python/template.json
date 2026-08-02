@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "template_id": "arttra-repository-python",
+  "display_name": "ART-TRA Python",
+  "base": "../../base",
+  "profile": "python",
+  "ci_profile": "python",
+  "repo_kind": "product",
+  "overlay_paths": [".mise.profile.toml", "pyproject.toml", "README.md"],
+  "managed_paths": ["AGENTS.md", ".github", ".mise.toml", ".mise.profile.toml", "hk.pkl", "arttra.toml", "governance", "pyproject.toml", "template.lock.json"],
+  "optional_tools": ["python", "uv"],
+  "post_create": ["replace_placeholders", "merge_mise_profile", "mise_trust", "setup_ar", "ready"]
+}
