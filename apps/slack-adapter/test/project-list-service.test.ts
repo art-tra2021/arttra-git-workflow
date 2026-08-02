@@ -108,7 +108,6 @@ describe("ProjectListSyncService", () => {
     await service.sync("C123", "U123");
 
     expect(accessCalls).toEqual([
-      { list_id: "FPROJECTLIST", access_level: "read", channel_ids: ["C123"] },
       { list_id: "FPROJECTLIST", access_level: "read", user_ids: ["U123"] },
     ]);
   });

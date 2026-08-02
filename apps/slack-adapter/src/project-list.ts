@@ -23,7 +23,19 @@ export interface ProjectListItem {
   id: string;
   fields?: Array<{
     column_id?: string;
-    link?: Array<{ original_url?: string; originalUrl?: string }>;
+    text?: string;
+    rich_text?: unknown[];
+    user?: string[];
+    date?: string[];
+    select?: string[];
+    link?: Array<{
+      original_url?: string;
+      originalUrl?: string;
+      display_as_url?: boolean;
+      displayAsUrl?: boolean;
+      display_name?: string;
+      displayName?: string;
+    }>;
   }>;
 }
 
@@ -198,8 +210,11 @@ export async function syncProjectList(
     const fields = await projectListFields(item, state.columns, resolveSlackUserId);
     const existingRow = rowsByUrl.get(item.url);
     if (existingRow && !rowsToDelete.includes(existingRow.id)) {
-      cells.push(...fields.map((field) => ({ ...field, row_id: existingRow.id })));
-      updated += 1;
+      const changedFields = fields.filter((field) => !sameFieldValue(existingRow, field));
+      if (changedFields.length > 0) {
+        cells.push(...changedFields.map((field) => ({ ...field, row_id: existingRow.id })));
+        updated += 1;
+      }
     } else {
       const response = await client.slackLists.items.create({
         list_id: state.listId,
@@ -224,6 +239,58 @@ export async function syncProjectList(
     updated,
     deleted: rowsToDelete.length,
   };
+}
+
+function sameFieldValue(row: ProjectListItem, desired: Record<string, unknown>): boolean {
+  const columnId = desired.column_id;
+  if (typeof columnId !== "string") return false;
+  const current = row.fields?.find((field) => field.column_id === columnId);
+  if (!current) return false;
+
+  if ("rich_text" in desired) {
+    return current.text === richTextPlainText(desired.rich_text);
+  }
+  if ("user" in desired) {
+    return sameStringArray(current.user, desired.user);
+  }
+  if ("date" in desired) {
+    return sameStringArray(current.date, desired.date);
+  }
+  if ("select" in desired) {
+    return sameStringArray(current.select, desired.select);
+  }
+  if ("link" in desired) {
+    const currentLink = current.link?.[0];
+    const desiredLink = Array.isArray(desired.link) ? desired.link[0] : undefined;
+    if (!currentLink || !desiredLink || typeof desiredLink !== "object") return false;
+    const value = desiredLink as Record<string, unknown>;
+    return (
+      (currentLink.original_url ?? currentLink.originalUrl) ===
+        (value.original_url ?? value.originalUrl) &&
+      (currentLink.display_as_url ?? currentLink.displayAsUrl ?? false) ===
+        (value.display_as_url ?? value.displayAsUrl ?? false) &&
+      (currentLink.display_name ?? currentLink.displayName ?? "") ===
+        (value.display_name ?? value.displayName ?? "")
+    );
+  }
+  return false;
+}
+
+function sameStringArray(current: string[] | undefined, desired: unknown): boolean {
+  if (!Array.isArray(desired) || !desired.every((value) => typeof value === "string")) {
+    return false;
+  }
+  const left = [...(current ?? [])].sort();
+  const right = [...desired].sort();
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function richTextPlainText(value: unknown): string {
+  if (Array.isArray(value)) return value.map(richTextPlainText).join("");
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  if (typeof record.text === "string") return record.text;
+  return richTextPlainText(record.elements);
 }
 
 async function projectListFields(
