@@ -14,6 +14,7 @@ import {
 } from "./project-read-model.ts";
 import { toHumanWorkItem } from "./read-model.ts";
 import type {
+  GitHubIssueContext,
   GitHubReviewClient,
   GitHubReviewerIdentity,
   PullRequestReviewContext,
@@ -57,6 +58,9 @@ interface ApiIssue {
   number: number;
   title: string;
   html_url: string;
+  body: string | null;
+  state: "open" | "closed";
+  user: { login: string };
   labels: Array<string | { name?: string }>;
   assignees: Array<{ login: string }>;
   pull_request?: unknown;
@@ -258,6 +262,7 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       this.loadCodeowners(repository),
       this.loadRequiredApprovals(repository),
     ]);
+    const latestDecisions = latestReviewDecisions(reviews);
     return {
       schemaVersion: 1,
       repository,
@@ -276,9 +281,30 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       requestedReviewerLogins: pullRequest.requested_reviewers.map((reviewer) => reviewer.login),
       requestedTeamSlugs: pullRequest.requested_teams.map((team) => team.slug),
       approvedReviewerLogins: reviews
-        .filter((review) => review.state.toUpperCase() === "APPROVED")
-        .map((review) => review.user.login),
+        .filter(
+          (review) =>
+            latestDecisions.get(review.user.login.toLowerCase()) === "APPROVED" &&
+            review.state.toUpperCase() === "APPROVED",
+        )
+        .map((review) => review.user.login)
+        .filter((login, index, values) => values.indexOf(login) === index),
+      changesRequestedReviewerLogins: reviews
+        .filter(
+          (review) =>
+            latestDecisions.get(review.user.login.toLowerCase()) === "CHANGES_REQUESTED" &&
+            review.state.toUpperCase() === "CHANGES_REQUESTED",
+        )
+        .map((review) => review.user.login)
+        .filter((login, index, values) => values.indexOf(login) === index),
     };
+  }
+
+  async loadIssueContext(repository: string, issueNumber: number): Promise<GitHubIssueContext> {
+    const issue = await this.api<ApiIssue>(`/repos/${repository}/issues/${issueNumber}`);
+    if (issue.pull_request) {
+      throw new Error(`Issue #${issueNumber}はPull Requestです。`);
+    }
+    return issueContext(issue);
   }
 
   async resolveGitHubUsers(logins: string[]): Promise<GitHubReviewerIdentity[]> {
@@ -368,18 +394,15 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
   private async loadLinkedIssues(
     repository: string,
     pullRequestBody: string,
-  ): Promise<Array<{ number: number; body: string; url: string }>> {
+  ): Promise<GitHubIssueContext[]> {
     const numbers = [...pullRequestBody.matchAll(/(?:^|\s)#([1-9][0-9]*)\b/gm)]
       .map((match) => Number(match[1]))
       .filter((number, index, values) => values.indexOf(number) === index)
       .slice(0, 10);
     return Promise.all(
-      numbers.map(async (number) => {
-        const issue = await this.api<{ number: number; body: string | null; html_url: string }>(
-          `/repos/${repository}/issues/${number}`,
-        );
-        return { number: issue.number, body: issue.body ?? "", url: issue.html_url };
-      }),
+      numbers.map(async (number) =>
+        issueContext(await this.api<ApiIssue>(`/repos/${repository}/issues/${number}`)),
+      ),
     );
   }
 
@@ -552,6 +575,31 @@ function normalizeRepositoryPermission(value: string | undefined): RepositoryPer
   return ["admin", "maintain", "write", "triage", "read"].includes(value ?? "")
     ? (value as RepositoryPermission)
     : "none";
+}
+
+function issueContext(issue: ApiIssue): GitHubIssueContext {
+  return {
+    number: issue.number,
+    title: issue.title,
+    url: issue.html_url,
+    body: issue.body ?? "",
+    state: issue.state,
+    authorLogin: issue.user.login,
+    assigneeLogins: issue.assignees.map((assignee) => assignee.login),
+  };
+}
+
+function latestReviewDecisions(
+  reviews: Array<{ state: string; user: { login: string } }>,
+): Map<string, "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED"> {
+  const decisions = new Map<string, "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED">();
+  for (const review of reviews) {
+    const state = review.state.toUpperCase();
+    if (state === "APPROVED" || state === "CHANGES_REQUESTED" || state === "DISMISSED") {
+      decisions.set(review.user.login.toLowerCase(), state);
+    }
+  }
+  return decisions;
 }
 
 function toSnapshot(issue: ApiIssue): WorkItemSnapshot {

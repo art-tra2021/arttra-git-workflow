@@ -34,6 +34,10 @@ interface ReviewerCandidate {
   expectedGitHubUserIds: Set<number>;
 }
 
+interface ReviewProcessOptions {
+  reRequestChanges?: boolean;
+}
+
 export class PullRequestReviewService {
   private readonly github: GitHubReviewClient;
   private readonly identities: Pick<GitHubIdentityService, "findByGitHubUserId">;
@@ -62,6 +66,7 @@ export class PullRequestReviewService {
   async process(
     repository: string,
     pullRequestNumber: number,
+    options: ReviewProcessOptions = {},
   ): Promise<ReviewRequestReadModel | null> {
     const context = await this.github.loadPullRequestReviewContext(repository, pullRequestNumber);
     if (context.draft || context.state !== "open") {
@@ -69,13 +74,16 @@ export class PullRequestReviewService {
     }
     const { users, teams } = collectReviewerCandidates(context);
     const approved = new Set(context.approvedReviewerLogins.map(normalizeLogin));
+    const changesRequested = new Set(context.changesRequestedReviewerLogins.map(normalizeLogin));
     const requestedUsers = new Set(context.requestedReviewerLogins.map(normalizeLogin));
     const requestedTeams = new Set(context.requestedTeamSlugs.map(normalizeLogin));
     const author = normalizeLogin(context.authorLogin);
     const activeUsers = [...users.values()].filter(
       (candidate) =>
         normalizeLogin(candidate.login) !== author &&
-        !approved.has(normalizeLogin(candidate.login)),
+        !approved.has(normalizeLogin(candidate.login)) &&
+        (options.reRequestChanges === true ||
+          !changesRequested.has(normalizeLogin(candidate.login))),
     );
     const activeTeams = [...teams.entries()].filter(
       ([slug]) => !requestedTeams.has(normalizeLogin(slug)),
@@ -129,6 +137,8 @@ export class PullRequestReviewService {
         url: context.url,
         headSha: context.headSha,
       },
+      authorLogin: context.authorLogin,
+      linkedIssues: context.linkedIssues,
       requiredApprovals: context.requiredApprovals,
       reviewers: reviewerModels,
       teams: [...teams.entries()].map(([slug, reasons]) => ({
@@ -140,7 +150,7 @@ export class PullRequestReviewService {
       updatedAt: new Date(this.now()).toISOString(),
     };
     const shouldNotify = await this.shouldNotify(model);
-    if (shouldNotify && model.reviewers.some((reviewer) => reviewer.slackUserId !== null)) {
+    if (shouldNotify) {
       await this.notifier.notify(model);
       for (const reviewer of model.reviewers) {
         reviewer.notified = reviewer.slackUserId !== null;

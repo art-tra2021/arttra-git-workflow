@@ -79,6 +79,25 @@ describe("PullRequestReviewService", () => {
     expect(await service.process("example/repo", 28)).toBeNull();
     expect(github.requests).toHaveLength(0);
   });
+
+  test("差し戻したreviewerは修正push後だけ再requestする", async () => {
+    const github = new FakeReviewClient({
+      ...context(),
+      changesRequestedReviewerLogins: ["alice"],
+    });
+    const service = new PullRequestReviewService(
+      github,
+      { findByGitHubUserId: async () => null },
+      new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-review-rerequest-"))),
+      { notify: async () => {} },
+      { slackTeamId: "T123" },
+    );
+
+    await service.process("example/repo", 28);
+    expect(github.requests).toEqual([{ reviewers: ["bob"], teams: ["frontend"] }]);
+    await service.process("example/repo", 28, { reRequestChanges: true });
+    expect(github.requests[1]).toEqual({ reviewers: ["alice", "bob"], teams: ["frontend"] });
+  });
 });
 
 describe("reviewer構造", () => {
@@ -142,7 +161,11 @@ function context(): PullRequestReviewContext {
     linkedIssues: [
       {
         number: 29,
+        title: "通知を統合する",
         url: "https://github.example/example/repo/issues/29",
+        state: "open",
+        authorLogin: "requester",
+        assigneeLogins: ["owner"],
         body: [
           "## 目標日",
           "",
@@ -157,5 +180,6 @@ function context(): PullRequestReviewContext {
     requestedReviewerLogins: [],
     requestedTeamSlugs: [],
     approvedReviewerLogins: [],
+    changesRequestedReviewerLogins: [],
   };
 }

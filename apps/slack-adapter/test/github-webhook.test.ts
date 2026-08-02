@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { parseGitHubWebhookJob, verifyGitHubWebhookSignature } from "../src/github-webhook.ts";
 import { GitHubWebhookProcessor } from "../src/github-webhook-processor.ts";
 import { CloudTasksGitHubJobQueue, signJob, verifyJobSignature } from "../src/job-queue.ts";
+import type { LifecycleNotificationService } from "../src/lifecycle-notification-service.ts";
 import type { PullRequestReviewService } from "../src/review-service.ts";
 import type { StateStore } from "../src/state-store.ts";
 import type { WorkNotificationService } from "../src/work-notification-service.ts";
@@ -169,5 +170,36 @@ describe("GitHubWebhookProcessor", () => {
     await processor.process(job);
 
     expect(notificationCount).toBe(1);
+  });
+
+  test("Issueコメントをライフサイクル通知へ一度だけ渡す", async () => {
+    const values = new Map<string, unknown>();
+    const store = {
+      get: async (_namespace: string, key: string) => values.get(key) ?? null,
+      create: async (_namespace: string, key: string, value: unknown) => {
+        if (values.has(key)) return false;
+        values.set(key, value);
+        return true;
+      },
+    } as unknown as StateStore;
+    const calls: string[] = [];
+    const lifecycle = {
+      process: async (job: { event: string }) => {
+        calls.push(job.event);
+        return 1;
+      },
+    } as unknown as LifecycleNotificationService;
+    const processor = new GitHubWebhookProcessor(null, store, undefined, null, lifecycle);
+    const job = {
+      schemaVersion: 1 as const,
+      deliveryId: "delivery-comment",
+      event: "issue_comment",
+      payload: { action: "created" },
+    };
+
+    await processor.process(job);
+    await processor.process(job);
+
+    expect(calls).toEqual(["issue_comment"]);
   });
 });
