@@ -7,6 +7,7 @@ import { GitHubAppDependencies } from "./github-app.ts";
 import { GitHubCliDependencies } from "./github-cli.ts";
 import { parseGitHubWebhookJob, verifyGitHubWebhookSignature } from "./github-webhook.ts";
 import { GitHubWebhookProcessor } from "./github-webhook-processor.ts";
+import { completeGoogleCalendarCallback } from "./google-calendar-callback.ts";
 import { GoogleCalendarService } from "./google-calendar-service.ts";
 import { type GitHubIdentity, GitHubIdentityService } from "./identity-service.ts";
 import {
@@ -195,13 +196,18 @@ receiver?.router.get("/google/callback", async (request, response) => {
     return;
   }
   try {
-    const identity = await googleCalendarService.complete(code, state);
-    await googleCalendarService.syncUser(identity.slackTeamId, identity.slackUserId);
+    const result = await completeGoogleCalendarCallback(googleCalendarService, code, state);
+    if (result.syncWarning) {
+      console.warn(`Google Calendar連携後の初回同期を保留しました: ${result.syncWarning}`);
+    }
+    const message = result.sync
+      ? `${escapeHtml(result.identity.googleEmail)} の専用カレンダーへ、自分の期限付きタスクを同期しました。`
+      : `${escapeHtml(result.identity.googleEmail)} との連携は完了しました。GitHub連携後にSlackで <code>/ar calendar sync</code> を実行してください。`;
     response
       .status(200)
       .type("text/html")
       .send(
-        `<!doctype html><html lang="ja"><meta charset="utf-8"><title>Calendar連携完了</title><body><h1>Google Calendar連携が完了しました</h1><p>${escapeHtml(identity.googleEmail)} の専用カレンダーへ、自分の期限付きタスクを同期しました。この画面を閉じてSlackへ戻ってください。</p></body></html>`,
+        `<!doctype html><html lang="ja"><meta charset="utf-8"><title>Calendar連携完了</title><body><h1>Google Calendar連携が完了しました</h1><p>${message} この画面を閉じてSlackへ戻ってください。</p></body></html>`,
       );
   } catch (error) {
     response
