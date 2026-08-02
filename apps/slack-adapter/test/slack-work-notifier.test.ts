@@ -16,6 +16,8 @@ describe("SlackWorkNotifier", () => {
     expect(result).toEqual({ messageTs: "700.1" });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.text).toContain("<@UALICE>");
+    expect(calls[0]?.text).toContain("⏰");
+    expect(JSON.stringify(calls[0]?.blocks)).toContain("⏰ *期限のお知らせ*");
     expect(calls[0]).not.toHaveProperty("thread_ts");
   });
 
@@ -40,6 +42,7 @@ describe("SlackWorkNotifier", () => {
     await notifier.digest([item()]);
 
     expect(calls).toHaveLength(1);
+    expect(calls[0]?.text).toContain("📋");
     expect(calls[0]).not.toHaveProperty("thread_ts");
   });
 });

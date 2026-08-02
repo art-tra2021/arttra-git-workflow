@@ -19,6 +19,19 @@ export interface GitHubIdentity {
   verifiedAt: string;
 }
 
+export class MissingGitHubIdentityError extends Error {
+  readonly slackUserIds: string[];
+
+  constructor(slackUserIds: string[]) {
+    const mentions = slackUserIds.map((slackUserId) => `<@${slackUserId}>`).join(" ");
+    super(
+      `${mentions} はGitHub未連携です。本人がSlackで \`/ar connect github\` を実行してください。`,
+    );
+    this.name = "MissingGitHubIdentityError";
+    this.slackUserIds = [...slackUserIds];
+  }
+}
+
 interface OAuthState {
   schemaVersion: 1;
   slackTeamId: string;
@@ -215,10 +228,7 @@ export class GitHubIdentityService {
     );
     const missing = slackUserIds.filter((_, index) => identities[index] === null);
     if (missing.length > 0) {
-      const mentions = missing.map((slackUserId) => `<@${slackUserId}>`).join(" ");
-      throw new Error(
-        `${mentions} はGitHub未連携です。本人がSlackで \`/ar connect github\` を実行してください。`,
-      );
+      throw new MissingGitHubIdentityError(missing);
     }
     return identities.filter((identity): identity is GitHubIdentity => identity !== null);
   }

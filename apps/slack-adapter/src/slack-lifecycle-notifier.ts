@@ -5,6 +5,7 @@ import type {
   LifecycleNotifier,
 } from "./lifecycle-notification-service.ts";
 import type { ThreadMessageResult } from "./notification-thread-service.ts";
+import { lifecycleTone, slackHeading, slackPlain } from "./slack-message-style.ts";
 
 export class SlackLifecycleNotifier implements LifecycleNotifier {
   private readonly client: Pick<WebClient, "chat">;
@@ -21,9 +22,11 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
   ): Promise<ThreadMessageResult> {
     const mentions = notification.slackUserIds.map((userId) => `<@${userId}>`).join(" ");
     const target = notification.pullRequest ?? notification.resource;
+    const tone = lifecycleTone(notification.kind);
+    const label = kindLabel(notification.kind);
     const response = await this.client.chat.postMessage({
       channel: this.channelId,
-      text: `${mentions ? `${mentions} ` : ""}${notification.summary} ${target.url}`,
+      text: `${mentions ? `${mentions} ` : ""}${slackPlain(tone, notification.summary)} ${target.url}`,
       blocks: [
         {
           type: "section",
@@ -31,7 +34,7 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
             type: "mrkdwn",
             text: [
               mentions,
-              `*${kindLabel(notification.kind)}*`,
+              slackHeading(tone, label),
               `*<${notification.resource.url}|#${notification.resource.number} ${escapeMrkdwn(notification.resource.title)}>*`,
               notification.pullRequest
                 ? `*PR:* <${notification.pullRequest.url}|#${notification.pullRequest.number} ${escapeMrkdwn(notification.pullRequest.title)}>`

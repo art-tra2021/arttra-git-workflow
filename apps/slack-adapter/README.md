@@ -192,12 +192,17 @@ Issueごとの親投稿tsは共通state storeへ保存する。
 
 PR作成時は、Issue本文の予定reviewer、変更fileに対するCODEOWNERS、Rulesetを再取得する。
 GitHubへ正式なReview Requestを設定し、reviewerとPR作成者以外のIssue担当者をnative mentionする。
+Issue作成モーダルで選択した担当者または予定reviewerがGitHub未連携の場合、Issue作成者だけへエラーを返して終わらせない。
+対象のSlack user IDをnative mentionし、`🧩 GitHub連携が必要です`と`/ar connect github`を通知する。
+同じ利用者への連携要求は24時間抑止し、表示名やメールアドレスからGitHubアカウントを推測しない。
 PR作成、Issue・PRコメント、Approve、差し戻し、差し戻し後のpush、マージ、Issue closeは関連Issueのthreadへ返信する。
 関連IssueがないPRだけはPR URLをキーとする専用threadを作る。
 コメント時はIssue担当者またはPR作成者と、コメント本文で明示された`@github-login`を通知対象とする。
 差し戻し時はPR作成者、修正push時は差し戻したreviewer、マージとIssue close時は担当者を通知対象とする。
 通知対象はGitHub OAuthで検証済みのaccount mappingだけをSlack user IDへ変換し、表示名やメールから推測しない。
 Webhook delivery IDとイベント内容のfingerprintを保存し、再送された同一イベントを重複通知しない。
+Slackメッセージは先頭の絵文字と短い日本語見出しで種類を示す。
+レビューは`👀`、コメントは`💬`、差し戻しは`⚠️`、承認は`✅`、マージは`🎉`、完了は`🏁`、期限は`⏰`、要対応は`🧩`を使う。
 
 担当者、未完了、Target dateの3条件を満たす仕事には期限通知を行う。
 `AR_DEADLINE_REMINDER_DAYS`日前、期限当日、期限超過の各段階で一度だけ、検証済みaccount mappingのSlack利用者をnative mentionする。
