@@ -98,6 +98,16 @@ const googleCalendarService = googleCalendarSettings
     })
   : null;
 const slackClient = new WebClient(botToken);
+const resolveSlackUserId = async (githubLoginToFind: string) => {
+  const identities = await store.list<GitHubIdentity>("github-identity");
+  return (
+    identities.find(
+      (identity) =>
+        identity.slackTeamId === slackTeamId &&
+        identity.githubLogin.toLowerCase() === githubLoginToFind.toLowerCase(),
+    )?.slackUserId ?? null
+  );
+};
 const approvalService = new IssueApprovalService(store, {
   ttlMilliseconds:
     positiveInteger(process.env.AR_APPROVAL_TTL_MINUTES ?? "1440", "AR_APPROVAL_TTL_MINUTES") *
@@ -107,16 +117,7 @@ const projectListService = new ProjectListSyncService(
   slackClient as unknown as ProjectListClient,
   dependencies,
   store,
-  async (githubLoginToFind) => {
-    const identities = await store.list<GitHubIdentity>("github-identity");
-    return (
-      identities.find(
-        (identity) =>
-          identity.slackTeamId === slackTeamId &&
-          identity.githubLogin.toLowerCase() === githubLoginToFind.toLowerCase(),
-      )?.slackUserId ?? null
-    );
-  },
+  resolveSlackUserId,
 );
 const projectListChannelId = optional("AR_SLACK_PROJECT_LIST_CHANNEL_ID");
 const workNotificationChannelId = optional("AR_SLACK_WORK_CHANNEL_ID") ?? projectListChannelId;
@@ -125,6 +126,9 @@ const workNotificationService = workNotificationChannelId
       dependencies,
       store,
       new SlackWorkNotifier(slackClient, workNotificationChannelId),
+      Date.now,
+      resolveSlackUserId,
+      positiveInteger(process.env.AR_DEADLINE_REMINDER_DAYS ?? "3", "AR_DEADLINE_REMINDER_DAYS"),
     )
   : null;
 const receiver =
@@ -333,6 +337,34 @@ receiver?.router.post(
     } catch (error) {
       console.error(error instanceof Error ? error.message : "Calendar同期に失敗しました。");
       response.status(500).json({ ok: false, error: "calendar_sync_failed" });
+    }
+  },
+);
+
+receiver?.router.post(
+  "/internal/deadline-reminders",
+  raw({ type: "application/json", limit: "1kb" }),
+  async (request, response) => {
+    if (!workNotificationService) {
+      response.status(503).json({ ok: false, error: "work_notification_channel_required" });
+      return;
+    }
+    const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
+    if (!verifyJobSignature(body, request.header("x-ar-job-signature") ?? "", jobSecret)) {
+      response.status(401).json({ ok: false, error: "invalid_job_signature" });
+      return;
+    }
+    try {
+      const command = JSON.parse(body) as { schemaVersion?: number; kind?: string };
+      if (command.schemaVersion !== 1 || command.kind !== "work.deadline-remind") {
+        response.status(400).json({ ok: false, error: "invalid_deadline_command" });
+        return;
+      }
+      const notified = await workNotificationService.notifyDeadlines();
+      response.status(200).json({ ok: true, notified, schemaVersion: 1 });
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "期限通知処理に失敗しました。");
+      response.status(500).json({ ok: false, error: "deadline_reminder_failed" });
     }
   },
 );

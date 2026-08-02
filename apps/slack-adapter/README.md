@@ -6,6 +6,7 @@ GitHub の生イベントを Slack へ転送せず、GitHub と Projects から�
 
 - Webhook は表示データではなく再取得のきっかけとして扱う。
 - Slack の即時通知は、blocker、急ぎの未割当、CI 失敗、conflict、review 依頼に限定する。
+- 同じIssueに関する即時通知は一つのSlackスレッドへ集約する。
 - 通常の進行中作業は digest と Slack List に集約し、完了済み項目は通知しない。
 - Slack は操作窓口であり、正本は GitHub Issue と Projects に置く。
 - Slack ユーザーと GitHub ユーザーの対応を推測しない。
@@ -185,6 +186,15 @@ job本文は`AR_JOB_SECRET`でも署名し、GitHub delivery IDをCloud Tasks ta
 Project項目、Issue、PR、reviewの変更を処理したworkerはGitHub Projectsを再取得し、設定済みSlack Listへ反映する。
 同じ再取得結果から、未着手・緊急、Blocked、CI失敗、conflictだけを`AR_SLACK_WORK_CHANNEL_ID`へ即時通知する。
 通知済み状態はIssue URLと判定内容のfingerprintで重複排除し、通常の進行中作業は即時投稿しない。
+Issueごとの親投稿tsは共通state storeへ保存する。
+期限、blocker、CI失敗、conflictなど同じIssueの続報は親投稿のthreadへ返信し、channelへ新しい親投稿を増やさない。
+日次digestはIssue別threadへ入れず、独立した一覧投稿とする。
+
+担当者、未完了、Target dateの3条件を満たす仕事には期限通知を行う。
+`AR_DEADLINE_REMINDER_DAYS`日前、期限当日、期限超過の各段階で一度だけ、検証済みaccount mappingのSlack利用者をnative mentionする。
+Target dateが変わった場合は新しい期限として再判定する。
+定期実行は固定JSON `{"schemaVersion":1,"kind":"work.deadline-remind"}` を`/internal/deadline-reminders`へ送る。
+本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から一日一回実行する。
 
 Webhookの取りこぼしを修復する定期同期は、固定JSON `{"schemaVersion":1,"kind":"project-list.sync"}` を`/internal/project-list-sync`へ送る。
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
