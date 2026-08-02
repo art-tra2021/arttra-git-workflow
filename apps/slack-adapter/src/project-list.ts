@@ -114,7 +114,7 @@ export async function createProjectList(
 ): Promise<ProjectListState> {
   assertChannelId(channelId);
   const response = await client.slackLists.create({
-    name: "ART-TRA Work",
+    name: "仕事一覧",
     description_blocks: projectListDescription(),
     schema: projectListSchema,
     todo_mode: true,
@@ -145,7 +145,7 @@ export async function ensureProjectListDefinition(
 ): Promise<void> {
   await client.slackLists.update({
     id: listId,
-    name: "ART-TRA Work",
+    name: "仕事一覧",
     description_blocks: projectListDescription(),
     todo_mode: true,
   });
