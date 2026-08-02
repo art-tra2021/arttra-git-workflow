@@ -201,7 +201,8 @@ PR作成、Issue・PRコメント、Approve、差し戻し、差し戻し後のp
 差し戻し時はPR作成者、修正push時は差し戻したreviewer、マージとIssue close時は担当者を通知対象とする。
 通知対象はGitHub OAuthで検証済みのaccount mappingだけをSlack user IDへ変換し、表示名やメールから推測しない。
 Webhook delivery IDとイベント内容のfingerprintを保存し、再送された同一イベントを重複通知しない。
-Slackメッセージは先頭の絵文字と短い日本語見出しで種類を示す。
+Slackメッセージは独立したHeader Blockの絵文字と短い日本語見出しで種類を示す。
+Header Block、区切り線、詳細、次の操作の順で構成し、fallback textにも同じ見出しを含める。
 レビューは`👀`、コメントは`💬`、差し戻しは`⚠️`、承認は`✅`、マージは`🎉`、完了は`🏁`、期限は`⏰`、要対応は`🧩`を使う。
 
 担当者、未完了、Target dateの3条件を満たす仕事には期限通知を行う。

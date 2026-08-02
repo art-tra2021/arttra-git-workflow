@@ -41,6 +41,21 @@ export function slackHeading(tone: SlackMessageTone, label: string): string {
   return `${EMOJI[tone]} *${label}*`;
 }
 
+export function slackHeader(tone: SlackMessageTone, label: string) {
+  return {
+    type: "header" as const,
+    text: {
+      type: "plain_text" as const,
+      text: `${EMOJI[tone]} ${label}`,
+      emoji: true,
+    },
+  };
+}
+
+export function slackDivider() {
+  return { type: "divider" as const };
+}
+
 export function lifecycleTone(kind: LifecycleNotificationKind): SlackMessageTone {
   const tones: Record<LifecycleNotificationKind, SlackMessageTone> = {
     "comment-created": "comment",

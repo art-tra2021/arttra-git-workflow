@@ -1,6 +1,6 @@
 import type { WebClient } from "@slack/web-api";
 import { workItemBlocks } from "./presentation.ts";
-import { slackHeading, slackPlain } from "./slack-message-style.ts";
+import { slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
 import type { HumanWorkItem } from "./types.ts";
 import type {
   WorkNotificationContext,
@@ -28,13 +28,16 @@ export class SlackWorkNotifier implements WorkNotifier {
       channel: this.channelId,
       text: `${mention}${slackPlain(tone, `#${item.issueNumber} ${item.title}: ${item.nextAction}`)}`,
       blocks: [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `${mention}${slackHeading(tone, label)}`,
-          },
-        },
+        slackHeader(tone, label),
+        ...(mention
+          ? [
+              {
+                type: "section" as const,
+                text: { type: "mrkdwn" as const, text: mention.trim() },
+              },
+            ]
+          : []),
+        slackDivider(),
         ...workItemBlocks(item),
       ],
       ...(context.threadTs ? { thread_ts: context.threadTs, reply_broadcast: false } : {}),
@@ -60,11 +63,13 @@ export class SlackWorkNotifier implements WorkNotifier {
       channel: this.channelId,
       text: slackPlain("digest", `ART-TRAの未完了作業は${items.length}件です。`),
       blocks: [
+        slackHeader("digest", `ART-TRA 作業ダイジェスト（${items.length}件）`),
+        slackDivider(),
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `${slackHeading("digest", `ART-TRA 作業ダイジェスト（${items.length}件）`)}\n${lines.join("\n")}`,
+            text: lines.join("\n"),
           },
         },
       ],

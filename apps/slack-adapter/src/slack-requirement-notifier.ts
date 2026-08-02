@@ -1,5 +1,5 @@
 import type { WebClient } from "@slack/web-api";
-import { slackHeading, slackPlain } from "./slack-message-style.ts";
+import { slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
 import type { StateStore } from "./state-store.ts";
 
 const NAMESPACE = "requirement-notification";
@@ -60,16 +60,23 @@ export class SlackRequirementNotifier {
         `${mentions} GitHub連携が必要です。Slackで /ar connect github を実行してください。`,
       ),
       blocks: [
+        slackHeader("action", "GitHub連携が必要です"),
         {
           type: "section",
           text: {
             type: "mrkdwn",
             text: [
               mentions,
-              slackHeading("action", "GitHub連携が必要です"),
               "担当者または予定レビュワーとしてGitHubへ反映するには、本人確認が必要です。",
-              "*次の操作:* Slackで `/ar connect github` を実行し、自分のGitHubアカウントで認証する",
             ].join("\n"),
+          },
+        },
+        slackDivider(),
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "*次の操作*\nSlackで `/ar connect github` を実行し、自分のGitHubアカウントで認証する",
           },
         },
       ],

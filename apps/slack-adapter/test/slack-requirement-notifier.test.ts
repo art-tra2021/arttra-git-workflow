@@ -31,6 +31,12 @@ describe("SlackRequirementNotifier", () => {
     expect(await notifier.requireGitHubConnection(requirement)).toBe(0);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.text).toContain("🧩");
+    const message = calls[0];
+    if (!message) throw new Error("Slack通知が記録されていません");
+    expect((message.blocks as Array<Record<string, unknown>>)[0]).toMatchObject({
+      type: "header",
+      text: { text: "🧩 GitHub連携が必要です" },
+    });
     expect(JSON.stringify(calls[0]?.blocks)).toContain("<@URUKI>");
     expect(JSON.stringify(calls[0]?.blocks)).toContain("/ar connect github");
 
