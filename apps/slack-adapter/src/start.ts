@@ -18,9 +18,12 @@ import {
   LocalGitHubJobQueue,
   verifyJobSignature,
 } from "./job-queue.ts";
+import { LifecycleNotificationService } from "./lifecycle-notification-service.ts";
+import { NotificationThreadService } from "./notification-thread-service.ts";
 import type { ProjectListClient } from "./project-list.ts";
 import { ProjectListSyncService, parseProjectListSyncCommand } from "./project-list-service.ts";
 import { PullRequestReviewService } from "./review-service.ts";
+import { SlackLifecycleNotifier } from "./slack-lifecycle-notifier.ts";
 import { SlackReviewNotifier } from "./slack-review-notifier.ts";
 import { SlackWorkNotifier } from "./slack-work-notifier.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
@@ -121,6 +124,10 @@ const projectListService = new ProjectListSyncService(
 );
 const projectListChannelId = optional("AR_SLACK_PROJECT_LIST_CHANNEL_ID");
 const workNotificationChannelId = optional("AR_SLACK_WORK_CHANNEL_ID") ?? projectListChannelId;
+const notificationThreads = new NotificationThreadService(store);
+const slackLifecycleNotifier = workNotificationChannelId
+  ? new SlackLifecycleNotifier(slackClient, workNotificationChannelId)
+  : null;
 const workNotificationService = workNotificationChannelId
   ? new WorkNotificationService(
       dependencies,
@@ -129,6 +136,7 @@ const workNotificationService = workNotificationChannelId
       Date.now,
       resolveSlackUserId,
       positiveInteger(process.env.AR_DEADLINE_REMINDER_DAYS ?? "3", "AR_DEADLINE_REMINDER_DAYS"),
+      notificationThreads,
     )
   : null;
 const receiver =
@@ -140,12 +148,12 @@ const receiver =
       })
     : undefined;
 const reviewService =
-  dependencies instanceof GitHubAppDependencies
+  dependencies instanceof GitHubAppDependencies && slackLifecycleNotifier
     ? new PullRequestReviewService(
         dependencies,
         identityService,
         store,
-        new SlackReviewNotifier(slackClient, required("AR_SLACK_REVIEW_CHANNEL_ID")),
+        new SlackReviewNotifier(slackLifecycleNotifier, notificationThreads, resolveSlackUserId),
         {
           slackTeamId,
           reminderMilliseconds:
@@ -156,13 +164,24 @@ const reviewService =
         },
       )
     : null;
+const lifecycleNotificationService =
+  dependencies instanceof GitHubAppDependencies && slackLifecycleNotifier
+    ? new LifecycleNotificationService(
+        dependencies,
+        store,
+        notificationThreads,
+        slackLifecycleNotifier,
+        resolveSlackUserId,
+      )
+    : null;
 const webhookProcessor =
-  reviewService || projectListChannelId || workNotificationService
+  reviewService || projectListChannelId || workNotificationService || lifecycleNotificationService
     ? new GitHubWebhookProcessor(
         reviewService,
         store,
         projectListChannelId ? () => projectListService.sync(projectListChannelId) : undefined,
         workNotificationService,
+        lifecycleNotificationService,
       )
     : null;
 const jobSecret = strongSecret("AR_JOB_SECRET");

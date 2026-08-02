@@ -1,0 +1,487 @@
+import { createHash } from "node:crypto";
+import type { GitHubWebhookJob } from "./job-queue.ts";
+import type {
+  NotificationThreadService,
+  ThreadMessageResult,
+} from "./notification-thread-service.ts";
+import type {
+  GitHubIssueContext,
+  GitHubLifecycleClient,
+  PullRequestReviewContext,
+} from "./review-types.ts";
+import type { StateStore } from "./state-store.ts";
+
+const NOTIFICATION_NAMESPACE = "lifecycle-notification";
+
+export type LifecycleNotificationKind =
+  | "comment-created"
+  | "issue-completed"
+  | "pr-merged"
+  | "review-requested"
+  | "review-approved"
+  | "review-changes-requested"
+  | "review-commented"
+  | "review-dismissed"
+  | "revision-pushed";
+
+export interface LifecycleResource {
+  kind: "issue" | "pull-request";
+  number: number;
+  title: string;
+  url: string;
+}
+
+export interface LifecyclePullRequest {
+  number: number;
+  title: string;
+  url: string;
+}
+
+export interface LifecycleNotification {
+  schemaVersion: 1;
+  kind: LifecycleNotificationKind;
+  resource: LifecycleResource;
+  pullRequest: LifecyclePullRequest | null;
+  actorLogin: string;
+  slackUserIds: string[];
+  summary: string;
+  detail: string;
+  nextAction: string;
+  actionUrl: string;
+}
+
+export interface LifecycleNotifier {
+  notify(
+    notification: LifecycleNotification,
+    threadTs: string | null,
+  ): Promise<ThreadMessageResult>;
+}
+
+export type ResolveLifecycleSlackUserId = (githubLogin: string) => Promise<string | null>;
+
+interface LifecycleNotificationState {
+  schemaVersion: 1;
+  resourceUrl: string;
+  kind: LifecycleNotificationKind;
+  fingerprint: string;
+  notifiedAt: string;
+}
+
+export class LifecycleNotificationService {
+  private readonly github: GitHubLifecycleClient;
+  private readonly store: StateStore;
+  private readonly threads: NotificationThreadService;
+  private readonly notifier: LifecycleNotifier;
+  private readonly resolveSlackUserId: ResolveLifecycleSlackUserId;
+  private readonly now: () => number;
+
+  constructor(
+    github: GitHubLifecycleClient,
+    store: StateStore,
+    threads: NotificationThreadService,
+    notifier: LifecycleNotifier,
+    resolveSlackUserId: ResolveLifecycleSlackUserId,
+    now: () => number = Date.now,
+  ) {
+    this.github = github;
+    this.store = store;
+    this.threads = threads;
+    this.notifier = notifier;
+    this.resolveSlackUserId = resolveSlackUserId;
+    this.now = now;
+  }
+
+  async process(job: GitHubWebhookJob): Promise<number> {
+    switch (job.event) {
+      case "issues":
+        return this.processIssue(job);
+      case "issue_comment":
+        return this.processIssueComment(job);
+      case "pull_request":
+        return this.processPullRequest(job);
+      case "pull_request_review":
+        return this.processReview(job);
+      case "pull_request_review_comment":
+        return this.processReviewComment(job);
+      default:
+        return 0;
+    }
+  }
+
+  private async processIssue(job: GitHubWebhookJob): Promise<number> {
+    const payload = objectPayload(job);
+    if (stringValue(payload.action) !== "closed") return 0;
+    const repository = repositoryName(payload);
+    const issueNumber = nestedNumber(payload, "issue", "number");
+    const actor = nestedString(payload, "sender", "login");
+    const issue = await this.github.loadIssueContext(repository, issueNumber);
+    return this.send(
+      issueResource(issue),
+      null,
+      "issue-completed",
+      actor,
+      [...issue.assigneeLogins, issue.authorLogin],
+      "Issueが完了しました。",
+      `#${issue.number} ${issue.title} がcloseされました。`,
+      "残作業がなければ、このスレッドを完了記録として残す",
+      issue.url,
+      fingerprint({ state: issue.state, url: issue.url }),
+    );
+  }
+
+  private async processIssueComment(job: GitHubWebhookJob): Promise<number> {
+    const payload = objectPayload(job);
+    if (stringValue(payload.action) !== "created") return 0;
+    const repository = repositoryName(payload);
+    const issueNumber = nestedNumber(payload, "issue", "number");
+    const actor = nestedString(payload, "comment", "user", "login");
+    const body = nestedString(payload, "comment", "body");
+    const commentUrl = nestedString(payload, "comment", "html_url");
+    const commentId = nestedNumber(payload, "comment", "id");
+    const issuePayload = nestedObject(payload, "issue");
+    if ("pull_request" in issuePayload) {
+      const context = await this.github.loadPullRequestReviewContext(repository, issueNumber);
+      return this.sendToPullRequestTargets(
+        context,
+        "comment-created",
+        actor,
+        [context.authorLogin, ...mentionedLogins(body)],
+        "PRにコメントが追加されました。",
+        excerpt(body),
+        "コメントを確認し、必要なら返信または修正する",
+        commentUrl,
+        fingerprint({ commentId, commentUrl }),
+      );
+    }
+    const issue = await this.github.loadIssueContext(repository, issueNumber);
+    return this.send(
+      issueResource(issue),
+      null,
+      "comment-created",
+      actor,
+      [...issue.assigneeLogins, ...mentionedLogins(body)],
+      "Issueにコメントが追加されました。",
+      excerpt(body),
+      "コメントを確認し、必要なら返信または作業へ反映する",
+      commentUrl,
+      fingerprint({ commentId, commentUrl }),
+    );
+  }
+
+  private async processPullRequest(job: GitHubWebhookJob): Promise<number> {
+    const payload = objectPayload(job);
+    const action = stringValue(payload.action);
+    if (action !== "synchronize" && action !== "closed") return 0;
+    const repository = repositoryName(payload);
+    const pullRequestNumber = nestedNumber(payload, "pull_request", "number");
+    const actor = nestedString(payload, "sender", "login");
+    const context = await this.github.loadPullRequestReviewContext(repository, pullRequestNumber);
+    if (action === "synchronize") {
+      if (context.changesRequestedReviewerLogins.length === 0) return 0;
+      return this.sendToPullRequestTargets(
+        context,
+        "revision-pushed",
+        actor,
+        context.changesRequestedReviewerLogins,
+        "差し戻し後の修正がpushされました。",
+        `head: ${context.headSha.slice(0, 12)}`,
+        "修正内容を確認し、再レビューする",
+        context.url,
+        fingerprint({ headSha: context.headSha }),
+      );
+    }
+    if (!nestedBoolean(payload, "pull_request", "merged")) return 0;
+    const mergeCommitSha = nestedOptionalString(payload, "pull_request", "merge_commit_sha");
+    return this.sendToPullRequestTargets(
+      context,
+      "pr-merged",
+      actor,
+      [context.authorLogin, ...context.linkedIssues.flatMap((issue) => issue.assigneeLogins)],
+      "PRがマージされました。",
+      `PR #${context.number} ${context.title}`,
+      "Issueの完了条件と残作業を確認する",
+      context.url,
+      fingerprint({ mergeCommitSha, headSha: context.headSha }),
+    );
+  }
+
+  private async processReview(job: GitHubWebhookJob): Promise<number> {
+    const payload = objectPayload(job);
+    const action = stringValue(payload.action);
+    if (action !== "submitted" && action !== "dismissed") return 0;
+    const repository = repositoryName(payload);
+    const pullRequestNumber = nestedNumber(payload, "pull_request", "number");
+    const actor = nestedString(payload, "review", "user", "login");
+    const body = nestedOptionalString(payload, "review", "body") ?? "";
+    const reviewUrl =
+      nestedOptionalString(payload, "review", "html_url") ??
+      nestedString(payload, "pull_request", "html_url");
+    const reviewId = nestedNumber(payload, "review", "id");
+    const state = nestedString(payload, "review", "state").toUpperCase();
+    const context = await this.github.loadPullRequestReviewContext(repository, pullRequestNumber);
+    if (action === "dismissed") {
+      return this.sendToPullRequestTargets(
+        context,
+        "review-dismissed",
+        actor,
+        [context.authorLogin],
+        "レビュー結果が取り消されました。",
+        excerpt(body || "GitHubでレビューの取り消し理由を確認してください。"),
+        "必要なレビュー状態を確認する",
+        reviewUrl,
+        fingerprint({ reviewId, action }),
+      );
+    }
+    if (state === "CHANGES_REQUESTED") {
+      return this.sendToPullRequestTargets(
+        context,
+        "review-changes-requested",
+        actor,
+        [context.authorLogin, ...mentionedLogins(body)],
+        "PRが差し戻されました。",
+        excerpt(body || "GitHubで指摘内容を確認してください。"),
+        "指摘を反映して修正をpushする",
+        reviewUrl,
+        fingerprint({ reviewId, state }),
+      );
+    }
+    if (state === "APPROVED") {
+      return this.sendToPullRequestTargets(
+        context,
+        "review-approved",
+        actor,
+        [context.authorLogin],
+        "PRが承認されました。",
+        excerpt(body || `@${actor} がApproveしました。`),
+        "必要なcheckと承認が揃っていればマージする",
+        reviewUrl,
+        fingerprint({ reviewId, state }),
+      );
+    }
+    if (state === "COMMENTED" && body.trim()) {
+      return this.sendToPullRequestTargets(
+        context,
+        "review-commented",
+        actor,
+        [context.authorLogin, ...mentionedLogins(body)],
+        "PRレビューにコメントが追加されました。",
+        excerpt(body),
+        "レビューコメントを確認し、必要なら返信または修正する",
+        reviewUrl,
+        fingerprint({ reviewId, state }),
+      );
+    }
+    return 0;
+  }
+
+  private async processReviewComment(job: GitHubWebhookJob): Promise<number> {
+    const payload = objectPayload(job);
+    if (stringValue(payload.action) !== "created") return 0;
+    const repository = repositoryName(payload);
+    const pullRequestNumber = nestedNumber(payload, "pull_request", "number");
+    const actor = nestedString(payload, "comment", "user", "login");
+    const body = nestedString(payload, "comment", "body");
+    const commentUrl = nestedString(payload, "comment", "html_url");
+    const commentId = nestedNumber(payload, "comment", "id");
+    const context = await this.github.loadPullRequestReviewContext(repository, pullRequestNumber);
+    return this.sendToPullRequestTargets(
+      context,
+      "review-commented",
+      actor,
+      [context.authorLogin, ...mentionedLogins(body)],
+      "PRのコードにコメントが追加されました。",
+      excerpt(body),
+      "コードコメントを確認し、必要なら返信または修正する",
+      commentUrl,
+      fingerprint({ commentId, commentUrl }),
+    );
+  }
+
+  private async sendToPullRequestTargets(
+    context: PullRequestReviewContext,
+    kind: LifecycleNotificationKind,
+    actor: string,
+    mentionLogins: string[],
+    summary: string,
+    detail: string,
+    nextAction: string,
+    actionUrl: string,
+    eventFingerprint: string,
+  ): Promise<number> {
+    const pullRequest = {
+      number: context.number,
+      title: context.title,
+      url: context.url,
+    };
+    const targets =
+      context.linkedIssues.length > 0
+        ? context.linkedIssues.map(issueResource)
+        : [
+            {
+              kind: "pull-request" as const,
+              number: context.number,
+              title: context.title,
+              url: context.url,
+            },
+          ];
+    let notified = 0;
+    for (const target of targets) {
+      notified += await this.send(
+        target,
+        pullRequest,
+        kind,
+        actor,
+        mentionLogins,
+        summary,
+        detail,
+        nextAction,
+        actionUrl,
+        eventFingerprint,
+      );
+    }
+    return notified;
+  }
+
+  private async send(
+    resource: LifecycleResource,
+    pullRequest: LifecyclePullRequest | null,
+    kind: LifecycleNotificationKind,
+    actorLogin: string,
+    mentionLogins: string[],
+    summary: string,
+    detail: string,
+    nextAction: string,
+    actionUrl: string,
+    eventFingerprint: string,
+  ): Promise<number> {
+    const stateKey = `${resource.url}:${kind}`;
+    const previous = await this.store.get<LifecycleNotificationState>(
+      NOTIFICATION_NAMESPACE,
+      stateKey,
+    );
+    if (previous?.fingerprint === eventFingerprint) return 0;
+    const slackUserIds = await this.resolveMentions(mentionLogins, actorLogin);
+    await this.threads.publish(resource.url, (threadTs) =>
+      this.notifier.notify(
+        {
+          schemaVersion: 1,
+          kind,
+          resource,
+          pullRequest,
+          actorLogin,
+          slackUserIds,
+          summary,
+          detail,
+          nextAction,
+          actionUrl,
+        },
+        threadTs,
+      ),
+    );
+    await this.store.set<LifecycleNotificationState>(NOTIFICATION_NAMESPACE, stateKey, {
+      schemaVersion: 1,
+      resourceUrl: resource.url,
+      kind,
+      fingerprint: eventFingerprint,
+      notifiedAt: new Date(this.now()).toISOString(),
+    });
+    return 1;
+  }
+
+  private async resolveMentions(logins: string[], actorLogin: string): Promise<string[]> {
+    const normalizedActor = actorLogin.toLowerCase();
+    const uniqueLogins = [
+      ...new Map(
+        logins
+          .filter((login) => login.toLowerCase() !== normalizedActor)
+          .map((login) => [login.toLowerCase(), login]),
+      ).values(),
+    ];
+    const resolved = await Promise.all(uniqueLogins.map(this.resolveSlackUserId));
+    return [...new Set(resolved.filter((value): value is string => value !== null))];
+  }
+}
+
+function issueResource(issue: GitHubIssueContext): LifecycleResource {
+  return { kind: "issue", number: issue.number, title: issue.title, url: issue.url };
+}
+
+function mentionedLogins(body: string): string[] {
+  return [...body.matchAll(/(?:^|[^A-Za-z0-9_.+-])@([A-Za-z0-9-]{1,39})\b/g)]
+    .flatMap((match) => (match[1] ? [match[1]] : []))
+    .filter((login, index, values) => values.indexOf(login) === index);
+}
+
+function excerpt(value: string): string {
+  const collapsed = value
+    .replace(/<!--([\s\S]*?)-->/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!collapsed) return "GitHubで内容を確認してください。";
+  return collapsed.length <= 500 ? collapsed : `${collapsed.slice(0, 497)}...`;
+}
+
+function fingerprint(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function objectPayload(job: GitHubWebhookJob): Record<string, unknown> {
+  if (!job.payload || typeof job.payload !== "object" || Array.isArray(job.payload)) {
+    throw new Error("GitHub webhook payloadを読み取れませんでした。");
+  }
+  return job.payload as Record<string, unknown>;
+}
+
+function repositoryName(payload: Record<string, unknown>): string {
+  const repository = nestedString(payload, "repository", "full_name");
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+    throw new Error("GitHub webhookのrepository名が不正です。");
+  }
+  return repository;
+}
+
+function nestedObject(value: Record<string, unknown>, key: string): Record<string, unknown> {
+  const nested = value[key];
+  if (!nested || typeof nested !== "object" || Array.isArray(nested)) {
+    throw new Error(`GitHub webhookの${key}を読み取れませんでした。`);
+  }
+  return nested as Record<string, unknown>;
+}
+
+function nestedString(value: Record<string, unknown>, ...keys: string[]): string {
+  const result = nestedValue(value, keys);
+  if (typeof result !== "string" || !result) {
+    throw new Error(`GitHub webhookの${keys.join(".")}を読み取れませんでした。`);
+  }
+  return result;
+}
+
+function nestedOptionalString(value: Record<string, unknown>, ...keys: string[]): string | null {
+  const result = nestedValue(value, keys);
+  return typeof result === "string" && result ? result : null;
+}
+
+function nestedNumber(value: Record<string, unknown>, ...keys: string[]): number {
+  const result = nestedValue(value, keys);
+  if (!Number.isSafeInteger(result) || Number(result) < 1) {
+    throw new Error(`GitHub webhookの${keys.join(".")}を読み取れませんでした。`);
+  }
+  return Number(result);
+}
+
+function nestedBoolean(value: Record<string, unknown>, ...keys: string[]): boolean {
+  return nestedValue(value, keys) === true;
+}
+
+function nestedValue(value: Record<string, unknown>, keys: string[]): unknown {
+  let current: unknown = value;
+  for (const key of keys) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}

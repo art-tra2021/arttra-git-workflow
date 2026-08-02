@@ -225,8 +225,12 @@ describe("GitHub App adapter", () => {
       if (input.endsWith("/issues/29")) {
         return json({
           number: 29,
+          title: "linked issue",
           body: "issue body",
           html_url: "https://github.example/issues/29",
+          state: "open",
+          user: { login: "requester" },
+          assignees: [{ login: "owner" }],
         });
       }
       if (input.endsWith("/contents/.github/CODEOWNERS")) return new Response("* @alice");
@@ -253,7 +257,15 @@ describe("GitHub App adapter", () => {
       files: ["src/app.ts"],
       requiredApprovals: 2,
       approvedReviewerLogins: ["finished"],
-      linkedIssues: [{ number: 29, body: "issue body" }],
+      changesRequestedReviewerLogins: [],
+      linkedIssues: [
+        {
+          number: 29,
+          title: "linked issue",
+          body: "issue body",
+          assigneeLogins: ["owner"],
+        },
+      ],
       codeowners: "* @alice",
     });
     expect(await client.resolveGitHubUsers(["alice"])).toEqual([{ id: 101, login: "alice" }]);

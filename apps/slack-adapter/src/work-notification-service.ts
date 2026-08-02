@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
+import { NotificationThreadService } from "./notification-thread-service.ts";
 import type { StateStore } from "./state-store.ts";
 import type { HumanWorkItem } from "./types.ts";
 
 const NOTIFICATION_NAMESPACE = "work-notification";
 const DEADLINE_NAMESPACE = "work-deadline-notification";
-const THREAD_NAMESPACE = "work-thread";
 const DAY_MILLISECONDS = 24 * 60 * 60 * 1000;
 
 export interface WorkItemSource {
@@ -45,13 +45,6 @@ interface WorkDeadlineNotificationState {
   notifiedAt: string;
 }
 
-interface WorkThreadState {
-  schemaVersion: 1;
-  issueUrl: string;
-  rootTs: string;
-  createdAt: string;
-}
-
 export class WorkNotificationService {
   private readonly source: WorkItemSource;
   private readonly store: StateStore;
@@ -59,6 +52,7 @@ export class WorkNotificationService {
   private readonly now: () => number;
   private readonly resolveSlackUserId: ResolveSlackUserId;
   private readonly deadlineLeadDays: number;
+  private readonly threads: NotificationThreadService;
 
   constructor(
     source: WorkItemSource,
@@ -67,6 +61,7 @@ export class WorkNotificationService {
     now: () => number = Date.now,
     resolveSlackUserId: ResolveSlackUserId = async () => null,
     deadlineLeadDays = 3,
+    threads: NotificationThreadService = new NotificationThreadService(store, now),
   ) {
     if (!Number.isSafeInteger(deadlineLeadDays) || deadlineLeadDays < 1 || deadlineLeadDays > 30) {
       throw new Error("期限通知の日数は1日から30日で指定してください。");
@@ -77,6 +72,7 @@ export class WorkNotificationService {
     this.now = now;
     this.resolveSlackUserId = resolveSlackUserId;
     this.deadlineLeadDays = deadlineLeadDays;
+    this.threads = threads;
   }
 
   async notifyImmediate(): Promise<number> {
@@ -151,21 +147,10 @@ export class WorkNotificationService {
     item: HumanWorkItem,
     kind: WorkNotificationContext["kind"],
   ): Promise<void> {
-    const thread = await this.store.get<WorkThreadState>(THREAD_NAMESPACE, item.url);
     const slackUserId = item.owner ? await this.resolveSlackUserId(item.owner) : null;
-    const result = await this.notifier.notify(item, {
-      kind,
-      threadTs: thread?.rootTs ?? null,
-      slackUserId,
-    });
-    if (!thread) {
-      await this.store.create<WorkThreadState>(THREAD_NAMESPACE, item.url, {
-        schemaVersion: 1,
-        issueUrl: item.url,
-        rootTs: result.messageTs,
-        createdAt: new Date(this.now()).toISOString(),
-      });
-    }
+    await this.threads.publish(item.url, (threadTs) =>
+      this.notifier.notify(item, { kind, threadTs, slackUserId }),
+    );
   }
 }
 

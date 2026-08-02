@@ -1,4 +1,5 @@
 import type { GitHubWebhookJob } from "./job-queue.ts";
+import type { LifecycleNotificationService } from "./lifecycle-notification-service.ts";
 import type { PullRequestReviewService } from "./review-service.ts";
 import type { StateStore } from "./state-store.ts";
 import type { WorkNotificationService } from "./work-notification-service.ts";
@@ -10,17 +11,20 @@ export class GitHubWebhookProcessor {
   private readonly store: StateStore;
   private readonly syncProjectList: (() => Promise<unknown>) | undefined;
   private readonly notifications: WorkNotificationService | null;
+  private readonly lifecycle: LifecycleNotificationService | null;
 
   constructor(
     reviews: PullRequestReviewService | null,
     store: StateStore,
     syncProjectList?: () => Promise<unknown>,
     notifications: WorkNotificationService | null = null,
+    lifecycle: LifecycleNotificationService | null = null,
   ) {
     this.reviews = reviews;
     this.store = store;
     this.syncProjectList = syncProjectList;
     this.notifications = notifications;
+    this.lifecycle = lifecycle;
   }
 
   async process(job: GitHubWebhookJob): Promise<void> {
@@ -29,7 +33,12 @@ export class GitHubWebhookProcessor {
     }
     const target = reviewTarget(job);
     if (target && this.reviews) {
-      await this.reviews.process(target.repository, target.pullRequestNumber);
+      await this.reviews.process(target.repository, target.pullRequestNumber, {
+        reRequestChanges: target.reRequestChanges,
+      });
+    }
+    if (this.lifecycle) {
+      await this.lifecycle.process(job);
     }
     if (this.syncProjectList && shouldSyncProjectList(job)) {
       await this.syncProjectList();
@@ -90,9 +99,11 @@ function actionFrom(job: GitHubWebhookJob): string | null {
   return typeof job.payload.action === "string" ? job.payload.action : null;
 }
 
-function reviewTarget(
-  job: GitHubWebhookJob,
-): { repository: string; pullRequestNumber: number } | null {
+function reviewTarget(job: GitHubWebhookJob): {
+  repository: string;
+  pullRequestNumber: number;
+  reRequestChanges: boolean;
+} | null {
   if (job.event !== "pull_request" && job.event !== "pull_request_review") {
     return null;
   }
@@ -117,5 +128,9 @@ function reviewTarget(
   ) {
     throw new Error("GitHub webhookからrepositoryまたはPR番号を読み取れませんでした。");
   }
-  return { repository, pullRequestNumber };
+  return {
+    repository,
+    pullRequestNumber,
+    reRequestChanges: job.event === "pull_request" && payload.action === "synchronize",
+  };
 }

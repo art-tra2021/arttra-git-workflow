@@ -1,3 +1,13 @@
+export interface GitHubIssueContext {
+  number: number;
+  title: string;
+  url: string;
+  body: string;
+  state: "open" | "closed";
+  authorLogin: string;
+  assigneeLogins: string[];
+}
+
 export interface PullRequestReviewContext {
   schemaVersion: 1;
   repository: string;
@@ -10,12 +20,13 @@ export interface PullRequestReviewContext {
   state: "open" | "closed";
   body: string;
   files: string[];
-  linkedIssues: Array<{ number: number; body: string; url: string }>;
+  linkedIssues: GitHubIssueContext[];
   codeowners: string;
   requiredApprovals: number;
   requestedReviewerLogins: string[];
   requestedTeamSlugs: string[];
   approvedReviewerLogins: string[];
+  changesRequestedReviewerLogins: string[];
 }
 
 export interface GitHubReviewerIdentity {
@@ -37,6 +48,11 @@ export interface GitHubReviewClient {
   ): Promise<void>;
 }
 
+export interface GitHubLifecycleClient
+  extends Pick<GitHubReviewClient, "loadPullRequestReviewContext"> {
+  loadIssueContext(repository: string, issueNumber: number): Promise<GitHubIssueContext>;
+}
+
 export interface ReviewRequestReadModel {
   schemaVersion: 1;
   kind: "review.request";
@@ -47,6 +63,8 @@ export interface ReviewRequestReadModel {
     url: string;
     headSha: string;
   };
+  authorLogin: string;
+  linkedIssues: GitHubIssueContext[];
   requiredApprovals: number;
   reviewers: Array<{
     githubUserId: number;

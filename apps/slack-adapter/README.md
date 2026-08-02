@@ -6,7 +6,7 @@ GitHub の生イベントを Slack へ転送せず、GitHub と Projects から�
 
 - Webhook は表示データではなく再取得のきっかけとして扱う。
 - Slack の即時通知は、blocker、急ぎの未割当、CI 失敗、conflict、review 依頼に限定する。
-- 同じIssueに関する即時通知は一つのSlackスレッドへ集約する。
+- 同じIssueに関する作業状態とPRライフサイクルの通知は一つのSlackスレッドへ集約する。
 - 通常の進行中作業は digest と Slack List に集約し、完了済み項目は通知しない。
 - Slack は操作窓口であり、正本は GitHub Issue と Projects に置く。
 - Slack ユーザーと GitHub ユーザーの対応を推測しない。
@@ -177,7 +177,7 @@ GitHub Appには対象repositoryに対するMetadata read、Contents read、Issu
 ProjectsのStatus、Priority、Target dateを読むため、Organization permissionsのProjects readも与える。
 ローカルの`gh` backendでは`gh auth refresh -s read:project`で同等のscopeを追加する。
 PR reviewer自動設定にはPull requests read/write、Ruleset確認にはAdministration readも与える。
-Webhook URLは`AR_PUBLIC_BASE_URL/github/events`とし、`issues`、`projects_v2_item`、`pull_request`、`pull_request_review`、`check_run`、`check_suite`を購読する。
+Webhook URLは`AR_PUBLIC_BASE_URL/github/events`とし、`issues`、`issue_comment`、`projects_v2_item`、`pull_request`、`pull_request_review`、`pull_request_review_comment`、`check_run`、`check_suite`を購読する。
 `GITHUB_WEBHOOK_SECRET`でGitHub署名を検証し、生payloadをSlackへ表示しない。
 
 本番gatewayは検証済みwebhookをCloud Tasksへ積み、`/internal/github-events`のworker処理と分離する。
@@ -189,6 +189,15 @@ Project項目、Issue、PR、reviewの変更を処理したworkerはGitHub Proje
 Issueごとの親投稿tsは共通state storeへ保存する。
 期限、blocker、CI失敗、conflictなど同じIssueの続報は親投稿のthreadへ返信し、channelへ新しい親投稿を増やさない。
 日次digestはIssue別threadへ入れず、独立した一覧投稿とする。
+
+PR作成時は、Issue本文の予定reviewer、変更fileに対するCODEOWNERS、Rulesetを再取得する。
+GitHubへ正式なReview Requestを設定し、reviewerとPR作成者以外のIssue担当者をnative mentionする。
+PR作成、Issue・PRコメント、Approve、差し戻し、差し戻し後のpush、マージ、Issue closeは関連Issueのthreadへ返信する。
+関連IssueがないPRだけはPR URLをキーとする専用threadを作る。
+コメント時はIssue担当者またはPR作成者と、コメント本文で明示された`@github-login`を通知対象とする。
+差し戻し時はPR作成者、修正push時は差し戻したreviewer、マージとIssue close時は担当者を通知対象とする。
+通知対象はGitHub OAuthで検証済みのaccount mappingだけをSlack user IDへ変換し、表示名やメールから推測しない。
+Webhook delivery IDとイベント内容のfingerprintを保存し、再送された同一イベントを重複通知しない。
 
 担当者、未完了、Target dateの3条件を満たす仕事には期限通知を行う。
 `AR_DEADLINE_REMINDER_DAYS`日前、期限当日、期限超過の各段階で一度だけ、検証済みaccount mappingのSlack利用者をnative mentionする。
@@ -215,7 +224,7 @@ Slackの通常操作はこのcacheだけを読み、GitHubの一時的な遅延�
 
 PR作成・更新時は、linked Issueのversion付き予定reviewer、変更fileに最後に一致するCODEOWNERS、active Rulesetの必要承認数をGitHubから再取得する。
 GitHubへ正式なuser/team review requestを設定した後、検証済みaccount mappingを持つ利用者だけSlackでmentionする。
-通知にはPR、選定理由、目標日、必要承認数、次の操作を表示する。
+通知にはPR、選定理由、目標日、必要承認数、次の操作を表示し、関連Issueのthreadへ集約する。
 同じreviewer・理由・期限では既定24時間再通知せず、未対応が続く場合だけ再通知する。
 Cloud Schedulerは固定JSON `{"schemaVersion":1,"kind":"review.remind"}` を`/internal/review-reminders`へ定期送信する。
 本文に対する`X-Ar-Job-Signature`を設定し、workerは保存済みread modelのPRだけをGitHubから再取得して未対応を判定する。

@@ -1,61 +1,85 @@
-import type { WebClient } from "@slack/web-api";
+import type {
+  LifecycleNotifier,
+  LifecycleResource,
+  ResolveLifecycleSlackUserId,
+} from "./lifecycle-notification-service.ts";
+import type { NotificationThreadService } from "./notification-thread-service.ts";
 import type { ReviewRequestReadModel } from "./review-types.ts";
 
 export class SlackReviewNotifier {
-  private readonly client: WebClient;
-  private readonly channelId: string;
+  private readonly notifier: LifecycleNotifier;
+  private readonly threads: NotificationThreadService;
+  private readonly resolveSlackUserId: ResolveLifecycleSlackUserId;
 
-  constructor(client: WebClient, channelId: string) {
-    this.client = client;
-    this.channelId = channelId;
+  constructor(
+    notifier: LifecycleNotifier,
+    threads: NotificationThreadService,
+    resolveSlackUserId: ResolveLifecycleSlackUserId,
+  ) {
+    this.notifier = notifier;
+    this.threads = threads;
+    this.resolveSlackUserId = resolveSlackUserId;
   }
 
   async notify(model: ReviewRequestReadModel): Promise<void> {
-    const mentions = model.reviewers
-      .flatMap((reviewer) => (reviewer.slackUserId ? [`<@${reviewer.slackUserId}>`] : []))
-      .join(" ");
-    const reviewerLines = model.reviewers.map((reviewer) => {
-      const target = reviewer.slackUserId
-        ? `<@${reviewer.slackUserId}>`
-        : `@${reviewer.githubLogin}`;
-      return `• ${target}: ${reviewer.reasons.join("、")}`;
-    });
-    const teamLines = model.teams.map(
-      (team) => `• @${team.slug}: ${team.reasons.join("、")}（GitHub team）`,
+    const assigneeLogins = model.linkedIssues.flatMap((issue) => issue.assigneeLogins);
+    const assigneeSlackIds = await Promise.all(
+      assigneeLogins
+        .filter((login) => login.toLowerCase() !== model.authorLogin.toLowerCase())
+        .map(this.resolveSlackUserId),
     );
-    const due = model.dueDate ?? "未設定";
-    await this.client.chat.postMessage({
-      channel: this.channelId,
-      text: `${mentions} PR #${model.pullRequest.number}のレビューをお願いします。`,
-      blocks: [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: [
-              mentions,
-              `*<${model.pullRequest.url}|PR #${model.pullRequest.number} ${model.pullRequest.title}>*`,
-              `*理由*\n${[...reviewerLines, ...teamLines].join("\n") || "Rulesetによるレビュー要求"}`,
-              `*期限:* ${due}`,
-              `*必要承認数:* ${model.requiredApprovals}`,
-              `*次の操作:* ${model.nextAction}`,
-            ].join("\n"),
+    const slackUserIds = [
+      ...new Set([
+        ...model.reviewers.flatMap((reviewer) =>
+          reviewer.slackUserId ? [reviewer.slackUserId] : [],
+        ),
+        ...assigneeSlackIds.filter((value): value is string => value !== null),
+      ]),
+    ];
+    const reviewerLines = model.reviewers.map(
+      (reviewer) => `@${reviewer.githubLogin}: ${reviewer.reasons.join("、")}`,
+    );
+    const teamLines = model.teams.map(
+      (team) => `@${team.slug}: ${team.reasons.join("、")}（GitHub team）`,
+    );
+    const detail = [
+      ...reviewerLines,
+      ...teamLines,
+      `必要承認数: ${model.requiredApprovals}`,
+      `期限: ${model.dueDate ?? "未設定"}`,
+    ].join(" / ");
+    const pullRequest = {
+      number: model.pullRequest.number,
+      title: model.pullRequest.title,
+      url: model.pullRequest.url,
+    };
+    const resources: LifecycleResource[] =
+      model.linkedIssues.length > 0
+        ? model.linkedIssues.map((issue) => ({
+            kind: "issue",
+            number: issue.number,
+            title: issue.title,
+            url: issue.url,
+          }))
+        : [{ kind: "pull-request", ...pullRequest }];
+    for (const resource of resources) {
+      await this.threads.publish(resource.url, (threadTs) =>
+        this.notifier.notify(
+          {
+            schemaVersion: 1,
+            kind: "review-requested",
+            resource,
+            pullRequest,
+            actorLogin: model.authorLogin,
+            slackUserIds,
+            summary: "PRが作成され、レビュー依頼が設定されました。",
+            detail,
+            nextAction: model.nextAction,
+            actionUrl: model.pullRequest.url,
           },
-        },
-        {
-          type: "actions",
-          elements: [
-            {
-              type: "button",
-              text: { type: "plain_text", text: "PRを確認" },
-              url: model.pullRequest.url,
-              action_id: "ar.review.open",
-            },
-          ],
-        },
-      ],
-      unfurl_links: false,
-      unfurl_media: false,
-    });
+          threadTs,
+        ),
+      );
+    }
   }
 }
