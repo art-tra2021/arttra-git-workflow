@@ -147,6 +147,53 @@ describe("Slack Project List", () => {
     expect(deleteCalls).toEqual([{ list_id: "FPROJECTLIST", ids: ["RecSTALE"] }]);
   });
 
+  test("同値の既存行を更新せず通知を発生させない", async () => {
+    const updateCalls: unknown[] = [];
+    const client = clientStub({
+      items: [projectedRow("RecKEEP")],
+      itemUpdate: async (input) => void updateCalls.push(input),
+    });
+
+    const result = await syncProjectList(
+      client,
+      state,
+      [toHumanWorkItem(snapshot(), "reviewer")],
+      async () => "UROZWER",
+    );
+
+    expect(result.updated).toBe(0);
+    expect(updateCalls).toEqual([]);
+  });
+
+  test("値が変わったセルだけを更新する", async () => {
+    const updateCalls: Array<{
+      list_id: string;
+      cells: Array<Record<string, unknown>>;
+    }> = [];
+    const existing = projectedRow("RecKEEP");
+    const status = existing.fields?.find((field) => field.column_id === columns.status);
+    if (status) status.select = ["todo"];
+    const client = clientStub({
+      items: [existing],
+      itemUpdate: async (input) => void updateCalls.push(input),
+    });
+
+    const result = await syncProjectList(
+      client,
+      state,
+      [toHumanWorkItem(snapshot(), "reviewer")],
+      async () => "UROZWER",
+    );
+
+    expect(result.updated).toBe(1);
+    expect(updateCalls).toEqual([
+      {
+        list_id: "FPROJECTLIST",
+        cells: [{ column_id: columns.status, select: ["in-progress"], row_id: "RecKEEP" }],
+      },
+    ]);
+  });
+
   test("完了済み項目は未完了一覧へ投影しない", async () => {
     let created = false;
     const client = clientStub({
@@ -168,7 +215,7 @@ describe("Slack Project List", () => {
 
   test("大量更新を100cell単位に分割する", async () => {
     const updateCalls: Array<{ cells: unknown[] }> = [];
-    const desired = Array.from({ length: 12 }, (_, index) =>
+    const desired = Array.from({ length: 30 }, (_, index) =>
       toHumanWorkItem(
         snapshot({
           issue: {
@@ -188,7 +235,7 @@ describe("Slack Project List", () => {
 
     await syncProjectList(client, state, desired, async () => null);
 
-    expect(updateCalls.map((call) => call.cells.length)).toEqual([60]);
+    expect(updateCalls.map((call) => call.cells.length)).toEqual([100, 50]);
   });
 
   test("大量削除を100件単位に分割する", async () => {
@@ -247,6 +294,31 @@ function row(id: string, url: string): ProjectListItem {
   return {
     id,
     fields: [{ column_id: columns.github, link: [{ originalUrl: url }] }],
+  };
+}
+
+function projectedRow(id: string): ProjectListItem {
+  return {
+    id,
+    fields: [
+      {
+        column_id: columns.task,
+        text: "[P1] repo#23 Slack通知を人間向けにする",
+      },
+      { column_id: columns.assignee, user: ["UROZWER"] },
+      { column_id: columns.target_date, date: [] },
+      { column_id: columns.status, select: ["in-progress"] },
+      {
+        column_id: columns.github,
+        link: [
+          {
+            originalUrl: "https://github.com/example/repo/issues/23",
+            displayAsUrl: false,
+            displayName: "Issueを開く",
+          },
+        ],
+      },
+    ],
   };
 }
 
