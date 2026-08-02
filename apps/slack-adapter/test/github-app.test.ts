@@ -84,6 +84,9 @@ describe("GitHub App adapter", () => {
       if (url.endsWith("/repos/art-tra2021/arttra-git-workflow")) {
         return json({ full_name: "art-tra2021/arttra-git-workflow" });
       }
+      if (url.endsWith("/collaborators/octocat/permission")) {
+        return json({ permission: "maintain" });
+      }
       if (url.endsWith("/repos/art-tra2021/arttra-git-workflow/issues")) {
         createdBody = JSON.parse(String(init?.body));
         return json({
@@ -110,6 +113,9 @@ describe("GitHub App adapter", () => {
     };
 
     await client.validateIssueAuthorization(command);
+    expect(await client.repositoryPermission("art-tra2021/arttra-git-workflow", "octocat")).toBe(
+      "maintain",
+    );
     expect(await client.createIssue(command)).toEqual({
       number: 42,
       title: "[作業] API接続",

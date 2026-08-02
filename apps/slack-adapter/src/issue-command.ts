@@ -1,6 +1,14 @@
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
 import type { CreateIssueCommand } from "./types.ts";
 
+export const MERGE_MODES = [
+  "通常レビュー（既定）",
+  "自分でマージ可",
+  "緊急マージ（事後レビュー必須）",
+] as const;
+
+export type MergeMode = (typeof MERGE_MODES)[number];
+
 export interface CreateIssueInput {
   repository: string;
   template: IssueTemplateId;
@@ -10,6 +18,7 @@ export interface CreateIssueInput {
   slackTeamId?: string;
   assigneeSlackUserIds?: string[];
   reviewerSlackUserIds?: string[];
+  mergeMode?: string;
   schema: IssueTemplateSchema;
 }
 
@@ -26,9 +35,16 @@ export function buildCreateIssueCommand(input: CreateIssueInput): CreateIssueCom
   if (schema.id !== input.template) {
     throw new Error("Issue templateの指定が一致しません");
   }
-  const fields = Object.fromEntries(
+  const fields: Record<string, string> = Object.fromEntries(
     schema.fields.map((field) => [field.id, input.fields[field.id]?.trim() ?? ""]),
   );
+  if (input.template === "work") {
+    const mergeMode = (input.mergeMode ?? input.fields.merge ?? MERGE_MODES[0]).trim();
+    if (!MERGE_MODES.includes(mergeMode as MergeMode)) {
+      throw new Error("PRのマージ方針を選択してください");
+    }
+    fields.merge = mergeMode;
+  }
   for (const field of schema.fields) {
     const value = fields[field.id] ?? "";
     if (field.required && value.length === 0) {

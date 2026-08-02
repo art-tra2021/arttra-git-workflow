@@ -13,7 +13,13 @@ import {
   projectIssueSnapshot,
 } from "./project-read-model.ts";
 import { toHumanWorkItem } from "./read-model.ts";
-import type { CreatedIssue, CreateIssueCommand, HumanWorkItem, WorkItemSnapshot } from "./types.ts";
+import type {
+  CreatedIssue,
+  CreateIssueCommand,
+  HumanWorkItem,
+  RepositoryPermission,
+  WorkItemSnapshot,
+} from "./types.ts";
 
 interface GhIssue {
   number: number;
@@ -197,6 +203,23 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
     if (!template) {
       throw new Error(`Issue templateが見つかりません: ${command.template}`);
     }
+  }
+
+  async repositoryPermission(
+    repository: string,
+    githubLogin: string,
+  ): Promise<RepositoryPermission> {
+    const permission = (
+      await gh([
+        "api",
+        `repos/${repository}/collaborators/${githubLogin}/permission`,
+        "--jq",
+        ".permission",
+      ])
+    ).trim();
+    return ["admin", "maintain", "write", "triage", "read"].includes(permission)
+      ? (permission as RepositoryPermission)
+      : "none";
   }
 
   private async projectIssues(limit: number, assignee: string | null = null) {

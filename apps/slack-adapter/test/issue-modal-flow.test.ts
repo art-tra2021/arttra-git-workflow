@@ -1,7 +1,34 @@
 import { describe, expect, test } from "bun:test";
-import { openIssueRepositoryFlow, transitionIssueModal } from "../src/app.ts";
+import { issueDetailModal, openIssueRepositoryFlow, transitionIssueModal } from "../src/app.ts";
+import type { IssueTemplateSchema } from "../src/issue-schema.ts";
 
 describe("Slack Issue modal flow", () => {
+  test("work templateの内容に依存せずPR確認方法を明示する", () => {
+    const schema: IssueTemplateSchema = {
+      id: "work",
+      name: "作業",
+      titlePrefix: "[Work] ",
+      labels: ["type/work"],
+      fields: [{ id: "outcome", label: "成果", kind: "textarea", required: true }],
+    };
+    const modal = issueDetailModal(
+      {
+        channelId: "C123",
+        responseUrl: "https://hooks.slack.test/response",
+        slackTeamId: "T123",
+        repository: "art-tra2021/work",
+        template: "work",
+      },
+      schema,
+    );
+    const rendered = JSON.stringify(modal);
+    expect(rendered).toContain("PRの確認方法");
+    expect(rendered).toContain("通常レビュー（既定）");
+    expect(rendered).toContain("自分でマージ可");
+    expect(rendered).toContain("緊急マージ（事後レビュー必須）");
+    expect(rendered).toContain("許可できる人へ承認依頼");
+  });
+
   test("短寿命のtrigger_idをrepository取得より先に使用する", async () => {
     const events: string[] = [];
     const updates: Array<{ view_id: string; view: unknown }> = [];

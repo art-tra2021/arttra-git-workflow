@@ -52,6 +52,25 @@ describe("Issue作成command", () => {
       }),
     ).toThrow("何がありましたかを入力してください");
   });
+
+  test("repository側templateに項目がなくても共通のマージ方針をJSONへ保持する", () => {
+    const command = buildCreateIssueCommand({
+      repository: "art-tra2021/service",
+      template: "work",
+      title: "共通方針",
+      fields: { outcome: "運用を統一する" },
+      mergeMode: "緊急マージ（事後レビュー必須）",
+      actor: "U123",
+      schema: {
+        id: "work",
+        name: "作業",
+        titlePrefix: "[Work] ",
+        labels: ["type/work"],
+        fields: [{ id: "outcome", label: "成果", kind: "textarea", required: true }],
+      },
+    });
+    expect(command.fields.merge).toBe("緊急マージ（事後レビュー必須）");
+  });
 });
 
 describe("Issue URL", () => {

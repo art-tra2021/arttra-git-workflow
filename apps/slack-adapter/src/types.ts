@@ -9,6 +9,8 @@ export type WorkStatus =
 
 export type Priority = "P0" | "P1" | "P2" | "P3";
 
+export type RepositoryPermission = "admin" | "maintain" | "write" | "triage" | "read" | "none";
+
 export interface WorkItemSnapshot {
   schemaVersion: 1;
   issue: {
