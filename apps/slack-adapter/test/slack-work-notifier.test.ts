@@ -17,7 +17,12 @@ describe("SlackWorkNotifier", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.text).toContain("<@UALICE>");
     expect(calls[0]?.text).toContain("⏰");
-    expect(JSON.stringify(calls[0]?.blocks)).toContain("⏰ *期限のお知らせ*");
+    const message = calls[0];
+    if (!message) throw new Error("Slack通知が記録されていません");
+    expect((message.blocks as Array<Record<string, unknown>>)[0]).toMatchObject({
+      type: "header",
+      text: { text: "⏰ 期限のお知らせ" },
+    });
     expect(calls[0]).not.toHaveProperty("thread_ts");
   });
 
@@ -43,6 +48,12 @@ describe("SlackWorkNotifier", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.text).toContain("📋");
+    const message = calls[0];
+    if (!message) throw new Error("Slack通知が記録されていません");
+    expect((message.blocks as Array<Record<string, unknown>>)[0]).toMatchObject({
+      type: "header",
+      text: { text: "📋 ART-TRA 作業ダイジェスト（1件）" },
+    });
     expect(calls[0]).not.toHaveProperty("thread_ts");
   });
 });

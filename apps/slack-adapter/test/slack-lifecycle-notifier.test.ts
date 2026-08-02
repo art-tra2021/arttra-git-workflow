@@ -51,6 +51,11 @@ describe("SlackLifecycleNotifier", () => {
     expect(calls[0]?.text).toContain("<@UAUTHOR>");
     expect(calls[0]?.text).toContain("⚠️");
     expect(JSON.stringify(calls[0]?.blocks)).toContain("A &lt; B");
-    expect(JSON.stringify(calls[0]?.blocks)).toContain("⚠️ *PRが差し戻されました*");
+    const message = calls[0];
+    if (!message) throw new Error("Slack通知が記録されていません");
+    expect((message.blocks as Array<Record<string, unknown>>)[0]).toMatchObject({
+      type: "header",
+      text: { text: "⚠️ PRが差し戻されました" },
+    });
   });
 });

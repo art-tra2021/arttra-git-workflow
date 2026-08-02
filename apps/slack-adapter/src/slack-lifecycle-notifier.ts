@@ -5,7 +5,7 @@ import type {
   LifecycleNotifier,
 } from "./lifecycle-notification-service.ts";
 import type { ThreadMessageResult } from "./notification-thread-service.ts";
-import { lifecycleTone, slackHeading, slackPlain } from "./slack-message-style.ts";
+import { lifecycleTone, slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
 
 export class SlackLifecycleNotifier implements LifecycleNotifier {
   private readonly client: Pick<WebClient, "chat">;
@@ -28,23 +28,30 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
       channel: this.channelId,
       text: `${mentions ? `${mentions} ` : ""}${slackPlain(tone, notification.summary)} ${target.url}`,
       blocks: [
+        slackHeader(tone, label),
         {
           type: "section",
           text: {
             type: "mrkdwn",
             text: [
               mentions,
-              slackHeading(tone, label),
               `*<${notification.resource.url}|#${notification.resource.number} ${escapeMrkdwn(notification.resource.title)}>*`,
               notification.pullRequest
                 ? `*PR:* <${notification.pullRequest.url}|#${notification.pullRequest.number} ${escapeMrkdwn(notification.pullRequest.title)}>`
                 : null,
               `*実行者:* @${escapeMrkdwn(notification.actorLogin)}`,
               `*内容:* ${escapeMrkdwn(notification.detail)}`,
-              `*次の操作:* ${escapeMrkdwn(notification.nextAction)}`,
             ]
               .filter((value): value is string => Boolean(value))
               .join("\n"),
+          },
+        },
+        slackDivider(),
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*次の操作*\n${escapeMrkdwn(notification.nextAction)}`,
           },
         },
         {

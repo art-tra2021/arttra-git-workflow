@@ -10,7 +10,7 @@ import { buildCreateIssueCommand, MERGE_MODES } from "./issue-command.ts";
 import type { IssueMetadataSource } from "./issue-metadata-cache.ts";
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
 import { workItemBlocks } from "./presentation.ts";
-import { slackHeading, slackPlain } from "./slack-message-style.ts";
+import { slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
 import type { SlackRequirementNotifier } from "./slack-requirement-notifier.ts";
 import type {
   CreatedIssue,
@@ -109,12 +109,12 @@ export function createSlackApp(
         response_type: "ephemeral",
         text: slackPlain("action", `GitHubアカウントを連携してください: ${url}`),
         blocks: [
+          slackHeader("action", "GitHub連携"),
           {
             type: "section",
             text: {
               type: "mrkdwn",
-              text: `${slackHeading("action", "GitHub連携")}
-GitHubで本人確認すると、Slackの担当者・予定レビュワー選択をGitHubへ安全に反映できます。`,
+              text: "GitHubで本人確認すると、Slackの担当者・予定レビュワー選択をGitHubへ安全に反映できます。",
             },
             accessory: {
               type: "button",
@@ -153,12 +153,12 @@ GitHubで本人確認すると、Slackの担当者・予定レビュワー選択
         response_type: "ephemeral",
         text: slackPlain("action", `Google Calendarを連携してください: ${url}`),
         blocks: [
+          slackHeader("action", "Google Calendar連携"),
           {
             type: "section",
             text: {
               type: "mrkdwn",
-              text: `${slackHeading("action", "Google Calendar連携")}
-本人がGitHub Projectsで担当する未完了・期限付き項目だけを、専用の \`ART-TRA Work\` カレンダーへ同期します。既存の予定は読みません。`,
+              text: "本人がGitHub Projectsで担当する未完了・期限付き項目だけを、専用の `ART-TRA Work` カレンダーへ同期します。既存の予定は読みません。",
             },
             accessory: {
               type: "button",
@@ -280,7 +280,11 @@ GitHubで本人確認すると、Slackの担当者・予定レビュワー選択
     await respond({
       response_type: "ephemeral",
       text: slackPlain("digest", `次に確認する仕事は${visible.length}件です。`),
-      blocks: visible.slice(0, 5).flatMap(workItemBlocks),
+      blocks: [
+        slackHeader("digest", `次に確認する仕事（${visible.length}件）`),
+        slackDivider(),
+        ...visible.slice(0, 5).flatMap(workItemBlocks),
+      ],
     });
   });
 
@@ -527,7 +531,11 @@ GitHubで本人確認すると、Slackの担当者・予定レビュワー選択
     await respond({
       response_type: "ephemeral",
       text: slackPlain("success", `${target.repository}#${target.number}を担当に設定しました。`),
-      blocks: workItemBlocks(item),
+      blocks: [
+        slackHeader("success", "担当者を設定しました"),
+        slackDivider(),
+        ...workItemBlocks(item),
+      ],
       replace_original: false,
     });
   });
@@ -974,13 +982,15 @@ async function requestIssueApproval(
       replace_original: false,
       text: slackPlain("action", `${mentions} Issue作成の承認をお願いします。`),
       blocks: [
+        slackHeader("action", "Issue作成の承認依頼"),
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `${mentions}\n${slackHeading("action", "Issue作成の承認依頼")}\n<@${command.actor}> からIssue作成の承認申請です。\n*作成先:* ${command.repository}\n*タイトル:* ${command.title}\n*マージ方式:* ${mergeMode}\n*承認が必要な理由:* ${reason}`,
+            text: `${mentions}\n<@${command.actor}> からIssue作成の承認申請です。\n*作成先:* ${command.repository}\n*タイトル:* ${command.title}\n*マージ方式:* ${mergeMode}\n*承認が必要な理由:* ${reason}`,
           },
         },
+        slackDivider(),
         {
           type: "actions",
           elements: [
