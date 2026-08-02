@@ -1,16 +1,21 @@
 import { App, type Receiver } from "@slack/bolt";
 import {
-  canBypassIssueApproval,
+  decidePrivilegedMerge,
   type IssueApprovalService,
   requiresIssueApproval,
 } from "./approval.ts";
 import type { GoogleCalendarService } from "./google-calendar-service.ts";
 import type { GitHubIdentityService } from "./identity-service.ts";
-import { buildCreateIssueCommand } from "./issue-command.ts";
+import { buildCreateIssueCommand, MERGE_MODES } from "./issue-command.ts";
 import type { IssueMetadataSource } from "./issue-metadata-cache.ts";
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
 import { workItemBlocks } from "./presentation.ts";
-import type { CreatedIssue, CreateIssueCommand, HumanWorkItem } from "./types.ts";
+import type {
+  CreatedIssue,
+  CreateIssueCommand,
+  HumanWorkItem,
+  RepositoryPermission,
+} from "./types.ts";
 
 export interface SlackAdapterDependencies {
   listRepositories(): Promise<string[]>;
@@ -19,6 +24,7 @@ export interface SlackAdapterDependencies {
   claimIssue(repository: string, issueNumber: number, slackUserId: string): Promise<HumanWorkItem>;
   createIssue(command: CreateIssueCommand): Promise<CreatedIssue>;
   validateIssueAuthorization(command: CreateIssueCommand): Promise<void>;
+  repositoryPermission(repository: string, githubLogin: string): Promise<RepositoryPermission>;
 }
 
 export interface SlackAppOptions {
@@ -309,14 +315,48 @@ export function createSlackApp(
         slackTeamId: metadata.slackTeamId,
         assigneeSlackUserIds: selectedUsers(view.state.values, "assignees", "value"),
         reviewerSlackUserIds: selectedUsers(view.state.values, "reviewers", "value"),
+        ...(metadata.template === "work"
+          ? { mergeMode: selectedValue(view.state.values, "merge-policy", "value") }
+          : {}),
         schema,
       });
-      if (requiresIssueApproval(command) && !canBypassIssueApproval(body.user.id, selfApprovers)) {
+      let approvalReason: string | null = null;
+      if (requiresIssueApproval(command)) {
+        const identity = await options.identityService.get(metadata.slackTeamId, body.user.id);
+        let permission: RepositoryPermission = "none";
+        if (identity) {
+          try {
+            permission = await dependencies.repositoryPermission(
+              command.repository,
+              identity.githubLogin,
+            );
+          } catch {
+            approvalReason =
+              "GitHubのrepository権限を確認できなかったため、安全側で承認を要求します。";
+          }
+        }
+        const decision = decidePrivilegedMerge(
+          body.user.id,
+          selfApprovers,
+          identity?.githubLogin ?? null,
+          permission,
+        );
+        if (!decision.direct) {
+          approvalReason ??= decision.reason;
+        }
+      }
+      if (approvalReason) {
         if (approvers.size === 0) {
           throw new Error("このマージ方式には承認が必要ですが、承認者が設定されていません。");
         }
         const approval = await options.approvalService.request(command, body.user.id);
-        await requestIssueApproval(metadata.responseUrl, approval.id, command, approvers);
+        await requestIssueApproval(
+          metadata.responseUrl,
+          approval.id,
+          command,
+          approvers,
+          approvalReason,
+        );
         return;
       }
       const resolved = await options.identityService.resolveCommand(command, metadata.slackTeamId);
@@ -606,7 +646,7 @@ function issueTemplateModal(metadata: IssueModalMetadata, templates: IssueTempla
   };
 }
 
-function issueDetailModal(metadata: IssueModalMetadata, schema: IssueTemplateSchema) {
+export function issueDetailModal(metadata: IssueModalMetadata, schema: IssueTemplateSchema) {
   return {
     type: "modal" as const,
     callback_id: "ar.issue.create",
@@ -620,20 +660,50 @@ function issueDetailModal(metadata: IssueModalMetadata, schema: IssueTemplateSch
         text: { type: "mrkdwn" as const, text: `*作成先*\n${metadata.repository}` },
       },
       issueInput("title", "タイトル", false),
-      ...schema.fields.map((field) =>
-        field.kind === "select"
-          ? issueSelect(field.id, field.label, field.options ?? [], field.required)
-          : issueInput(
-              field.id,
-              field.label,
-              field.kind === "textarea",
-              !field.required,
-              field.initialValue,
-            ),
-      ),
+      ...schema.fields
+        .filter((field) => field.id !== "merge")
+        .map((field) =>
+          field.kind === "select"
+            ? issueSelect(field.id, field.label, field.options ?? [], field.required)
+            : issueInput(
+                field.id,
+                field.label,
+                field.kind === "textarea",
+                !field.required,
+                field.initialValue,
+              ),
+        ),
+      ...(schema.id === "work" ? [issueMergePolicy()] : []),
       issueMembers("assignees", "担当者"),
       issueMembers("reviewers", "予定レビュワー"),
     ],
+  };
+}
+
+function issueMergePolicy() {
+  const descriptions: Record<string, string> = {
+    "通常レビュー（既定）": "PR作成者以外の承認を受けてからマージします。",
+    自分でマージ可: "許可された人だけ直通し、それ以外はSlackで承認を求めます。",
+    "緊急マージ（事後レビュー必須）": "緊急時用です。権限確認またはSlack承認が必要です。",
+  };
+  return {
+    type: "input" as const,
+    block_id: "merge-policy",
+    label: { type: "plain_text" as const, text: "PRの確認方法" },
+    hint: {
+      type: "plain_text" as const,
+      text: "権限が足りない指定は拒否せず、許可できる人へ承認依頼を送ります。",
+    },
+    element: {
+      type: "static_select" as const,
+      action_id: "value",
+      initial_option: describedOption(
+        MERGE_MODES[0],
+        MERGE_MODES[0],
+        descriptions[MERGE_MODES[0]] ?? "",
+      ),
+      options: MERGE_MODES.map((mode) => describedOption(mode, mode, descriptions[mode] ?? "")),
+    },
   };
 }
 
@@ -691,6 +761,14 @@ function option(text: string, value: string) {
   return { text: { type: "plain_text" as const, text }, value };
 }
 
+function describedOption(text: string, value: string, description: string) {
+  return {
+    text: { type: "plain_text" as const, text },
+    value,
+    description: { type: "plain_text" as const, text: description },
+  };
+}
+
 function inputValue(
   values: Record<string, Record<string, { value?: string | null }>>,
   blockId: string,
@@ -742,6 +820,7 @@ async function requestIssueApproval(
   approvalId: string,
   command: CreateIssueCommand,
   approvers: ReadonlySet<string>,
+  reason: string,
 ): Promise<void> {
   const mentions = [...approvers].map((id) => `<@${id}>`).join(" ");
   const mergeMode = command.fields.merge ?? "権限昇格";
@@ -757,7 +836,7 @@ async function requestIssueApproval(
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `${mentions}\n<@${command.actor}> からIssue作成の承認申請です。\n*作成先:* ${command.repository}\n*タイトル:* ${command.title}\n*マージ方式:* ${mergeMode}`,
+            text: `${mentions}\n<@${command.actor}> からIssue作成の承認申請です。\n*作成先:* ${command.repository}\n*タイトル:* ${command.title}\n*マージ方式:* ${mergeMode}\n*承認が必要な理由:* ${reason}`,
           },
         },
         {

@@ -80,9 +80,13 @@ Issue modalの担当者と予定レビュワーはSlackのネイティブなメ�
 検証済みGitHub user IDへ変換したうえで、担当者はAssignee、予定レビュワーはIssue内の`@login`と構造化ID、PR作成時はGitHubのReview Requestへ反映する。
 表示名、同名ユーザー、メールアドレスから対応を推測しない。
 
+`/ar new`の作業チケットでは、repository側のIssue templateに依存せず「通常レビュー」「自分でマージ可」「緊急マージ」を明示選択する。
+選択値はAIと共通のversion付きIssue作成commandへ保存し、対応する`merge/*`ラベルを正本とする。
 `AR_SLACK_APPROVER_IDS`には、`merge/self`または`merge/emergency`を許可できるSlack user IDをカンマ区切りで設定する。
-申請者本人による承認を許すPL等は、`AR_SLACK_SELF_APPROVER_IDS`にも明示する。
-通常レビューのIssueは即時作成し、権限昇格を伴うIssueだけをSlackの承認ボタンへ送る。
+申請者本人による直通を許すPL等は、`AR_SLACK_SELF_APPROVER_IDS`にも明示する。
+直通にはこのSlack設定に加え、OAuthで確認したGitHub loginが対象repositoryで`write`、`maintain`、`admin`のいずれかを持つことを要求する。
+未設定者、GitHub未連携者、権限不足者、権限を確認できない場合は拒否せず、理由と申請者・repository・マージ方針を示したnative mentionと承認ボタンを承認者へ送る。
+通常レビューのIssueは即時作成する。
 
 承認待ちと監査eventは共通state storeへ保存する。
 本番のFirestoreでは原子的なrevision更新により、Slackのボタンが二重実行されてもIssueを一度だけ作成する。

@@ -18,7 +18,13 @@ import type {
   GitHubReviewerIdentity,
   PullRequestReviewContext,
 } from "./review-types.ts";
-import type { CreatedIssue, CreateIssueCommand, HumanWorkItem, WorkItemSnapshot } from "./types.ts";
+import type {
+  CreatedIssue,
+  CreateIssueCommand,
+  HumanWorkItem,
+  RepositoryPermission,
+  WorkItemSnapshot,
+} from "./types.ts";
 
 export type GitHubFetch = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -200,6 +206,28 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     );
     if (!template) {
       throw new Error(`Issue templateが見つかりません: ${command.template}`);
+    }
+  }
+
+  async repositoryPermission(
+    repository: string,
+    githubLogin: string,
+  ): Promise<RepositoryPermission> {
+    try {
+      const result = await this.api<{ permission?: string }>(
+        `/repos/${repository}/collaborators/${githubLogin}/permission`,
+      );
+      return normalizeRepositoryPermission(result.permission);
+    } catch (error) {
+      if (error instanceof GitHubApiError && error.status === 404) {
+        return "none";
+      }
+      if (error instanceof GitHubApiError && error.status === 403) {
+        throw new Error(
+          "GitHub Appでrepository権限を確認できません。Administration read権限を確認してください。",
+        );
+      }
+      throw error;
     }
   }
 
@@ -518,6 +546,12 @@ export class GitHubApiError extends Error {
     this.name = "GitHubApiError";
     this.status = status;
   }
+}
+
+function normalizeRepositoryPermission(value: string | undefined): RepositoryPermission {
+  return ["admin", "maintain", "write", "triage", "read"].includes(value ?? "")
+    ? (value as RepositoryPermission)
+    : "none";
 }
 
 function toSnapshot(issue: ApiIssue): WorkItemSnapshot {

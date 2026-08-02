@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { StateStore } from "./state-store.ts";
-import type { CreatedIssue, CreateIssueCommand } from "./types.ts";
+import type { CreatedIssue, CreateIssueCommand, RepositoryPermission } from "./types.ts";
 
 const PRIVILEGED_MERGE_MODES = new Set(["自分でマージ可", "緊急マージ（事後レビュー必須）"]);
 const APPROVAL_NAMESPACE = "issue-approval";
@@ -236,6 +236,41 @@ export function canBypassIssueApproval(
   selfApprovers: ReadonlySet<string>,
 ): boolean {
   return selfApprovers.has(requester);
+}
+
+export interface PrivilegedMergeDecision {
+  direct: boolean;
+  reason: string;
+}
+
+export function decidePrivilegedMerge(
+  requester: string,
+  selfApprovers: ReadonlySet<string>,
+  githubLogin: string | null,
+  permission: RepositoryPermission,
+): PrivilegedMergeDecision {
+  if (!canBypassIssueApproval(requester, selfApprovers)) {
+    return {
+      direct: false,
+      reason: "この利用者には本人・緊急マージを直接指定する権限が設定されていません。",
+    };
+  }
+  if (!githubLogin) {
+    return {
+      direct: false,
+      reason: "GitHub本人確認が未完了です。`/ar connect github`で連携すると権限を確認できます。",
+    };
+  }
+  if (!["admin", "maintain", "write"].includes(permission)) {
+    return {
+      direct: false,
+      reason: `GitHub @${githubLogin} のrepository権限は ${permission} で、本人・緊急マージの直通条件を満たしません。`,
+    };
+  }
+  return {
+    direct: true,
+    reason: `GitHub @${githubLogin} の ${permission} 権限とSlackの直通設定を確認しました。`,
+  };
 }
 
 function approvalStatusLabel(status: IssueApprovalStatus): string {

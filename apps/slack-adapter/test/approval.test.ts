@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   canApproveIssue,
   canBypassIssueApproval,
+  decidePrivilegedMerge,
   IssueApprovalService,
   requiresIssueApproval,
 } from "../src/approval.ts";
@@ -43,6 +44,25 @@ describe("Issue approval policy", () => {
     const selfApprovers = new Set(["U_PL"]);
     expect(canBypassIssueApproval("U_PL", selfApprovers)).toBe(true);
     expect(canApproveIssue("U_PL", "U_PL", new Set(), selfApprovers)).toBe(true);
+  });
+
+  test("本人マージはSlack設定とGitHub write権限の両方がある場合だけ直通する", () => {
+    const selfApprovers = new Set(["U_PL"]);
+    expect(decidePrivilegedMerge("U_PL", selfApprovers, "pl", "write")).toMatchObject({
+      direct: true,
+    });
+    expect(decidePrivilegedMerge("U_MEMBER", selfApprovers, "member", "write")).toMatchObject({
+      direct: false,
+      reason: expect.stringContaining("直接指定する権限"),
+    });
+    expect(decidePrivilegedMerge("U_PL", selfApprovers, "pl", "read")).toMatchObject({
+      direct: false,
+      reason: expect.stringContaining("read"),
+    });
+    expect(decidePrivilegedMerge("U_PL", selfApprovers, null, "none")).toMatchObject({
+      direct: false,
+      reason: expect.stringContaining("/ar connect github"),
+    });
   });
 });
 
