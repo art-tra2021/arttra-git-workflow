@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createProjectList,
   ensureProjectListDefinition,
+  markLegacyProjectList,
   type ProjectListClient,
   type ProjectListColumns,
   type ProjectListItem,
@@ -94,6 +95,28 @@ describe("Slack Project List", () => {
 
     expect(updateCalls).toEqual([
       expect.objectContaining({ id: "FPROJECTLIST", name: "ART-TRA Work", todo_mode: true }),
+    ]);
+  });
+
+  test("旧Listを削除せずLists対応のrich_textで案内する", async () => {
+    const updateCalls: Array<Record<string, unknown>> = [];
+    const client = clientStub({
+      listUpdate: async (input) => void updateCalls.push(input as Record<string, unknown>),
+    });
+
+    await markLegacyProjectList(client, "FPROJECTLIST");
+
+    expect(updateCalls).toEqual([
+      expect.objectContaining({
+        id: "FPROJECTLIST",
+        name: "ART-TRA Work（旧表示）",
+        description_blocks: [
+          expect.objectContaining({
+            type: "rich_text",
+            elements: expect.any(Array),
+          }),
+        ],
+      }),
     ]);
   });
 

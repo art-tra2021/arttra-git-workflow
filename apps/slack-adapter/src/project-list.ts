@@ -158,15 +158,9 @@ export async function markLegacyProjectList(
   await client.slackLists.update({
     id: listId,
     name: "ART-TRA Work（旧表示）",
-    description_blocks: [
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: "新しい読みやすいListへ移行済みです。このListは履歴確認のため残しています。",
-        },
-      },
-    ],
+    description_blocks: richText(
+      "新しい読みやすいListへ移行済みです。このListは履歴確認のため残しています。",
+    ),
     todo_mode: true,
   });
 }
