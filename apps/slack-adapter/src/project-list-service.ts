@@ -4,6 +4,7 @@ import {
   createProjectList,
   markLegacyProjectList,
   type ProjectListClient,
+  type ProjectListCreatedHook,
   type ProjectListProjectionOptions,
   type ProjectListState,
   type ProjectListSyncResult,
@@ -20,6 +21,7 @@ import type { StateStore } from "./state-store.ts";
 import type { HumanWorkItem } from "./types.ts";
 
 const STATE_NAMESPACE = "project-list";
+const LEGACY_GUARD_NAMESPACE = "project-list-legacy-guard";
 const LEASE_NAMESPACE = "project-list-sync";
 const LEASE_MILLISECONDS = 15 * 60_000;
 
@@ -28,6 +30,13 @@ interface ProjectListSyncLease {
   revision: number;
   owner: string;
   expiresAt: string;
+}
+
+interface ProjectListLegacyGuard {
+  schemaVersion: 1;
+  kind: "scoped-only";
+  channelId: string;
+  createdAt: string;
 }
 
 export interface ProjectListWorkSource {
@@ -140,9 +149,14 @@ export class ProjectListSyncService {
     options?: ProjectListSyncOptions,
     stateKey = channelId,
   ): Promise<ProjectListSyncResult> {
+    // This check intentionally runs after the channel lease was acquired by
+    // sync(). A stale unscoped retry must not pass a check performed before a
+    // concurrent scoped migration writes its durable guard.
+    if (!options) await this.assertUnscopedProjectionAllowed(channelId);
     await this.migrateLegacyChannelProjection(channelId, options, stateKey);
     let state = await this.store.get<ProjectListState>(STATE_NAMESPACE, stateKey);
     try {
+      let created = false;
       if (state?.schemaVersion !== 3) {
         const legacyListId = state?.listId;
         const createOptions: ProjectListProjectionOptions | undefined = options
@@ -153,11 +167,39 @@ export class ProjectListSyncService {
               ...(options.target ? { target: options.target } : {}),
             }
           : undefined;
-        state = await createProjectList(this.client, channelId, requesterUserId, createOptions);
+        const persistCreated: ProjectListCreatedHook = async (createdState) => {
+          state = {
+            ...createdState,
+            accessPending: true,
+            ...(legacyListId ? { pendingLegacyListId: legacyListId } : {}),
+          };
+          await this.store.set(STATE_NAMESPACE, stateKey, state);
+        };
+        state = await createProjectList(
+          this.client,
+          channelId,
+          requesterUserId,
+          createOptions,
+          persistCreated,
+        );
+        created = true;
+        state = {
+          ...state,
+          ...(legacyListId ? { pendingLegacyListId: legacyListId } : {}),
+        };
         await this.store.set(STATE_NAMESPACE, stateKey, state);
-        if (legacyListId) {
-          await markLegacyProjectList(this.client, legacyListId);
-        }
+      }
+      // A previous attempt may have persisted the newly-created List before its
+      // ACL succeeded. Retry that ACL before loading or mutating rows.
+      if (!created && state?.accessPending) {
+        const target = state.binding?.target ?? { kind: "channel" as const, id: channelId };
+        await this.client.slackLists.access.set({
+          list_id: state.listId,
+          access_level: "read",
+          ...(target.kind === "user" ? { user_ids: [target.id] } : { channel_ids: [target.id] }),
+        });
+        state = { ...state, accessPending: false };
+        await this.store.set(STATE_NAMESPACE, stateKey, state);
       }
       if (
         requesterUserId &&
@@ -169,6 +211,12 @@ export class ProjectListSyncService {
           access_level: "read",
           user_ids: [requesterUserId],
         });
+      }
+      if (state?.pendingLegacyListId) {
+        await markLegacyProjectList(this.client, state.pendingLegacyListId);
+        const { pendingLegacyListId: _pendingLegacyListId, ...completedState } = state;
+        state = completedState;
+        await this.store.set(STATE_NAMESPACE, stateKey, state);
       }
       const loadedItems = await this.source.loadProjectItems();
       const items = options
@@ -215,28 +263,107 @@ export class ProjectListSyncService {
     const target = options?.target ?? { kind: "channel" as const, id: channelId };
     if (!options || target.kind !== "channel" || scopedStateKey === channelId) return;
 
-    await this.migrateLegacyChannelState(channelId);
+    // Keep the channel lease across the complete migration and marker write.
+    // This serializes the marker with any unscoped retry that could otherwise
+    // recreate the old all-repository List after this scoped sync succeeds.
+    const owner = await this.acquireLease(channelId);
+    try {
+      await this.migrateLegacyChannelStateWithLease(channelId);
+    } finally {
+      await this.releaseLease(channelId, owner);
+    }
   }
 
   async migrateLegacyChannelState(channelId: string): Promise<void> {
     const owner = await this.acquireLease(channelId);
     try {
-      const legacy = await this.store.get<{ listId?: string }>(STATE_NAMESPACE, channelId);
-      if (!legacy) return;
-      const listId = legacy.listId;
-      if (!listId || !/^F[A-Z0-9]+$/.test(listId)) {
-        throw new Error("旧Slack Listの保存状態が不正です。安全のため共有投影を停止しました。");
-      }
-      if (!this.client.slackLists.access.delete) {
-        throw new Error("旧Slack Listを安全に移行するためのaccess.deleteが利用できません。");
-      }
-      await this.client.slackLists.access.delete({ list_id: listId, channel_ids: [channelId] });
-      await clearProjectListItems(this.client, listId);
-      await markLegacyProjectList(this.client, listId);
-      await this.store.remove(STATE_NAMESPACE, channelId);
+      await this.migrateLegacyChannelStateWithLease(channelId);
     } finally {
       await this.releaseLease(channelId, owner);
     }
+  }
+
+  private async migrateLegacyChannelStateWithLease(channelId: string): Promise<void> {
+    const legacy = await this.store.get<Pick<ProjectListState, "listId" | "pendingLegacyListId">>(
+      STATE_NAMESPACE,
+      channelId,
+    );
+    if (!legacy) {
+      await this.ensureScopedOnlyGuard(channelId);
+      return;
+    }
+
+    // A scoped sync may race with the first unscoped sync after the latter
+    // has already created FNEW but before its ACL is confirmed. In that
+    // case the channel state contains both the old shared List (FOLD) and
+    // the provisional replacement (FNEW). Remove the old List first so a
+    // potentially confidential row set cannot remain visible while the
+    // migration is retried.
+    const listIds = [legacy.pendingLegacyListId, legacy.listId].filter(
+      (listId, index, ids): listId is string => Boolean(listId) && ids.indexOf(listId) === index,
+    );
+    if (listIds.length === 0 || listIds.some((listId) => !/^F[A-Z0-9]+$/.test(listId))) {
+      throw new Error("旧Slack Listの保存状態が不正です。安全のため共有投影を停止しました。");
+    }
+    if (!this.client.slackLists.access.delete) {
+      throw new Error("旧Slack Listを安全に移行するためのaccess.deleteが利用できません。");
+    }
+
+    // Keep the state until every List is ACL-revoked, emptied, and marked.
+    // Any failure therefore leaves the IDs available for a safe retry.
+    for (const listId of listIds) {
+      await this.client.slackLists.access.delete({ list_id: listId, channel_ids: [channelId] });
+      await clearProjectListItems(this.client, listId);
+      await markLegacyProjectList(this.client, listId);
+    }
+    await this.ensureScopedOnlyGuard(channelId);
+    await this.store.remove(STATE_NAMESPACE, channelId);
+  }
+
+  private async ensureScopedOnlyGuard(channelId: string): Promise<void> {
+    const marker = await this.store.get<ProjectListLegacyGuard>(LEGACY_GUARD_NAMESPACE, channelId);
+    if (marker !== null) {
+      if (!this.isValidScopedOnlyGuard(marker, channelId)) {
+        throw new Error(
+          "Project Listの移行保護状態が不正です。安全のため全repository同期を停止しました。",
+        );
+      }
+      return;
+    }
+    await this.store.set<ProjectListLegacyGuard>(LEGACY_GUARD_NAMESPACE, channelId, {
+      schemaVersion: 1,
+      kind: "scoped-only",
+      channelId,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  private async assertUnscopedProjectionAllowed(channelId: string): Promise<void> {
+    const marker = await this.store.get<ProjectListLegacyGuard>(LEGACY_GUARD_NAMESPACE, channelId);
+    if (marker === null) return;
+    if (!this.isValidScopedOnlyGuard(marker, channelId)) {
+      throw new Error(
+        "Project Listの移行保護状態が不正です。安全のため全repository同期を停止しました。",
+      );
+    }
+    throw new Error(
+      "このチャンネルはrepository限定のProject Listへ移行済みです。scope付き同期を実行してください。",
+    );
+  }
+
+  private isValidScopedOnlyGuard(
+    marker: unknown,
+    channelId: string,
+  ): marker is ProjectListLegacyGuard {
+    if (!marker || typeof marker !== "object") return false;
+    const candidate = marker as Partial<ProjectListLegacyGuard>;
+    return (
+      candidate.schemaVersion === 1 &&
+      candidate.kind === "scoped-only" &&
+      candidate.channelId === channelId &&
+      typeof candidate.createdAt === "string" &&
+      candidate.createdAt.length > 0
+    );
   }
 
   private async acquireLease(stateKey: string): Promise<string> {

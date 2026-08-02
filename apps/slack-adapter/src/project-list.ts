@@ -19,6 +19,10 @@ export interface ProjectListState {
   /** Optional on legacy state; present for repository/viewer-scoped state. */
   binding?: ProjectionBinding;
   stateKey?: string;
+  /** true only while the List's initial target ACL still needs a retry. */
+  accessPending?: boolean;
+  /** Old unscoped List that must be marked after the new List is ready. */
+  pendingLegacyListId?: string;
 }
 
 export interface ProjectListProjectionOptions {
@@ -27,6 +31,8 @@ export interface ProjectListProjectionOptions {
   scope: RepositoryScope;
   target?: ProjectionTarget;
 }
+
+export type ProjectListCreatedHook = (state: ProjectListState) => Promise<void> | void;
 
 interface ProjectListSchemaColumn {
   key: string;
@@ -147,6 +153,7 @@ export async function createProjectList(
   channelId: string,
   requesterUserId?: string,
   options?: ProjectListProjectionOptions,
+  onCreated?: ProjectListCreatedHook,
 ): Promise<ProjectListState> {
   const binding = options
     ? validateProjectionBinding({
@@ -174,6 +181,15 @@ export async function createProjectList(
     throw new Error("Slack Listの作成結果に有効なlist_idがありません。");
   }
   const columns = columnsFromSchema(response.list_metadata?.schema ?? []);
+  const state: ProjectListState = {
+    schemaVersion: 3,
+    listId,
+    columns,
+    ...(binding ? { binding, stateKey: projectionStateKey(binding) } : {}),
+  };
+  // 作成直後のIDを先に保存しておく。ACL設定が一時的に失敗しても、再試行時に
+  // 別Listを作らず、同じListへACL設定だけをやり直せるようにする。
+  await onCreated?.(state);
   if (binding?.target.kind === "user") {
     await client.slackLists.access.set({
       list_id: listId,
@@ -196,12 +212,7 @@ export async function createProjectList(
       });
     }
   }
-  return {
-    schemaVersion: 3,
-    listId,
-    columns,
-    ...(binding ? { binding, stateKey: projectionStateKey(binding) } : {}),
-  };
+  return state;
 }
 
 export async function ensureProjectListDefinition(
