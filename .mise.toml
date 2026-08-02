@@ -138,6 +138,9 @@ run = """
 mise install
 cargo install --path . --locked --force
 git ar setup
+if ! git ar presence install --yes; then
+  echo "presenceのOS定期共有を導入できませんでした。表示された代替コマンドを利用してください。" >&2
+fi
 mise run ready
 """
 
@@ -161,6 +164,7 @@ run = "git ar doctor"
 description = "Confirm setup and show the next action"
 run = """
 git ar doctor
+git ar presence status
 git ar check
 git ar status
 """

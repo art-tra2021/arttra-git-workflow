@@ -53,9 +53,9 @@ AIは同じ判定を`git ar status --json`で取得します。
 commitは`git ar commit`だけを入口にし、hookは`AR-Commit: git-ar/v1` trailerを確認します。
 branch命名違反とツールチェーン違反は、安定したerror code、日本語説明、実行可能な修正コマンドを返します。
 
-`git ar tasks --json`は認証済みユーザーのIssueを機械可読で返します。
+`git ar tasks --json`は`arttra.toml`で指定したOrganization Projectを正本とし、認証済みユーザーが担当する未完了Issueをrepository横断で返します。
 人間は任意の`gh-dash`、AIはこのJSONを使い、表示層を正本にしません。
-Project scopeがある環境では、将来同じ出力へProjectsの日程と状態を結合します。
+状態、優先度、目標日、repository、Issue URLは人間向け表示とschema version付きJSONの同じ項目から生成します。
 
 Issueの親子、blocked-by、blockingはGitHub CLI 2.94以降のnative relationshipを使います。
 本文の自由記述から依存を推測せず、`git ar issue --blocked-by`またはcore `gh issue create/edit`で登録します。

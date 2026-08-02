@@ -18,6 +18,7 @@ mise run setup-ar
 `setup-ar`は全toolを正確なversionで導入し、外部CLIには`mise.lock`のURL/checksumを利用します。
 core runtimeのRustはversion固定ですが、miseのlock対象外なのでartifact lockは行いません。
 `mise run setup-ar`はRust CLIをインストールし、mise経由の`hk`とClaude/Codexのローカルhookを有効にします。
+presenceが有効なrepositoryではOS標準の定期共有も導入します。macOSのDesktop等でバックグラウンドアクセスが制限される場合は、作業中だけ`mise run presence:watch`を実行する案内へ切り替わります。
 既存の`core.hooksPath=.githooks`だけは自動移行し、それ以外の独自hook設定は上書きせず日本語で停止します。
 Claude向けの`CLAUDE.md`も共有templateから生成します。
 `CLAUDE.md`、Claude/Codexの端末別設定、telemetryはGit管理外なので、個人調整が共有差分へ混ざりません。

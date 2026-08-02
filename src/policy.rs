@@ -21,6 +21,18 @@ pub struct Policy {
     pub branch: BranchPolicy,
     #[serde(default)]
     pub doctor: DoctorPolicy,
+    #[serde(default)]
+    pub tasks: TasksPolicy,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TasksPolicy {
+    /// Organizationまたはuser login。未設定時は現在repositoryだけを表示する。
+    #[serde(default)]
+    pub project_owner: Option<String>,
+    /// GitHub Projects V2 number。ownerと両方設定した場合だけProjectを正本にする。
+    #[serde(default)]
+    pub project_number: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

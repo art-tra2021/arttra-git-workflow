@@ -591,6 +591,17 @@ fn recommend(facts: &RecommendationFacts<'_>) -> Vec<NextAction> {
             )];
         }
         if issue.state != "OPEN" {
+            if let Some(item) = issue.completion_items.iter().find(|item| !item.checked) {
+                return vec![action(
+                    "audit-closed-issue",
+                    "閉じたIssueの完了条件を監査する",
+                    format!(
+                        "Issue #{}は{}だが未確認の完了条件がある: {}",
+                        issue.number, issue.state, item.text
+                    ),
+                    Some(format!("gh issue view {} --web", issue.number)),
+                )];
+            }
             return vec![action(
                 "select-open-task",
                 "次のopen Issueを選ぶ",
@@ -999,5 +1010,48 @@ mod tests {
         });
         assert_eq!(actions[0].id, "implement-next-condition");
         assert!(actions[0].reason.contains("JSONを返す"));
+    }
+
+    #[test]
+    fn closed_issue_with_unchecked_condition_requires_audit() {
+        let issue = IssueStatus {
+            number: 2,
+            title: "Closed".into(),
+            url: "https://example.test/2".into(),
+            state: "CLOSED".into(),
+            body: String::new(),
+            purpose: None,
+            completion_items: vec![ChecklistItem {
+                text: "本番確認".into(),
+                checked: false,
+            }],
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            blocked_by: Vec::new(),
+            blocking: Vec::new(),
+            parent: None,
+            sub_issues: Vec::new(),
+            milestone: None,
+            project_items: Value::Array(Vec::new()),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let worktree = WorktreeStatus {
+            clean: true,
+            ..WorktreeStatus::default()
+        };
+        let upstream = UpstreamStatus {
+            configured: true,
+            ..UpstreamStatus::default()
+        };
+        let actions = recommend(&RecommendationFacts {
+            branch: "feature/2-closed-roz",
+            protected: false,
+            issue: Some(&issue),
+            pull_request: None,
+            worktree: &worktree,
+            upstream: &upstream,
+        });
+        assert_eq!(actions[0].id, "audit-closed-issue");
+        assert!(actions[0].reason.contains("本番確認"));
     }
 }

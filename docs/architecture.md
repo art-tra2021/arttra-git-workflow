@@ -25,7 +25,7 @@ TUIは便利な入力手段であり、正本ではありません。
 - `hk`は変更ファイルを専用linterへ振り分け、`commit-msg`と`pre-push`ではCLIと同じvalidatorを呼ぶ。
 - hookは自動stash、自動stage、自動fixをせず、利用者の作業treeを暗黙に変更しない。
 - GitHub操作は`gh`を正本とし、`git ar`は日本語の誘導と安定したJSONを加える薄いadapterにする。
-- 人間向け`gh-dash`は任意extension、AI向け`git ar tasks --json`は必須の安定interfaceとする。
+- 人間向け`gh-dash`は任意extension、AI向け`git ar tasks --json`はProjects横断の必須安定interfaceとする。
 - Claude/Codexの`PreToolUse` hookは`git ar guard hook`を呼び、同じtoolchain validatorを使う。
 - AIは候補を提案できるが、合否は`arttra.toml`とvalidatorが決める。
 - RulesetとRule InsightsはGitHub REST APIを正本とし、`git ar rules`は日本語表示と安定JSONだけを加える。
