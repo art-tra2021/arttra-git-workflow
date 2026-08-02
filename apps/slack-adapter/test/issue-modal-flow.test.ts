@@ -1,8 +1,40 @@
 import { describe, expect, test } from "bun:test";
-import { issueDetailModal, openIssueRepositoryFlow, transitionIssueModal } from "../src/app.ts";
+import {
+  issueDetailModal,
+  issueRepositoryPickerModal,
+  openIssueRepositoryFlow,
+  repositoryOptions,
+  transitionIssueModal,
+} from "../src/app.ts";
 import type { IssueTemplateSchema } from "../src/issue-schema.ts";
 
 describe("Slack Issue modal flow", () => {
+  test("初回モーダルを外部API待ちなしで開きrepository cacheを検索する", () => {
+    const modal = issueRepositoryPickerModal(
+      "C123",
+      "https://hooks.slack.test/response",
+      "T123",
+      "art-tra2021/arttra-git-workflow",
+    );
+    expect(modal.blocks[0]?.element).toMatchObject({
+      type: "external_select",
+      action_id: "ar.issue.repository.options",
+      min_query_length: 0,
+      initial_option: { value: "art-tra2021/arttra-git-workflow" },
+    });
+    expect(
+      repositoryOptions(
+        ["art-tra2021/arttra-git-workflow", "art-tra2021/frontend", "other/example"],
+        "ART-TRA2021/FRONT",
+      ),
+    ).toEqual([
+      {
+        text: { type: "plain_text", text: "art-tra2021/frontend" },
+        value: "art-tra2021/frontend",
+      },
+    ]);
+  });
+
   test("work templateの内容に依存せずPR確認方法を明示する", () => {
     const schema: IssueTemplateSchema = {
       id: "work",

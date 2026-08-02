@@ -34,6 +34,7 @@ export interface SlackAppOptions {
   socketMode?: boolean;
   approverUserIds?: string[];
   selfApproverUserIds?: string[];
+  defaultRepository?: string;
   approvalService: IssueApprovalService;
   identityService: GitHubIdentityService;
   googleCalendarService?: GoogleCalendarService;
@@ -71,8 +72,29 @@ export function createSlackApp(
   });
 
   app.command("/ar", async ({ ack, client, command, respond }) => {
-    await ack();
     const normalized = command.text.trim().toLowerCase();
+    if (["new", "issue"].includes(normalized)) {
+      try {
+        await client.views.open({
+          trigger_id: command.trigger_id,
+          view: issueRepositoryPickerModal(
+            command.channel_id,
+            command.response_url,
+            command.team_id,
+            options.defaultRepository,
+          ),
+        });
+        await ack();
+      } catch (error) {
+        await ack();
+        await respond({
+          response_type: "ephemeral",
+          text: error instanceof Error ? error.message : "Issue作成画面を開けませんでした。",
+        });
+      }
+      return;
+    }
+    await ack();
     if (normalized === "connect github") {
       const url = await options.identityService.connectUrl(command.team_id, command.user_id);
       await respond({
@@ -216,17 +238,6 @@ export function createSlackApp(
       }
       return;
     }
-    if (["new", "issue"].includes(normalized)) {
-      await openIssueRepositoryFlow({
-        views: client.views as unknown as IssueModalViews,
-        listRepositories: () => issueMetadata.listRepositories(),
-        triggerId: command.trigger_id,
-        channelId: command.channel_id,
-        responseUrl: command.response_url,
-        slackTeamId: command.team_id,
-      });
-      return;
-    }
     const items = await dependencies.loadWorkItems(command.user_id);
     const visible = items.filter((item) => item.delivery !== "silent");
 
@@ -252,6 +263,18 @@ export function createSlackApp(
 
   app.action("ar.review.open", async ({ ack }) => {
     await ack();
+  });
+
+  app.options("ar.issue.repository.options", async ({ ack, options: request }) => {
+    try {
+      const repositories = await issueMetadata.listRepositories();
+      await ack({ options: repositoryOptions(repositories, request.value) });
+    } catch (error) {
+      console.error(
+        error instanceof Error ? error.message : "repository一覧を取得できませんでした。",
+      );
+      await ack({ options: [] });
+    }
   });
 
   app.view("ar.issue.repository", async ({ ack, client, view }) => {
@@ -612,6 +635,46 @@ function issueRepositoryModal(
       },
     ],
   };
+}
+
+export function issueRepositoryPickerModal(
+  channelId: string,
+  responseUrl: string,
+  slackTeamId: string,
+  defaultRepository?: string,
+) {
+  return {
+    type: "modal" as const,
+    callback_id: "ar.issue.repository",
+    private_metadata: JSON.stringify({ channelId, responseUrl, slackTeamId }),
+    title: { type: "plain_text" as const, text: "Issueを作成" },
+    submit: { type: "plain_text" as const, text: "次へ" },
+    close: { type: "plain_text" as const, text: "キャンセル" },
+    blocks: [
+      {
+        type: "input" as const,
+        block_id: "repository",
+        label: { type: "plain_text" as const, text: "Repository" },
+        element: {
+          type: "external_select" as const,
+          action_id: "ar.issue.repository.options",
+          min_query_length: 0,
+          placeholder: { type: "plain_text" as const, text: "Repositoryを選択" },
+          ...(defaultRepository
+            ? { initial_option: option(defaultRepository, defaultRepository) }
+            : {}),
+        },
+      },
+    ],
+  };
+}
+
+export function repositoryOptions(repositories: string[], query: string) {
+  const normalized = query.trim().toLowerCase();
+  return repositories
+    .filter((repository) => !normalized || repository.toLowerCase().includes(normalized))
+    .slice(0, 100)
+    .map((repository) => option(repository, repository));
 }
 
 function issueTemplateModal(metadata: IssueModalMetadata, templates: IssueTemplateSchema[]) {

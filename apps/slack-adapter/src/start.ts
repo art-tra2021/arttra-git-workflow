@@ -77,6 +77,15 @@ const dependencies =
       })
     : new GitHubCliDependencies(repository, githubLogin, owners, project);
 const issueMetadata = new IssueMetadataCache(dependencies, store);
+try {
+  await issueMetadata.listRepositories();
+} catch (error) {
+  console.error(
+    error instanceof Error
+      ? `Issue repository cacheの起動時読み込みに失敗しました: ${error.message}`
+      : "Issue repository cacheの起動時読み込みに失敗しました。",
+  );
+}
 const googleCalendarSettings = googleCalendarConfig();
 const googleCalendarService = googleCalendarSettings
   ? new GoogleCalendarService({
@@ -414,6 +423,7 @@ const app = createSlackApp(dependencies, {
     : { receiver: defined(receiver, "HTTP receiver") }),
   approverUserIds,
   selfApproverUserIds,
+  defaultRepository: repository,
   approvalService,
   identityService,
   issueMetadata,
