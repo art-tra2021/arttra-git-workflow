@@ -245,28 +245,38 @@ export function createSlackApp(
     await ack();
   });
 
-  app.view("ar.issue.repository", async ({ ack, view }) => {
+  app.view("ar.issue.repository", async ({ ack, client, view }) => {
     const metadata = parseMetadata(view.private_metadata);
     const repository = selectedValue(view.state.values, "repository", "value");
-    const templates = await dependencies.listIssueTemplates(repository);
-    await ack({
-      response_action: "update",
-      view: issueTemplateModal({ ...metadata, repository }, templates),
+    await transitionIssueModal({
+      ack: ack as unknown as IssueModalAck,
+      views: client.views as unknown as IssueModalViews,
+      viewId: view.id,
+      loadingText: "Issue種別を取得しています…",
+      loadNextView: async () => {
+        const templates = await dependencies.listIssueTemplates(repository);
+        return issueTemplateModal({ ...metadata, repository }, templates);
+      },
     });
   });
 
-  app.view("ar.issue.prepare", async ({ ack, view }) => {
+  app.view("ar.issue.prepare", async ({ ack, client, view }) => {
     const metadata = parseMetadata(view.private_metadata);
     const template = selectedValue(view.state.values, "template", "value") as IssueTemplateId;
-    const schema = (await dependencies.listIssueTemplates(metadata.repository)).find(
-      (candidate) => candidate.id === template,
-    );
-    if (!schema) {
-      throw new Error(`Issue templateが見つかりません: ${template}`);
-    }
-    await ack({
-      response_action: "update",
-      view: issueDetailModal({ ...metadata, template }, schema),
+    await transitionIssueModal({
+      ack: ack as unknown as IssueModalAck,
+      views: client.views as unknown as IssueModalViews,
+      viewId: view.id,
+      loadingText: "入力項目を取得しています…",
+      loadNextView: async () => {
+        const schema = (await dependencies.listIssueTemplates(metadata.repository)).find(
+          (candidate) => candidate.id === template,
+        );
+        if (!schema) {
+          throw new Error(`Issue templateが見つかりません: ${template}`);
+        }
+        return issueDetailModal({ ...metadata, template }, schema);
+      },
     });
   });
 
@@ -434,6 +444,8 @@ interface IssueModalViews {
   update(input: { view_id: string; view: unknown }): Promise<unknown>;
 }
 
+type IssueModalAck = (input: { response_action: "update"; view: unknown }) => Promise<void>;
+
 interface IssueRepositoryFlowOptions {
   views: IssueModalViews;
   listRepositories(): Promise<string[]>;
@@ -446,7 +458,7 @@ interface IssueRepositoryFlowOptions {
 export async function openIssueRepositoryFlow(options: IssueRepositoryFlowOptions): Promise<void> {
   const opened = await options.views.open({
     trigger_id: options.triggerId,
-    view: issueRepositoryLoadingModal(),
+    view: issueLoadingModal("Repositoryを取得しています…"),
   });
   const viewId = opened.view?.id;
   if (!viewId) {
@@ -463,14 +475,39 @@ export async function openIssueRepositoryFlow(options: IssueRepositoryFlowOption
       repositories,
     );
   } catch (error) {
-    nextView = issueRepositoryErrorModal(
+    nextView = issueErrorModal(
       error instanceof Error ? error.message : "repository一覧を取得できませんでした。",
     );
   }
   await options.views.update({ view_id: viewId, view: nextView });
 }
 
-function issueRepositoryLoadingModal() {
+interface IssueModalTransitionOptions {
+  ack: IssueModalAck;
+  views: IssueModalViews;
+  viewId: string;
+  loadingText: string;
+  loadNextView(): Promise<unknown>;
+}
+
+export async function transitionIssueModal(options: IssueModalTransitionOptions): Promise<void> {
+  await options.ack({
+    response_action: "update",
+    view: issueLoadingModal(options.loadingText),
+  });
+
+  let nextView: unknown;
+  try {
+    nextView = await options.loadNextView();
+  } catch (error) {
+    nextView = issueErrorModal(
+      error instanceof Error ? error.message : "Issue作成画面を取得できませんでした。",
+    );
+  }
+  await options.views.update({ view_id: options.viewId, view: nextView });
+}
+
+function issueLoadingModal(message: string) {
   return {
     type: "modal" as const,
     title: { type: "plain_text" as const, text: "Issueを作成" },
@@ -478,13 +515,13 @@ function issueRepositoryLoadingModal() {
     blocks: [
       {
         type: "section" as const,
-        text: { type: "plain_text" as const, text: "Repositoryを取得しています…" },
+        text: { type: "plain_text" as const, text: message },
       },
     ],
   };
 }
 
-function issueRepositoryErrorModal(message: string) {
+function issueErrorModal(message: string) {
   return {
     type: "modal" as const,
     title: { type: "plain_text" as const, text: "Issueを作成" },
