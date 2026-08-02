@@ -17,6 +17,8 @@ import type {
   RepositoryPermission,
 } from "./types.ts";
 
+const ISSUE_REPOSITORY_ACTION_ID = "ar.issue.repository.options";
+
 export interface SlackAdapterDependencies {
   listRepositories(): Promise<string[]>;
   listIssueTemplates(repository: string): Promise<IssueTemplateSchema[]>;
@@ -265,7 +267,7 @@ export function createSlackApp(
     await ack();
   });
 
-  app.options("ar.issue.repository.options", async ({ ack, options: request }) => {
+  app.options(ISSUE_REPOSITORY_ACTION_ID, async ({ ack, options: request }) => {
     try {
       const repositories = await issueMetadata.listRepositories();
       await ack({ options: repositoryOptions(repositories, request.value) });
@@ -279,7 +281,7 @@ export function createSlackApp(
 
   app.view("ar.issue.repository", async ({ ack, client, view }) => {
     const metadata = parseMetadata(view.private_metadata);
-    const repository = selectedValue(view.state.values, "repository", "value");
+    const repository = selectedValue(view.state.values, "repository", ISSUE_REPOSITORY_ACTION_ID);
     await transitionIssueModal({
       ack: ack as unknown as IssueModalAck,
       views: client.views as unknown as IssueModalViews,
@@ -657,7 +659,7 @@ export function issueRepositoryPickerModal(
         label: { type: "plain_text" as const, text: "Repository" },
         element: {
           type: "external_select" as const,
-          action_id: "ar.issue.repository.options",
+          action_id: ISSUE_REPOSITORY_ACTION_ID,
           min_query_length: 0,
           placeholder: { type: "plain_text" as const, text: "Repositoryを選択" },
           ...(defaultRepository
@@ -840,12 +842,16 @@ function inputValue(
   return values[blockId]?.[actionId]?.value ?? "";
 }
 
-function selectedValue(
+export function selectedValue(
   values: Record<string, Record<string, { selected_option?: { value: string } | null }>>,
   blockId: string,
   actionId: string,
 ): string {
-  return values[blockId]?.[actionId]?.selected_option?.value ?? "intake";
+  const value = values[blockId]?.[actionId]?.selected_option?.value;
+  if (!value) {
+    throw new Error(`${blockId}が選択されていません。もう一度選択してください。`);
+  }
+  return value;
 }
 
 function selectedUsers(
