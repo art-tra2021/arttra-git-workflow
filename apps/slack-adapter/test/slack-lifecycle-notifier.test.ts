@@ -49,6 +49,8 @@ describe("SlackLifecycleNotifier", () => {
       reply_broadcast: false,
     });
     expect(calls[0]?.text).toContain("<@UAUTHOR>");
+    expect(calls[0]?.text).toContain("⚠️");
     expect(JSON.stringify(calls[0]?.blocks)).toContain("A &lt; B");
+    expect(JSON.stringify(calls[0]?.blocks)).toContain("⚠️ *PRが差し戻されました*");
   });
 });

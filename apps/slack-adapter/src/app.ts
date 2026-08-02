@@ -5,11 +5,13 @@ import {
   requiresIssueApproval,
 } from "./approval.ts";
 import type { GoogleCalendarService } from "./google-calendar-service.ts";
-import type { GitHubIdentityService } from "./identity-service.ts";
+import { type GitHubIdentityService, MissingGitHubIdentityError } from "./identity-service.ts";
 import { buildCreateIssueCommand, MERGE_MODES } from "./issue-command.ts";
 import type { IssueMetadataSource } from "./issue-metadata-cache.ts";
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
 import { workItemBlocks } from "./presentation.ts";
+import { slackHeading, slackPlain } from "./slack-message-style.ts";
+import type { SlackRequirementNotifier } from "./slack-requirement-notifier.ts";
 import type {
   CreatedIssue,
   CreateIssueCommand,
@@ -40,6 +42,7 @@ export interface SlackAppOptions {
   approvalService: IssueApprovalService;
   identityService: GitHubIdentityService;
   googleCalendarService?: GoogleCalendarService;
+  requirementNotifier?: Pick<SlackRequirementNotifier, "requireGitHubConnection">;
   issueMetadata?: IssueMetadataSource;
   syncProjectList?: (
     channelId: string,
@@ -91,7 +94,10 @@ export function createSlackApp(
         await ack();
         await respond({
           response_type: "ephemeral",
-          text: error instanceof Error ? error.message : "Issue作成画面を開けませんでした。",
+          text: slackPlain(
+            "error",
+            error instanceof Error ? error.message : "Issue作成画面を開けませんでした。",
+          ),
         });
       }
       return;
@@ -101,13 +107,14 @@ export function createSlackApp(
       const url = await options.identityService.connectUrl(command.team_id, command.user_id);
       await respond({
         response_type: "ephemeral",
-        text: `GitHubアカウントを連携してください: ${url}`,
+        text: slackPlain("action", `GitHubアカウントを連携してください: ${url}`),
         blocks: [
           {
             type: "section",
             text: {
               type: "mrkdwn",
-              text: "GitHubで本人確認すると、Slackの担当者・予定レビュワー選択をGitHubへ安全に反映できます。",
+              text: `${slackHeading("action", "GitHub連携")}
+GitHubで本人確認すると、Slackの担当者・予定レビュワー選択をGitHubへ安全に反映できます。`,
             },
             accessory: {
               type: "button",
@@ -124,9 +131,12 @@ export function createSlackApp(
       const removed = await options.identityService.disconnect(command.team_id, command.user_id);
       await respond({
         response_type: "ephemeral",
-        text: removed
-          ? "GitHubアカウント連携を解除しました。"
-          : "GitHubアカウントは連携されていません。",
+        text: slackPlain(
+          removed ? "success" : "info",
+          removed
+            ? "GitHubアカウント連携を解除しました。"
+            : "GitHubアカウントは連携されていません。",
+        ),
       });
       return;
     }
@@ -134,20 +144,21 @@ export function createSlackApp(
       if (!options.googleCalendarService) {
         await respond({
           response_type: "ephemeral",
-          text: "Google Calendar連携はまだ管理者により設定されていません。",
+          text: slackPlain("warning", "Google Calendar連携はまだ管理者により設定されていません。"),
         });
         return;
       }
       const url = await options.googleCalendarService.connectUrl(command.team_id, command.user_id);
       await respond({
         response_type: "ephemeral",
-        text: `Google Calendarを連携してください: ${url}`,
+        text: slackPlain("action", `Google Calendarを連携してください: ${url}`),
         blocks: [
           {
             type: "section",
             text: {
               type: "mrkdwn",
-              text: "本人がGitHub Projectsで担当する未完了・期限付き項目だけを、専用の `ART-TRA Work` カレンダーへ同期します。既存の予定は読みません。",
+              text: `${slackHeading("action", "Google Calendar連携")}
+本人がGitHub Projectsで担当する未完了・期限付き項目だけを、専用の \`ART-TRA Work\` カレンダーへ同期します。既存の予定は読みません。`,
             },
             accessory: {
               type: "button",
@@ -164,7 +175,7 @@ export function createSlackApp(
       if (!options.googleCalendarService) {
         await respond({
           response_type: "ephemeral",
-          text: "Google Calendar連携はまだ管理者により設定されていません。",
+          text: slackPlain("warning", "Google Calendar連携はまだ管理者により設定されていません。"),
         });
         return;
       }
@@ -174,9 +185,12 @@ export function createSlackApp(
       );
       await respond({
         response_type: "ephemeral",
-        text: removed
-          ? "Google Calendar連携を解除しました。作成済みの専用カレンダーは履歴として残ります。"
-          : "Google Calendarは連携されていません。",
+        text: slackPlain(
+          removed ? "success" : "info",
+          removed
+            ? "Google Calendar連携を解除しました。作成済みの専用カレンダーは履歴として残ります。"
+            : "Google Calendarは連携されていません。",
+        ),
       });
       return;
     }
@@ -184,7 +198,7 @@ export function createSlackApp(
       if (!options.googleCalendarService) {
         await respond({
           response_type: "ephemeral",
-          text: "Google Calendar連携はまだ管理者により設定されていません。",
+          text: slackPlain("warning", "Google Calendar連携はまだ管理者により設定されていません。"),
         });
         return;
       }
@@ -195,12 +209,18 @@ export function createSlackApp(
         );
         await respond({
           response_type: "ephemeral",
-          text: `自分のCalendarを同期しました。対象${result.itemCount}件 / 新規${result.created}件 / 更新${result.updated}件 / 予定から除外${result.deleted}件`,
+          text: slackPlain(
+            "success",
+            `自分のCalendarを同期しました。対象${result.itemCount}件 / 新規${result.created}件 / 更新${result.updated}件 / 予定から除外${result.deleted}件`,
+          ),
         });
       } catch (error) {
         await respond({
           response_type: "ephemeral",
-          text: error instanceof Error ? error.message : "Google Calendarを同期できませんでした。",
+          text: slackPlain(
+            "error",
+            error instanceof Error ? error.message : "Google Calendarを同期できませんでした。",
+          ),
         });
       }
       return;
@@ -211,8 +231,8 @@ export function createSlackApp(
       await respond({
         response_type: "ephemeral",
         text: approval
-          ? `\`\`\`${JSON.stringify(approval, null, 2)}\`\`\``
-          : "指定された承認申請は見つかりません。",
+          ? slackPlain("info", `\`\`\`${JSON.stringify(approval, null, 2)}\`\`\``)
+          : slackPlain("warning", "指定された承認申請は見つかりません。"),
       });
       return;
     }
@@ -222,7 +242,7 @@ export function createSlackApp(
       if (!options.syncProjectList) {
         await respond({
           response_type: "ephemeral",
-          text: "Project List同期が設定されていません。",
+          text: slackPlain("warning", "Project List同期が設定されていません。"),
         });
         return;
       }
@@ -230,12 +250,18 @@ export function createSlackApp(
         const result = await options.syncProjectList(command.channel_id, command.user_id);
         await respond({
           response_type: "ephemeral",
-          text: `Project Listを同期しました。対象${result.itemCount}件 / 新規${result.created}件 / 更新${result.updated}件 / 削除${result.deleted}件 / List ID: ${result.listId}`,
+          text: slackPlain(
+            "success",
+            `Project Listを同期しました。対象${result.itemCount}件 / 新規${result.created}件 / 更新${result.updated}件 / 削除${result.deleted}件 / List ID: ${result.listId}`,
+          ),
         });
       } catch (error) {
         await respond({
           response_type: "ephemeral",
-          text: error instanceof Error ? error.message : "Project Listを同期できませんでした。",
+          text: slackPlain(
+            "error",
+            error instanceof Error ? error.message : "Project Listを同期できませんでした。",
+          ),
         });
       }
       return;
@@ -244,13 +270,16 @@ export function createSlackApp(
     const visible = items.filter((item) => item.delivery !== "silent");
 
     if (visible.length === 0) {
-      await respond({ response_type: "ephemeral", text: "今すぐ対応が必要な仕事はありません。" });
+      await respond({
+        response_type: "ephemeral",
+        text: slackPlain("success", "今すぐ対応が必要な仕事はありません。"),
+      });
       return;
     }
 
     await respond({
       response_type: "ephemeral",
-      text: `次に確認する仕事は${visible.length}件です。`,
+      text: slackPlain("digest", `次に確認する仕事は${visible.length}件です。`),
       blocks: visible.slice(0, 5).flatMap(workItemBlocks),
     });
   });
@@ -338,8 +367,9 @@ export function createSlackApp(
           : {}),
         schema,
       });
+      const resolved = await options.identityService.resolveCommand(command, metadata.slackTeamId);
       let approvalReason: string | null = null;
-      if (requiresIssueApproval(command)) {
+      if (requiresIssueApproval(resolved)) {
         const identity = await options.identityService.get(metadata.slackTeamId, body.user.id);
         let permission: RepositoryPermission = "none";
         if (identity) {
@@ -367,26 +397,36 @@ export function createSlackApp(
         if (approvers.size === 0) {
           throw new Error("このマージ方式には承認が必要ですが、承認者が設定されていません。");
         }
-        const approval = await options.approvalService.request(command, body.user.id);
+        const approval = await options.approvalService.request(resolved, body.user.id);
         await requestIssueApproval(
           metadata.responseUrl,
           approval.id,
-          command,
+          resolved,
           approvers,
           approvalReason,
         );
         return;
       }
-      const resolved = await options.identityService.resolveCommand(command, metadata.slackTeamId);
       const issue = await dependencies.createIssue(resolved);
       await respondToCommand(
         metadata.responseUrl,
-        `Issue #${issue.number}を作成しました: ${issue.url}`,
+        slackPlain("success", `Issue #${issue.number}を作成しました: ${issue.url}`),
       );
     } catch (error) {
+      if (error instanceof MissingGitHubIdentityError && options.requirementNotifier) {
+        try {
+          await options.requirementNotifier.requireGitHubConnection({
+            channelId: metadata.channelId,
+            slackTeamId: metadata.slackTeamId,
+            slackUserIds: error.slackUserIds,
+          });
+        } catch {
+          // Issue作成者へのエラー応答を、案内通知の失敗で失わない。
+        }
+      }
       await respondToCommand(
         metadata.responseUrl,
-        error instanceof Error ? error.message : "Issueを作成できませんでした",
+        slackPlain("error", error instanceof Error ? error.message : "Issueを作成できませんでした"),
       );
     }
   });
@@ -424,12 +464,18 @@ export function createSlackApp(
       await respond({
         response_type: "in_channel",
         replace_original: true,
-        text: `<@${body.user.id}> が承認し、Issue #${issue.number}を作成しました: ${issue.url}`,
+        text: slackPlain(
+          "approved",
+          `<@${body.user.id}> が承認し、Issue #${issue.number}を作成しました: ${issue.url}`,
+        ),
       });
     } catch (error) {
       await respond({
         response_type: "ephemeral",
-        text: error instanceof Error ? error.message : "Issueを作成できませんでした。",
+        text: slackPlain(
+          "error",
+          error instanceof Error ? error.message : "Issueを作成できませんでした。",
+        ),
       });
     }
   });
@@ -447,12 +493,18 @@ export function createSlackApp(
       await respond({
         response_type: "in_channel",
         replace_original: true,
-        text: `<@${body.user.id}> がIssue作成申請を却下しました。申請者: <@${approval.requester}>`,
+        text: slackPlain(
+          "warning",
+          `<@${body.user.id}> がIssue作成申請を却下しました。申請者: <@${approval.requester}>`,
+        ),
       });
     } catch (error) {
       await respond({
         response_type: "ephemeral",
-        text: error instanceof Error ? error.message : "Issue作成申請を却下できませんでした。",
+        text: slackPlain(
+          "error",
+          error instanceof Error ? error.message : "Issue作成申請を却下できませんでした。",
+        ),
       });
     }
   });
@@ -464,14 +516,17 @@ export function createSlackApp(
     }
     const target = parseIssueUrl(action.value);
     if (!target) {
-      await respond({ response_type: "ephemeral", text: "Issue URLを読み取れませんでした。" });
+      await respond({
+        response_type: "ephemeral",
+        text: slackPlain("error", "Issue URLを読み取れませんでした。"),
+      });
       return;
     }
 
     const item = await dependencies.claimIssue(target.repository, target.number, body.user.id);
     await respond({
       response_type: "ephemeral",
-      text: `${target.repository}#${target.number}を担当に設定しました。`,
+      text: slackPlain("success", `${target.repository}#${target.number}を担当に設定しました。`),
       blocks: workItemBlocks(item),
       replace_original: false,
     });
@@ -917,13 +972,13 @@ async function requestIssueApproval(
     body: JSON.stringify({
       response_type: "in_channel",
       replace_original: false,
-      text: `${mentions} Issue作成の承認をお願いします。`,
+      text: slackPlain("action", `${mentions} Issue作成の承認をお願いします。`),
       blocks: [
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `${mentions}\n<@${command.actor}> からIssue作成の承認申請です。\n*作成先:* ${command.repository}\n*タイトル:* ${command.title}\n*マージ方式:* ${mergeMode}\n*承認が必要な理由:* ${reason}`,
+            text: `${mentions}\n${slackHeading("action", "Issue作成の承認依頼")}\n<@${command.actor}> からIssue作成の承認申請です。\n*作成先:* ${command.repository}\n*タイトル:* ${command.title}\n*マージ方式:* ${mergeMode}\n*承認が必要な理由:* ${reason}`,
           },
         },
         {

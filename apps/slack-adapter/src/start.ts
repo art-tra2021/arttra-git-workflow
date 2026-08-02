@@ -24,6 +24,7 @@ import type { ProjectListClient } from "./project-list.ts";
 import { ProjectListSyncService, parseProjectListSyncCommand } from "./project-list-service.ts";
 import { PullRequestReviewService } from "./review-service.ts";
 import { SlackLifecycleNotifier } from "./slack-lifecycle-notifier.ts";
+import { SlackRequirementNotifier } from "./slack-requirement-notifier.ts";
 import { SlackReviewNotifier } from "./slack-review-notifier.ts";
 import { SlackWorkNotifier } from "./slack-work-notifier.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
@@ -101,6 +102,7 @@ const googleCalendarService = googleCalendarSettings
     })
   : null;
 const slackClient = new WebClient(botToken);
+const requirementNotifier = new SlackRequirementNotifier(slackClient, store);
 const resolveSlackUserId = async (githubLoginToFind: string) => {
   const identities = await store.list<GitHubIdentity>("github-identity");
   return (
@@ -477,6 +479,7 @@ const app = createSlackApp(dependencies, {
   defaultRepository: repository,
   approvalService,
   identityService,
+  requirementNotifier,
   issueMetadata,
   ...(googleCalendarService ? { googleCalendarService } : {}),
   syncProjectList: (channelId, requesterUserId) =>

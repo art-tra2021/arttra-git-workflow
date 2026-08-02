@@ -1,5 +1,6 @@
 import type { WebClient } from "@slack/web-api";
 import { workItemBlocks } from "./presentation.ts";
+import { slackHeading, slackPlain } from "./slack-message-style.ts";
 import type { HumanWorkItem } from "./types.ts";
 import type {
   WorkNotificationContext,
@@ -21,15 +22,17 @@ export class SlackWorkNotifier implements WorkNotifier {
     context: WorkNotificationContext,
   ): Promise<WorkNotificationResult> {
     const mention = context.slackUserId ? `<@${context.slackUserId}> ` : "";
+    const tone = context.kind === "deadline" ? "deadline" : "work";
+    const label = context.kind === "deadline" ? "期限のお知らせ" : "作業状況の更新";
     const response = await this.client.chat.postMessage({
       channel: this.channelId,
-      text: `${mention}#${item.issueNumber} ${item.title}: ${item.nextAction}`,
+      text: `${mention}${slackPlain(tone, `#${item.issueNumber} ${item.title}: ${item.nextAction}`)}`,
       blocks: [
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `${mention}*${context.kind === "deadline" ? "期限のお知らせ" : "作業状況の更新"}*`,
+            text: `${mention}${slackHeading(tone, label)}`,
           },
         },
         ...workItemBlocks(item),
@@ -55,13 +58,13 @@ export class SlackWorkNotifier implements WorkNotifier {
     }
     await this.client.chat.postMessage({
       channel: this.channelId,
-      text: `ART-TRAの未完了作業は${items.length}件です。`,
+      text: slackPlain("digest", `ART-TRAの未完了作業は${items.length}件です。`),
       blocks: [
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `*ART-TRA 作業ダイジェスト（${items.length}件）*\n${lines.join("\n")}`,
+            text: `${slackHeading("digest", `ART-TRA 作業ダイジェスト（${items.length}件）`)}\n${lines.join("\n")}`,
           },
         },
       ],
