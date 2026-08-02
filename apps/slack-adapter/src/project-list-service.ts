@@ -8,6 +8,7 @@ import {
   type ResolveSlackUserId,
   syncProjectList,
 } from "./project-list.ts";
+import { RetryableWorkError } from "./retryable-error.ts";
 import type { StateStore } from "./state-store.ts";
 import type { HumanWorkItem } from "./types.ts";
 
@@ -136,7 +137,8 @@ export class ProjectListSyncService {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const current = await this.store.get<ProjectListSyncLease>(LEASE_NAMESPACE, channelId);
       if (!current || Date.parse(current.expiresAt) > Date.now()) {
-        throw new Error(
+        throw new RetryableWorkError(
+          "project_list_sync_in_progress",
           "Slack Project Listの同期処理が進行中です。完了後にもう一度実行してください。",
         );
       }
@@ -148,7 +150,10 @@ export class ProjectListSyncService {
         return owner;
       }
     }
-    throw new Error("Slack Project Listの同期処理が競合しました。少し待って再実行してください。");
+    throw new RetryableWorkError(
+      "project_list_sync_conflict",
+      "Slack Project Listの同期処理が競合しました。少し待って再実行してください。",
+    );
   }
 
   private async releaseLease(channelId: string, owner: string): Promise<void> {
