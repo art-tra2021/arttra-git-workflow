@@ -80,7 +80,7 @@ describe("ProjectListSyncService", () => {
     const directory = await mkdtemp(join(tmpdir(), "arttra-project-list-"));
     const store = new LocalStateStore(directory);
     await store.set("project-list", "C123", {
-      schemaVersion: 1,
+      schemaVersion: 2,
       listId: "FPROJECTLIST",
       columns: Object.fromEntries(
         projectListSchema.map((column, index) => [column.key, `Col0000000${index}`]),
@@ -107,6 +107,45 @@ describe("ProjectListSyncService", () => {
       { list_id: "FPROJECTLIST", access_level: "read", channel_ids: ["C123"] },
       { list_id: "FPROJECTLIST", access_level: "read", user_ids: ["U123"] },
     ]);
+  });
+
+  test("旧9列版を残して新しい5列版へ移行する", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "arttra-project-list-"));
+    const store = new LocalStateStore(directory);
+    await store.set("project-list", "C123", {
+      schemaVersion: 1,
+      listId: "FLEGACY",
+      columns: {},
+    });
+    const updateCalls: Array<{ id: string; name: string }> = [];
+    const client = {
+      slackLists: {
+        create: async () => ({
+          list_id: "FPROJECTLIST",
+          list_metadata: {
+            schema: projectListSchema.map((column, index) => ({
+              ...column,
+              id: `Col0000000${index}`,
+            })),
+          },
+        }),
+        access: { set: async () => {} },
+        update: async (input: { id: string; name: string }) => void updateCalls.push(input),
+        items: {
+          list: async () => ({ items: [] }),
+          create: async () => ({ item: { id: "RecNEW" } }),
+          update: async () => {},
+          deleteMultiple: async () => {},
+        },
+      },
+    } as unknown as ProjectListClient;
+    const service = new ProjectListSyncService(client, { loadProjectItems: async () => [] }, store);
+
+    expect((await service.sync("C123")).listId).toBe("FPROJECTLIST");
+    expect(updateCalls).toContainEqual(
+      expect.objectContaining({ id: "FLEGACY", name: "ART-TRA Work（旧表示）" }),
+    );
+    expect((await store.get<ProjectListState>("project-list", "C123"))?.schemaVersion).toBe(2);
   });
 
   test("同じchannelへの同期を同時実行しない", async () => {

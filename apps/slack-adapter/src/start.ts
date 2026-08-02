@@ -7,6 +7,7 @@ import { GitHubAppDependencies } from "./github-app.ts";
 import { GitHubCliDependencies } from "./github-cli.ts";
 import { parseGitHubWebhookJob, verifyGitHubWebhookSignature } from "./github-webhook.ts";
 import { GitHubWebhookProcessor } from "./github-webhook-processor.ts";
+import { GoogleCalendarService } from "./google-calendar-service.ts";
 import { type GitHubIdentity, GitHubIdentityService } from "./identity-service.ts";
 import {
   CloudTasksGitHubJobQueue,
@@ -43,11 +44,12 @@ if (githubBackend !== "cli" && githubBackend !== "app") {
   throw new Error("AR_GITHUB_BACKENDはcliまたはappを指定してください。");
 }
 const store = createStateStoreFromEnvironment();
+const publicBaseUrl = required("AR_PUBLIC_BASE_URL");
 const identityService = new GitHubIdentityService({
   clientId: required("GITHUB_OAUTH_CLIENT_ID"),
   clientSecret: required("GITHUB_OAUTH_CLIENT_SECRET"),
   stateSecret: required("AR_OAUTH_STATE_SECRET"),
-  publicBaseUrl: required("AR_PUBLIC_BASE_URL"),
+  publicBaseUrl,
   store,
 });
 const slackTeamId = required("AR_SLACK_TEAM_ID");
@@ -72,6 +74,17 @@ const dependencies =
         },
       })
     : new GitHubCliDependencies(repository, githubLogin, owners, project);
+const googleCalendarSettings = googleCalendarConfig();
+const googleCalendarService = googleCalendarSettings
+  ? new GoogleCalendarService({
+      ...googleCalendarSettings,
+      stateSecret: required("AR_OAUTH_STATE_SECRET"),
+      tokenEncryptionSecret: strongSecret("AR_GOOGLE_TOKEN_KEY"),
+      publicBaseUrl,
+      store,
+      source: dependencies,
+    })
+  : null;
 const slackClient = new WebClient(botToken);
 const approvalService = new IssueApprovalService(store, {
   ttlMilliseconds:
@@ -167,6 +180,37 @@ receiver?.router.get("/github/callback", async (request, response) => {
   }
 });
 
+receiver?.router.get("/google/callback", async (request, response) => {
+  if (!googleCalendarService) {
+    response.status(503).type("text/plain").send("Google Calendar連携は設定されていません。");
+    return;
+  }
+  const code = typeof request.query.code === "string" ? request.query.code : "";
+  const state = typeof request.query.state === "string" ? request.query.state : "";
+  if (!code || !state) {
+    response
+      .status(400)
+      .type("text/plain")
+      .send("Google Calendar連携に必要なcodeまたはstateがありません。");
+    return;
+  }
+  try {
+    const identity = await googleCalendarService.complete(code, state);
+    await googleCalendarService.syncUser(identity.slackTeamId, identity.slackUserId);
+    response
+      .status(200)
+      .type("text/html")
+      .send(
+        `<!doctype html><html lang="ja"><meta charset="utf-8"><title>Calendar連携完了</title><body><h1>Google Calendar連携が完了しました</h1><p>${escapeHtml(identity.googleEmail)} の専用カレンダーへ、自分の期限付きタスクを同期しました。この画面を閉じてSlackへ戻ってください。</p></body></html>`,
+      );
+  } catch (error) {
+    response
+      .status(400)
+      .type("text/plain")
+      .send(error instanceof Error ? error.message : "Google Calendar連携に失敗しました。");
+  }
+});
+
 receiver?.router.post(
   "/github/events",
   raw({ type: "application/json", limit: "2mb" }),
@@ -220,6 +264,34 @@ receiver?.router.post(
     } catch (error) {
       console.error(error instanceof Error ? error.message : "Project List同期に失敗しました。");
       response.status(500).json({ ok: false, error: "project_list_sync_failed" });
+    }
+  },
+);
+
+receiver?.router.post(
+  "/internal/calendar-sync",
+  raw({ type: "application/json", limit: "1kb" }),
+  async (request, response) => {
+    if (!googleCalendarService) {
+      response.status(503).json({ ok: false, error: "google_calendar_required" });
+      return;
+    }
+    const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
+    if (!verifyJobSignature(body, request.header("x-ar-job-signature") ?? "", jobSecret)) {
+      response.status(401).json({ ok: false, error: "invalid_job_signature" });
+      return;
+    }
+    try {
+      const command = JSON.parse(body) as { schemaVersion?: number; kind?: string };
+      if (command.schemaVersion !== 1 || command.kind !== "calendar.sync") {
+        response.status(400).json({ ok: false, error: "invalid_calendar_command" });
+        return;
+      }
+      const results = await googleCalendarService.syncAll(slackTeamId);
+      response.status(200).json({ ok: true, schemaVersion: 1, results });
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "Calendar同期に失敗しました。");
+      response.status(500).json({ ok: false, error: "calendar_sync_failed" });
     }
   },
 );
@@ -312,6 +384,7 @@ const app = createSlackApp(dependencies, {
   selfApproverUserIds,
   approvalService,
   identityService,
+  ...(googleCalendarService ? { googleCalendarService } : {}),
   syncProjectList: (channelId, requesterUserId) =>
     projectListService.sync(channelId, requesterUserId),
   tokenVerificationEnabled: process.env.AR_SLACK_TOKEN_VERIFICATION !== "off",
@@ -359,6 +432,19 @@ function projectConfig(): { owner: string; number: number } | null {
     throw new Error("AR_GITHUB_PROJECT_NUMBERには1以上の整数を指定してください。");
   }
   return { owner, number };
+}
+
+function googleCalendarConfig(): { clientId: string; clientSecret: string } | null {
+  const clientId = optional("GOOGLE_OAUTH_CLIENT_ID");
+  const clientSecret = optional("GOOGLE_OAUTH_CLIENT_SECRET");
+  const tokenKey = optional("AR_GOOGLE_TOKEN_KEY");
+  if (!clientId && !clientSecret && !tokenKey) return null;
+  if (!clientId || !clientSecret || !tokenKey) {
+    throw new Error(
+      "GOOGLE_OAUTH_CLIENT_ID、GOOGLE_OAUTH_CLIENT_SECRET、AR_GOOGLE_TOKEN_KEYをすべて設定してください。",
+    );
+  }
+  return { clientId, clientSecret };
 }
 
 function strongSecret(name: string): string {
@@ -423,4 +509,13 @@ function parseQueuedJob(body: string): GitHubWebhookJob {
     throw new Error("GitHub webhook jobの形式が不正です。");
   }
   return parsed as GitHubWebhookJob;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }

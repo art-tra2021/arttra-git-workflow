@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   createProjectList,
   ensureProjectListDefinition,
+  markLegacyProjectList,
   type ProjectListClient,
   type ProjectListState,
   type ProjectListSyncResult,
@@ -84,9 +85,13 @@ export class ProjectListSyncService {
   ): Promise<ProjectListSyncResult> {
     let state = await this.store.get<ProjectListState>(STATE_NAMESPACE, channelId);
     try {
-      if (!state) {
+      if (state?.schemaVersion !== 2) {
+        const legacyListId = state?.listId;
         state = await createProjectList(this.client, channelId);
         await this.store.set(STATE_NAMESPACE, channelId, state);
+        if (legacyListId) {
+          await markLegacyProjectList(this.client, legacyListId);
+        }
       } else {
         await this.client.slackLists.access.set({
           list_id: state.listId,

@@ -43,7 +43,9 @@ ART-TRAではownerを`art-tra2021`、Project番号を`8`とする。
 CLIから初回作成する場合は、`AR_SLACK_PROJECT_LIST_MANAGER_ID`へタブを設定する管理者のSlack user IDを任意で設定する。`/ar project sync`では実行者へ自動で閲覧権限を付ける。
 Appは初回同期で専用のSlack Listを作成し、`lists:read`と`lists:write`でGitHub Projectsの現在状態を反映する。
 作成したListは対象channelへread権限で共有し、Slack側を第二の正本にしない。
-Listの列はタスク、状態、優先度、Slack担当者、GitHub担当者、期限日、次の行動、リポジトリ、GitHubリンクである。
+Listの列はタスク、担当者、期限、状態、詳細の5列である。
+P0、P1、P3だけはタスク名の先頭へ優先度を表示し、通常値のP2は表示しない。
+リポジトリ名はタスク名へ含め、GitHub loginや次の行動はIssueで確認する。
 
 ```sh
 mise run slack:list
@@ -58,7 +60,9 @@ mise run slack:list:json
 初回はList IDと列IDをGit管理外の`.state`へ保存する。
 ローカル実行では`AR_LOCAL_STATE_DIR=../../.state`としてrepository rootの状態を共有し、実行directoryによるListの二重作成を防ぐ。
 2回目以降はGitHub Issue URLを安定キーとして、既存行の更新、新規行の追加、Projectから外れた行の削除を行う。
-GitHub OAuthで対応付け済みの担当者はSlackのnative user列へ反映し、未連携者はGitHub担当者列だけを表示する。
+GitHub OAuthで対応付け済みの担当者はSlackのnative user列へ反映する。
+未連携者の担当者欄は空欄とし、表示名やメールから推測しない。
+旧9列版は削除せず`ART-TRA Work（旧表示）`へ改名し、新しい5列版を別Listとして作成する。
 起動中のadapterでは、同期先channelから`/ar project sync`を実行しても同じ処理を呼び出せる。
 `/ar list sync`と従来の`/ar canvas sync`も移行用aliasとして同じ処理を呼ぶ。
 同じchannelへの同期はleaseで直列化し、Webhook、定期同期、人間の手動操作が重なって行を重複作成しない。
@@ -92,6 +96,35 @@ Slackでは`/ar approval <approval-id>`、AIや運用scriptでは次のcommand�
 mise run slack:approval -- <approval-id>
 ```
 
+## Google Calendarへ自分の仕事を同期する
+
+各利用者はGitHub連携後に、Slackで`/ar connect google`を一度実行する。
+Google OAuthは`calendar.app.created`だけを要求し、Appが作成した専用の`ART-TRA Work`カレンダーだけを管理する。
+個人の既存カレンダーや既存予定は読み取らない。
+
+同期対象は次の条件をすべて満たすProject項目に限定する。
+
+- GitHub OAuthで検証した本人のloginがAssigneeに設定されている
+- IssueとProject項目が未完了である
+- `Target date`が設定されている
+
+期限は終日予定として投影する。
+予定には状態、次の行動、GitHub Issue URLを含める。
+Issue URLから決定的なevent IDを生成するため、再実行しても予定を重複作成しない。
+担当解除、完了、Projectからの除外、期限削除時はAppが管理する該当予定だけをカレンダーから除外する。
+
+手動同期はSlackで`/ar calendar sync`を実行する。
+AIまたはローカル運用scriptはSlack user IDを明示して同じserviceを呼ぶ。
+
+```sh
+mise run slack:calendar -- --user U0123456789
+```
+
+連携解除は`/ar disconnect google`で行う。
+同期とtoken利用は停止するが、作成済みの専用カレンダーは履歴として残す。
+Googleのrefresh tokenは`AR_GOOGLE_TOKEN_KEY`を用いたAES-256-GCM暗号文だけをstate storeへ保存する。
+Google OAuthのcallback URLは`AR_PUBLIC_BASE_URL/google/callback`である。
+
 依存管理とtestにはBunを使い、Socket Modeの実行にはmise管理のNode.jsを使う。
 テスト時のGitHub操作には認証済みの`gh`を使う。本番では同じdependency interfaceをGitHub App実装へ差し替える。
 `/ar new`はrepositoryを選択した後、そのrepositoryの`.github/ISSUE_TEMPLATE/*.yml`を読み、実際のfieldからmodalを生成する。
@@ -123,10 +156,13 @@ Secret ManagerからCloud Run環境変数へ次のsecretを注入する。
 - `GITHUB_APP_PRIVATE_KEY`
 - `GITHUB_OAUTH_CLIENT_SECRET`
 - `AR_OAUTH_STATE_SECRET`
+- `GOOGLE_OAUTH_CLIENT_SECRET`
+- `AR_GOOGLE_TOKEN_KEY`
 
 GitHub App IDとinstallation IDは`GITHUB_APP_ID`、`GITHUB_APP_INSTALLATION_ID`へ設定する。
 GitHub AppのClient IDは`GITHUB_OAUTH_CLIENT_ID`へ、公開HTTPS URLは`AR_PUBLIC_BASE_URL`へ設定する。
 GitHub Appのcallback URLは`AR_PUBLIC_BASE_URL/github/callback`である。
+Google OAuth client IDは`GOOGLE_OAUTH_CLIENT_ID`へ設定し、Google Calendar APIを有効化する。
 private keyは改行を含むPEM文字列、または改行を`\\n`に置換したSecret Managerの値を受け付ける。
 GitHub Appには対象repositoryに対するMetadata read、Contents read、Issues read/write、Checks readを与える。
 ProjectsのStatus、Priority、Target dateを読むため、Organization permissionsのProjects readも与える。
@@ -145,6 +181,10 @@ Project項目、Issue、PR、reviewの変更を処理したworkerはGitHub Proje
 Webhookの取りこぼしを修復する定期同期は、固定JSON `{"schemaVersion":1,"kind":"project-list.sync"}` を`/internal/project-list-sync`へ送る。
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
 定期同期と`/ar project sync`は同じ同期serviceと決定的なrow変換を使用する。
+
+個人Calendarの定期同期は、固定JSON `{"schemaVersion":1,"kind":"calendar.sync"}` を`/internal/calendar-sync`へ送る。
+本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
+接続済み利用者ごとに本人担当項目だけを再取得し、手動の`/ar calendar sync`と同じserviceで投影する。
 
 日次作業一覧は、固定JSON `{"schemaVersion":1,"kind":"work.digest"}` を`/internal/work-digest`へ送る。
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から一日一回実行する。

@@ -16,7 +16,7 @@ const columns = Object.fromEntries(
   projectListSchema.map((column, index) => [column.key, `Col0000000${index}`]),
 ) as ProjectListColumns;
 
-const state: ProjectListState = { schemaVersion: 1, listId: "FPROJECTLIST", columns };
+const state: ProjectListState = { schemaVersion: 2, listId: "FPROJECTLIST", columns };
 
 describe("Slack Project List", () => {
   test("Projects投影用Listをread権限でchannelへ共有する", async () => {
@@ -26,13 +26,9 @@ describe("Slack Project List", () => {
         expect(input.todo_mode).toBe(true);
         expect(input.schema.map((column) => column.key)).toEqual([
           "task",
-          "status",
-          "priority",
           "assignee",
-          "github_owner",
           "target_date",
-          "next_action",
-          "repository",
+          "status",
           "github",
         ]);
         return {
@@ -171,7 +167,7 @@ describe("Slack Project List", () => {
 
     await syncProjectList(client, state, desired, async () => null);
 
-    expect(updateCalls.map((call) => call.cells.length)).toEqual([100, 8]);
+    expect(updateCalls.map((call) => call.cells.length)).toEqual([60]);
   });
 
   test("大量削除を100件単位に分割する", async () => {
