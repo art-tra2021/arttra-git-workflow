@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { openIssueRepositoryFlow } from "../src/app.ts";
+import { openIssueRepositoryFlow, transitionIssueModal } from "../src/app.ts";
 
 describe("Slack Issue modal flow", () => {
   test("短寿命のtrigger_idをrepository取得より先に使用する", async () => {
@@ -69,5 +69,56 @@ describe("Slack Issue modal flow", () => {
         slackTeamId: "T123",
       }),
     ).rejects.toThrow("Issue作成モーダルのIDをSlackから取得できませんでした。");
+  });
+
+  test("次へでは外部APIを待つ前に読み込み画面でackする", async () => {
+    const events: string[] = [];
+    const updates: Array<{ view_id: string; view: unknown }> = [];
+
+    await transitionIssueModal({
+      ack: async (input) => {
+        events.push("ack");
+        expect(JSON.stringify(input.view)).toContain("Issue種別を取得しています");
+      },
+      views: {
+        open: async () => ({ view: { id: "unused" } }),
+        update: async (input) => {
+          events.push("update");
+          updates.push(input);
+        },
+      },
+      viewId: "V123",
+      loadingText: "Issue種別を取得しています…",
+      loadNextView: async () => {
+        events.push("load");
+        return { type: "modal", title: "Issue種別" };
+      },
+    });
+
+    expect(events).toEqual(["ack", "load", "update"]);
+    expect(updates[0]?.view).toEqual({ type: "modal", title: "Issue種別" });
+  });
+
+  test("次画面の取得失敗も開いているモーダル内で案内する", async () => {
+    const updates: Array<{ view_id: string; view: unknown }> = [];
+
+    await transitionIssueModal({
+      ack: async () => undefined,
+      views: {
+        open: async () => ({ view: { id: "unused" } }),
+        update: async (input) => {
+          updates.push(input);
+        },
+      },
+      viewId: "V123",
+      loadingText: "入力項目を取得しています…",
+      loadNextView: async () => {
+        throw new Error("Issue templateを取得できませんでした。");
+      },
+    });
+
+    const updated = JSON.stringify(updates[0]?.view);
+    expect(updated).toContain("Issue templateを取得できませんでした。");
+    expect(updated).toContain("/ar new を再実行してください");
   });
 });
