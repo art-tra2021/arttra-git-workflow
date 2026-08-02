@@ -8,6 +8,7 @@ import {
   ProjectListSyncService,
   parseProjectListSyncCommand,
 } from "../src/project-list-service.ts";
+import { RetryableWorkError } from "../src/retryable-error.ts";
 import { LocalStateStore } from "../src/state-store.ts";
 
 describe("ProjectListSyncService", () => {
@@ -186,7 +187,11 @@ describe("ProjectListSyncService", () => {
 
     const first = service.sync("C123");
     await new Promise((resolve) => setTimeout(resolve, 10));
-    await expect(service.sync("C123")).rejects.toThrow("同期処理が進行中");
+    await expect(service.sync("C123")).rejects.toBeInstanceOf(RetryableWorkError);
+    await expect(service.sync("C123")).rejects.toMatchObject({
+      code: "project_list_sync_in_progress",
+      message: expect.stringContaining("同期処理が進行中"),
+    });
     release();
     await first;
     expect((await service.sync("C123")).listId).toBe("FPROJECTLIST");

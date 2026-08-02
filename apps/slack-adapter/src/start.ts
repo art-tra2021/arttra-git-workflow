@@ -22,6 +22,7 @@ import { LifecycleNotificationService } from "./lifecycle-notification-service.t
 import { NotificationThreadService } from "./notification-thread-service.ts";
 import type { ProjectListClient } from "./project-list.ts";
 import { ProjectListSyncService, parseProjectListSyncCommand } from "./project-list-service.ts";
+import { isRetryableWorkError } from "./retryable-error.ts";
 import { PullRequestReviewService } from "./review-service.ts";
 import { SlackLifecycleNotifier } from "./slack-lifecycle-notifier.ts";
 import { SlackRequirementNotifier } from "./slack-requirement-notifier.ts";
@@ -328,6 +329,14 @@ receiver?.router.post(
       const result = await projectListService.sync(projectListChannelId);
       response.status(200).json({ ok: true, schemaVersion: 1, ...result });
     } catch (error) {
+      if (isRetryableWorkError(error)) {
+        console.warn(error.message);
+        response
+          .set("Retry-After", "5")
+          .status(429)
+          .json({ ok: false, error: error.code, retryable: true, schemaVersion: 1 });
+        return;
+      }
       console.error(error instanceof Error ? error.message : "Project List同期に失敗しました。");
       response.status(500).json({ ok: false, error: "project_list_sync_failed" });
     }
@@ -463,6 +472,14 @@ receiver?.router.post(
       await webhookProcessor.process(parseQueuedJob(body));
       response.status(200).json({ ok: true, schemaVersion: 1 });
     } catch (error) {
+      if (isRetryableWorkError(error)) {
+        console.warn(error.message);
+        response
+          .set("Retry-After", "5")
+          .status(429)
+          .json({ ok: false, error: error.code, retryable: true, schemaVersion: 1 });
+        return;
+      }
       console.error(error instanceof Error ? error.message : "GitHub webhook jobに失敗しました。");
       response.status(500).json({ ok: false, error: "job_failed" });
     }

@@ -3,6 +3,7 @@ import { parseGitHubWebhookJob, verifyGitHubWebhookSignature } from "../src/gith
 import { GitHubWebhookProcessor } from "../src/github-webhook-processor.ts";
 import { CloudTasksGitHubJobQueue, signJob, verifyJobSignature } from "../src/job-queue.ts";
 import type { LifecycleNotificationService } from "../src/lifecycle-notification-service.ts";
+import { RetryableWorkError } from "../src/retryable-error.ts";
 import type { PullRequestReviewService } from "../src/review-service.ts";
 import type { StateStore } from "../src/state-store.ts";
 import type { WorkNotificationService } from "../src/work-notification-service.ts";
@@ -70,15 +71,7 @@ describe("GitHub webhook gateway", () => {
 describe("GitHubWebhookProcessor", () => {
   test("review対象eventを一度だけ処理する", async () => {
     const calls: string[] = [];
-    const values = new Map<string, unknown>();
-    const store = {
-      get: async (_namespace: string, key: string) => values.get(key) ?? null,
-      create: async (_namespace: string, key: string, value: unknown) => {
-        if (values.has(key)) return false;
-        values.set(key, value);
-        return true;
-      },
-    } as unknown as StateStore;
+    const store = memoryStore();
     const reviews = {
       process: async (repository: string, number: number) => {
         calls.push(`${repository}#${number}`);
@@ -102,15 +95,7 @@ describe("GitHubWebhookProcessor", () => {
   });
 
   test("ProjectとIssueの変更でListを再取得し、同じdeliveryを重複処理しない", async () => {
-    const values = new Map<string, unknown>();
-    const store = {
-      get: async (_namespace: string, key: string) => values.get(key) ?? null,
-      create: async (_namespace: string, key: string, value: unknown) => {
-        if (values.has(key)) return false;
-        values.set(key, value);
-        return true;
-      },
-    } as unknown as StateStore;
+    const store = memoryStore();
     let syncCount = 0;
     const processor = new GitHubWebhookProcessor(null, store, async () => {
       syncCount += 1;
@@ -142,15 +127,7 @@ describe("GitHubWebhookProcessor", () => {
   });
 
   test("CI結果の変更で人間向け即時通知を再評価する", async () => {
-    const values = new Map<string, unknown>();
-    const store = {
-      get: async (_namespace: string, key: string) => values.get(key) ?? null,
-      create: async (_namespace: string, key: string, value: unknown) => {
-        if (values.has(key)) return false;
-        values.set(key, value);
-        return true;
-      },
-    } as unknown as StateStore;
+    const store = memoryStore();
     let notificationCount = 0;
     const notifications = {
       notifyImmediate: async () => {
@@ -173,15 +150,7 @@ describe("GitHubWebhookProcessor", () => {
   });
 
   test("Issueコメントをライフサイクル通知へ一度だけ渡す", async () => {
-    const values = new Map<string, unknown>();
-    const store = {
-      get: async (_namespace: string, key: string) => values.get(key) ?? null,
-      create: async (_namespace: string, key: string, value: unknown) => {
-        if (values.has(key)) return false;
-        values.set(key, value);
-        return true;
-      },
-    } as unknown as StateStore;
+    const store = memoryStore();
     const calls: string[] = [];
     const lifecycle = {
       process: async (job: { event: string }) => {
@@ -202,4 +171,228 @@ describe("GitHubWebhookProcessor", () => {
 
     expect(calls).toEqual(["issue_comment"]);
   });
+
+  test("同じdeliveryの並列実行では副作用を一度だけ行う", async () => {
+    const store = memoryStore();
+    let lifecycleEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      lifecycleEntered = resolve;
+    });
+    let releaseLifecycle!: () => void;
+    const lifecycleGate = new Promise<void>((resolve) => {
+      releaseLifecycle = resolve;
+    });
+    let lifecycleCalls = 0;
+    const lifecycle = {
+      process: async () => {
+        lifecycleCalls += 1;
+        lifecycleEntered();
+        await lifecycleGate;
+        return 1;
+      },
+    } as unknown as LifecycleNotificationService;
+    const processor = new GitHubWebhookProcessor(null, store, undefined, null, lifecycle);
+    const job = {
+      schemaVersion: 1 as const,
+      deliveryId: "delivery-parallel",
+      event: "issue_comment",
+      payload: { action: "created" },
+    };
+
+    const first = processor.process(job);
+    await entered;
+    const second = processor.process(job);
+    await second;
+    releaseLifecycle();
+    await first;
+
+    expect(lifecycleCalls).toBe(1);
+  });
+
+  test("Project List同期競合の再試行では通知副作用を二重化しない", async () => {
+    const store = memoryStore();
+    let syncCalls = 0;
+    let lifecycleCalls = 0;
+    let notificationCalls = 0;
+    const processor = new GitHubWebhookProcessor(
+      null,
+      store,
+      async () => {
+        syncCalls += 1;
+        if (syncCalls === 1) {
+          throw new RetryableWorkError(
+            "project_list_sync_in_progress",
+            "Slack Project Listの同期処理が進行中です。",
+          );
+        }
+      },
+      {
+        notifyImmediate: async () => {
+          notificationCalls += 1;
+          return 1;
+        },
+      } as unknown as WorkNotificationService,
+      {
+        process: async () => {
+          lifecycleCalls += 1;
+          return 1;
+        },
+      } as unknown as LifecycleNotificationService,
+    );
+    const job = {
+      schemaVersion: 1 as const,
+      deliveryId: "delivery-sync-retry",
+      event: "issues",
+      payload: { action: "assigned" },
+    };
+
+    await expect(processor.process(job)).rejects.toMatchObject({
+      code: "project_list_sync_in_progress",
+    });
+    expect(syncCalls).toBe(1);
+    expect(lifecycleCalls).toBe(0);
+    expect(notificationCalls).toBe(0);
+
+    await processor.process(job);
+    expect(syncCalls).toBe(2);
+    expect(lifecycleCalls).toBe(1);
+    expect(notificationCalls).toBe(1);
+  });
+
+  test("外部副作用開始後に失敗したdeliveryを再試行しても副作用を再実行しない", async () => {
+    const store = memoryStore();
+    let reviewCalls = 0;
+    let lifecycleCalls = 0;
+    const reviews = {
+      process: async () => {
+        reviewCalls += 1;
+        return null;
+      },
+    } as unknown as PullRequestReviewService;
+    const lifecycle = {
+      process: async () => {
+        lifecycleCalls += 1;
+        throw new Error("Slack通知が一時的に失敗しました。");
+      },
+    } as unknown as LifecycleNotificationService;
+    const processor = new GitHubWebhookProcessor(reviews, store, undefined, null, lifecycle);
+    const job = {
+      schemaVersion: 1 as const,
+      deliveryId: "delivery-effects-failed",
+      event: "pull_request",
+      payload: {
+        action: "opened",
+        repository: { full_name: "example/repo" },
+        pull_request: { number: 41 },
+      },
+    };
+
+    await expect(processor.process(job)).rejects.toThrow("Slack通知が一時的に失敗");
+    await processor.process(job);
+
+    expect(reviewCalls).toBe(1);
+    expect(lifecycleCalls).toBe(1);
+    expect(await store.get("github-delivery", job.deliveryId)).toMatchObject({
+      status: "failed",
+    });
+  });
+
+  test("schemaVersion 1のdelivery markerは完了済みとして扱う", async () => {
+    const store = memoryStore();
+    await store.set("github-delivery", "delivery-legacy", {
+      schemaVersion: 1,
+      processedAt: "2026-08-02T00:00:00.000Z",
+      event: "issue_comment",
+    });
+    let lifecycleCalls = 0;
+    const lifecycle = {
+      process: async () => {
+        lifecycleCalls += 1;
+        return 1;
+      },
+    } as unknown as LifecycleNotificationService;
+    const processor = new GitHubWebhookProcessor(null, store, undefined, null, lifecycle);
+
+    await processor.process({
+      schemaVersion: 1,
+      deliveryId: "delivery-legacy",
+      event: "issue_comment",
+      payload: { action: "created" },
+    });
+
+    expect(lifecycleCalls).toBe(0);
+    expect(await store.get("github-delivery", "delivery-legacy")).toMatchObject({
+      schemaVersion: 1,
+    });
+  });
+
+  test("effects_startedは期限切れでもdelivery権を奪わない", async () => {
+    const store = memoryStore();
+    await store.set("github-delivery", "delivery-effects-started", {
+      schemaVersion: 2,
+      revision: 7,
+      status: "effects_started",
+      owner: "previous-worker",
+      event: "issue_comment",
+      expiresAt: new Date(0).toISOString(),
+      effectsStartedAt: "2026-08-01T23:00:00.000Z",
+    });
+    let lifecycleCalls = 0;
+    const lifecycle = {
+      process: async () => {
+        lifecycleCalls += 1;
+        return 1;
+      },
+    } as unknown as LifecycleNotificationService;
+    const processor = new GitHubWebhookProcessor(null, store, undefined, null, lifecycle);
+
+    await processor.process({
+      schemaVersion: 1,
+      deliveryId: "delivery-effects-started",
+      event: "issue_comment",
+      payload: { action: "created" },
+    });
+
+    expect(lifecycleCalls).toBe(0);
+    expect(await store.get("github-delivery", "delivery-effects-started")).toMatchObject({
+      status: "effects_started",
+      owner: "previous-worker",
+      revision: 7,
+    });
+  });
 });
+
+function memoryStore(): StateStore {
+  const values = new Map<string, unknown>();
+  const storageKey = (namespace: string, key: string) => `${namespace}:${key}`;
+  return {
+    get: async <T>(namespace: string, key: string) =>
+      (values.get(storageKey(namespace, key)) as T | undefined) ?? null,
+    list: async <T>() => [...values.values()] as T[],
+    set: async (namespace: string, key: string, value: unknown) => {
+      values.set(storageKey(namespace, key), value);
+    },
+    create: async (namespace: string, key: string, value: unknown) => {
+      const resolved = storageKey(namespace, key);
+      if (values.has(resolved)) return false;
+      values.set(resolved, value);
+      return true;
+    },
+    compareAndSet: async (
+      namespace: string,
+      key: string,
+      expectedRevision: number,
+      value: { revision: number },
+    ) => {
+      const resolved = storageKey(namespace, key);
+      const current = values.get(resolved) as { revision?: number } | undefined;
+      if (!current || current.revision !== expectedRevision) return false;
+      values.set(resolved, value);
+      return true;
+    },
+    remove: async (namespace: string, key: string) => {
+      values.delete(storageKey(namespace, key));
+    },
+    append: async () => "event-1",
+  };
+}
