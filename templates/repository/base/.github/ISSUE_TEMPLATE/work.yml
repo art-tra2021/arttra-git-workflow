@@ -1,0 +1,34 @@
+name: 作業チケット
+description: 成果と完了条件を持つ、PRに対応する作業
+title: "[Work] "
+labels: ["type/work", "status/todo", "merge/review"]
+body:
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 完成するとどうなるか
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: 完了条件
+      value: "- [ ] "
+    validations:
+      required: true
+  - type: dropdown
+    id: merge
+    attributes:
+      label: マージ方式
+      options:
+        - 通常レビュー（既定）
+        - 自分でマージ可
+        - 緊急マージ（事後レビュー必須）
+    validations:
+      required: true

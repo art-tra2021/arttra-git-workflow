@@ -94,6 +94,33 @@ describe("GitHubWebhookProcessor", () => {
     expect(calls).toEqual(["example/repo#28"]);
   });
 
+  test("review_requestedで手動指定reviewerのreview処理を行う", async () => {
+    const calls: string[] = [];
+    const store = memoryStore();
+    const reviews = {
+      process: async (repository: string, number: number) => {
+        calls.push(`${repository}#${number}`);
+        return null;
+      },
+    } as unknown as PullRequestReviewService;
+    const processor = new GitHubWebhookProcessor(reviews, store);
+    const job = {
+      schemaVersion: 1 as const,
+      deliveryId: "delivery-review-requested",
+      event: "pull_request",
+      payload: {
+        action: "review_requested",
+        repository: { full_name: "example/repo" },
+        pull_request: { number: 28 },
+      },
+    };
+
+    await processor.process(job);
+    await processor.process(job);
+
+    expect(calls).toEqual(["example/repo#28"]);
+  });
+
   test("ProjectとIssueの変更でListを再取得し、同じdeliveryを重複処理しない", async () => {
     const store = memoryStore();
     let syncCount = 0;

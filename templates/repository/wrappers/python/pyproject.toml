@@ -1,0 +1,9 @@
+[project]
+name = "__REPOSITORY_NAME__"
+version = "0.1.0"
+description = ""
+requires-python = ">=3.13"
+dependencies = []
+
+[tool.uv]
+package = true

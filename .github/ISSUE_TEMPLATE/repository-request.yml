@@ -1,0 +1,171 @@
+name: リポジトリ開設申請
+description: ART-TRAの標準テンプレートから新しいGitHub Repositoryを開設する
+title: "[Repository Request] "
+labels: ["type/repository-request", "status/intake"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        このIssueは管理者が確認して新規Repositoryを作成するための申請である。
+        申請者が直接Repositoryを作成するのではなく、承認後に管理者がplan、dry-run、applyの順で実行する。
+
+  - type: input
+    id: repository_name
+    attributes:
+      label: Repository名
+      description: 英数字とハイフンで指定する。組織名やURLは含めない。
+      placeholder: example-product
+    validations:
+      required: true
+
+  - type: textarea
+    id: purpose
+    attributes:
+      label: 目的と概要
+      description: 何のためのRepositoryか、主な利用者と成果物を記載する。
+      placeholder: 顧客向け管理画面を開発する。担当は開発チームである。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Repositoryプロファイル
+      description: 初期ファイルと共通CIの土台を選ぶ。後からprofileを変更する場合は同期PRを使う。
+      options:
+        - minimal
+        - python
+        - typescript
+        - business
+      default: 0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: visibility
+    attributes:
+      label: 可視性
+      description: 機密情報や顧客情報を含む場合はprivateを選ぶ。publicへの変更は別途確認する。
+      options:
+        - private
+        - internal
+        - public
+      default: 0
+    validations:
+      required: true
+
+  - type: input
+    id: owner_team
+    attributes:
+      label: 所有チーム
+      description: GitHub Organizationのteam slugを指定する。
+      placeholder: product-team
+    validations:
+      required: true
+
+  - type: dropdown
+    id: risk_level
+    attributes:
+      label: リスク水準
+      options:
+        - low
+        - standard
+        - high
+        - critical
+      default: 1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: review_policy
+    attributes:
+      label: 既定のレビュー方針
+      description: 軽微な変更の例外はRepository作成後にRulesetの範囲で設定する。
+      options:
+        - standard
+        - flexible
+        - strict
+      default: 0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ci_profile
+    attributes:
+      label: CIプロファイル
+      description: CIで使用する言語・成果物の種類を選ぶ。profileと異なる場合は理由を概要へ記載する。
+      options:
+        - inherit
+        - python
+        - typescript
+        - rust
+        - mixed
+        - documents
+        - unmanaged
+      default: 0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: project_mode
+    attributes:
+      label: GitHub Projectの扱い
+      description: shared-viewでは全社Projectを正本にし、このRepository用の保存Viewを作る。顧客・機密境界が必要な場合だけisolated-templateを選ぶ。
+      options:
+        - shared-view
+        - isolated-template
+      default: 0
+    validations:
+      required: true
+
+  - type: input
+    id: slack_channel
+    attributes:
+      label: Slackチャンネル
+      description: 対応するSlackチャンネルを#channel-nameで指定する。未定なら「未定」と記載する。
+      placeholder: "#proj-example"
+    validations:
+      required: true
+
+  - type: textarea
+    id: initial_teams
+    attributes:
+      label: 初期アクセスチーム
+      description: GitHub team slugを1行1チームで記載する。直接個人を追加する場合は理由を記載する。
+      placeholder: |
+        product-team
+        sales-team
+    validations:
+      required: true
+
+  - type: dropdown
+    id: data_sensitivity
+    attributes:
+      label: データの機微性
+      description: Repositoryへ保存する情報のうち最も高い水準を選ぶ。secretや実データはIssueへ貼らない。
+      options:
+        - none
+        - internal
+        - confidential
+        - restricted
+      default: 1
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_requirements
+    attributes:
+      label: 追加要件・既存システムとの関係
+      description: Ruleset、Custom Properties、Project項目、Slack通知、外部連携などを指定する。なければ「なし」と記載する。
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: 申請者確認
+      options:
+        - label: secret、token、個人情報などをこのIssueへ貼っていない
+          required: true
+        - label: CDや本番デプロイはRepository作成後にプロジェクト固有の手順として設計することを理解した
+          required: true

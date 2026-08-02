@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "template_id": "arttra-repository-typescript",
+  "display_name": "ART-TRA TypeScript",
+  "base": "../../base",
+  "profile": "typescript",
+  "ci_profile": "typescript",
+  "repo_kind": "product",
+  "overlay_paths": [".mise.profile.toml", "package.json", "README.md"],
+  "managed_paths": ["AGENTS.md", ".github", ".mise.toml", ".mise.profile.toml", "hk.pkl", "arttra.toml", "governance", "package.json", "template.lock.json"],
+  "optional_tools": ["node", "bun"],
+  "post_create": ["replace_placeholders", "merge_mise_profile", "mise_trust", "setup_ar", "ready"]
+}

@@ -104,8 +104,14 @@ depends = ["slack:install"]
 run = "bun run --cwd apps/slack-adapter calendar:sync --"
 
 [tasks."slack:canvas"]
-description = "slack:listの移行用alias"
-run = "mise run slack:list"
+description = "GitHub Projectsを実Slack Canvasへscope付きで同期する"
+depends = ["slack:install"]
+run = "bun run --cwd apps/slack-adapter project-canvas:sync --"
+
+[tasks."slack:canvas:json"]
+description = "GitHub ProjectsからSlack Canvasへ同期しAI向けJSON結果を返す"
+depends = ["slack:install"]
+run = "bun run --cwd apps/slack-adapter project-canvas:sync -- --json"
 
 [tasks."slack:approval"]
 description = "Issue承認のversion付きJSON statusを取得する"

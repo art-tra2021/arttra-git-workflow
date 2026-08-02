@@ -29,6 +29,26 @@ import type {
 
 export type GitHubFetch = (input: string, init?: RequestInit) => Promise<Response>;
 
+/** GitHub loginから見えるrepositoryの最小公開モデル。 */
+export interface AccessibleRepository {
+  fullName: string;
+  permission: RepositoryPermission;
+  visibility: "public" | "private" | "internal";
+}
+
+/** repository名・GitHub loginの組み合わせを安全側で拒否したときのエラー。 */
+export class RepositoryAccessDeniedError extends Error {
+  readonly repository: string;
+  readonly githubLogin: string;
+
+  constructor(repository: string, githubLogin: string) {
+    super(`GitHub @${githubLogin} は${repository}を参照する権限がありません。`);
+    this.name = "RepositoryAccessDeniedError";
+    this.repository = repository;
+    this.githubLogin = githubLogin;
+  }
+}
+
 interface GitHubAppConfig {
   appId: string;
   installationId: string;
@@ -51,7 +71,21 @@ interface InstallationToken {
 
 interface InstallationRepositories {
   total_count: number;
-  repositories: Array<{ full_name: string; archived: boolean }>;
+  repositories: Array<{
+    full_name: string;
+    archived: boolean;
+    private?: boolean;
+    visibility?: string | null;
+  }>;
+}
+
+type InstallationRepository = InstallationRepositories["repositories"][number];
+
+interface ApiRepository {
+  full_name?: string;
+  archived?: boolean;
+  private?: boolean;
+  visibility?: string | null;
 }
 
 interface ApiIssue {
@@ -78,6 +112,11 @@ interface CachedToken {
   permissions: Record<string, string>;
 }
 
+interface CachedIssueTemplates {
+  templates: IssueTemplateSchema[];
+  expiresAt: number;
+}
+
 export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubReviewClient {
   private readonly config: Required<
     Pick<
@@ -90,7 +129,7 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
   private readonly now: () => number;
   private readonly resolveGitHubLogin: (slackUserId: string) => Promise<string>;
   private readonly project: { owner: string; number: number } | null;
-  private readonly templateCache = new Map<string, IssueTemplateSchema[]>();
+  private readonly templateCache = new Map<string, CachedIssueTemplates>();
   private token: CachedToken | null = null;
 
   constructor(config: GitHubAppConfig) {
@@ -103,36 +142,114 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
   }
 
   async listRepositories(): Promise<string[]> {
-    const allowedOwners = new Set(this.config.owners.map((owner) => owner.toLowerCase()));
-    const repositories: string[] = [];
-    for (let page = 1; ; page += 1) {
-      const result = await this.api<InstallationRepositories>(
-        `/installation/repositories?per_page=100&page=${page}`,
-      );
-      repositories.push(
-        ...result.repositories
-          .filter(
-            (repository) =>
-              !repository.archived &&
-              allowedOwners.has((repository.full_name.split("/")[0] ?? "").toLowerCase()),
-          )
-          .map((repository) => repository.full_name),
-      );
-      if (page * 100 >= result.total_count || result.repositories.length === 0) {
-        break;
-      }
-    }
-    const unique = [...new Set(repositories)].filter(
+    const repositories = await this.installationRepositories();
+    const unique = [...new Set(repositories.map((repository) => repository.full_name))].filter(
       (repository) => repository !== this.config.repository,
     );
     return [this.config.repository, ...unique.sort()];
   }
 
+  /**
+   * Installationが参照でき、かつ指定GitHub loginがread以上で参照できるrepositoryを返す。
+   *
+   * Installation tokenはApp自身の権限しか表さないため、private/internal repositoryでは
+   * collaborator permission APIで利用者のeffective permissionを再確認する。public repository
+   * はGitHubの公開read権限を明示的に`read`として扱い、権限APIが404になる通常ケースでも
+   * 正しく候補へ含める。不明なvisibility・403・404は候補から除外する。
+   */
+  async listAccessibleRepositories(githubLogin: string): Promise<AccessibleRepository[]> {
+    const viewer = normalizeGitHubLogin(githubLogin);
+    const candidates = await this.installationRepositories();
+    const accessible = await Promise.all(
+      candidates.map(async (candidate): Promise<AccessibleRepository | null> => {
+        const visibility = await this.repositoryVisibility(candidate);
+        if (!visibility) return null;
+        const permission =
+          visibility === "public"
+            ? ("read" as const)
+            : await this.repositoryPermission(candidate.full_name, viewer);
+        if (permission === "none") return null;
+        return { fullName: candidate.full_name, permission, visibility };
+      }),
+    );
+    return accessible
+      .filter((repository): repository is AccessibleRepository => repository !== null)
+      .sort((left, right) => compareStrings(left.fullName, right.fullName));
+  }
+
+  /** repository picker向けのviewer-awareな名前だけのAPI。 */
+  async listRepositoriesForViewer(githubLogin: string): Promise<string[]> {
+    const repositories = await this.listAccessibleRepositories(githubLogin);
+    return repositories.map((repository) => repository.fullName);
+  }
+
+  /**
+   * Issue作成・template取得前に、利用者が対象repositoryを参照できることを確認する。
+   * read権限も候補としては有効だが、作成操作自体はGitHub AppのIssues write権限で行う。
+   */
+  async assertRepositoryAccess(
+    repository: string,
+    githubLogin: string,
+  ): Promise<AccessibleRepository> {
+    const normalizedRepository = normalizeRepositoryName(repository);
+    const viewer = normalizeGitHubLogin(githubLogin);
+    const accessible = await this.listAccessibleRepositories(viewer);
+    const match = accessible.find(
+      (candidate) => candidate.fullName.toLowerCase() === normalizedRepository.toLowerCase(),
+    );
+    if (!match) {
+      throw new RepositoryAccessDeniedError(repository, viewer);
+    }
+    return match;
+  }
+
+  private async installationRepositories(): Promise<InstallationRepository[]> {
+    const allowedOwners = new Set(this.config.owners.map((owner) => owner.toLowerCase()));
+    const repositories: InstallationRepository[] = [];
+    for (let page = 1; ; page += 1) {
+      const result = await this.api<InstallationRepositories>(
+        `/installation/repositories?per_page=100&page=${page}`,
+      );
+      repositories.push(
+        ...result.repositories.filter(
+          (repository) =>
+            !repository.archived &&
+            allowedOwners.has((repository.full_name.split("/")[0] ?? "").toLowerCase()),
+        ),
+      );
+      if (page * 100 >= result.total_count || result.repositories.length === 0) {
+        break;
+      }
+    }
+    const seen = new Set<string>();
+    return repositories.filter((repository) => {
+      const key = repository.full_name.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  private async repositoryVisibility(
+    candidate: InstallationRepository,
+  ): Promise<AccessibleRepository["visibility"] | null> {
+    const known = normalizeVisibility(candidate.visibility, candidate.private);
+    if (known) return known;
+    try {
+      const repository = await this.api<ApiRepository>(`/repos/${candidate.full_name}`);
+      return normalizeVisibility(repository.visibility, repository.private);
+    } catch (error) {
+      if (error instanceof GitHubApiError && (error.status === 403 || error.status === 404)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   async listIssueTemplates(repository: string): Promise<IssueTemplateSchema[]> {
     const cached = this.templateCache.get(repository);
-    if (cached) {
-      return cached;
-    }
+    if (cached && cached.expiresAt > this.now()) return [...cached.templates];
+    if (cached) this.templateCache.delete(repository);
     const entries = await this.api<ContentEntry[]>(
       `/repos/${repository}/contents/.github/ISSUE_TEMPLATE`,
     );
@@ -151,7 +268,10 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
           ),
       )
     ).filter((template): template is IssueTemplateSchema => template !== null);
-    this.templateCache.set(repository, templates);
+    this.templateCache.set(repository, {
+      templates,
+      expiresAt: this.now() + 5 * 60 * 1000,
+    });
     return templates;
   }
 
@@ -172,15 +292,26 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     repository: string,
     issueNumber: number,
     _slackUserId?: string,
+    viewerGitHubLogin?: string,
   ): Promise<HumanWorkItem> {
+    if (!viewerGitHubLogin) throw new Error("Issueの担当者となるGitHub loginが必要です。");
+    const viewer = normalizeGitHubLogin(viewerGitHubLogin);
+    await this.assertRepositoryAccess(repository, viewer);
     const issue = await this.api<ApiIssue>(`/repos/${repository}/issues/${issueNumber}`, {
       method: "PATCH",
-      body: JSON.stringify({ assignees: [this.config.githubLogin] }),
+      body: JSON.stringify({ assignees: [viewer] }),
     });
-    return toHumanWorkItem(toSnapshot(issue), this.config.githubLogin);
+    return toHumanWorkItem(toSnapshot(issue), viewer);
   }
 
-  async createIssue(command: CreateIssueCommand): Promise<CreatedIssue> {
+  async createIssue(
+    command: CreateIssueCommand,
+    viewerGitHubLogin?: string,
+  ): Promise<CreatedIssue> {
+    const viewer = await this.resolveIssueViewer(command, viewerGitHubLogin);
+    if (viewer) {
+      await this.assertRepositoryAccess(command.repository, viewer);
+    }
     const schema = (await this.listIssueTemplates(command.repository)).find(
       (template) => template.id === command.template,
     );
@@ -195,7 +326,14 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     return { number: issue.number, title: issue.title, url: issue.html_url };
   }
 
-  async validateIssueAuthorization(command: CreateIssueCommand): Promise<void> {
+  async validateIssueAuthorization(
+    command: CreateIssueCommand,
+    viewerGitHubLogin?: string,
+  ): Promise<void> {
+    const viewer = await this.resolveIssueViewer(command, viewerGitHubLogin);
+    if (viewer) {
+      await this.assertRepositoryAccess(command.repository, viewer);
+    }
     await this.installationToken();
     const permissions = this.token?.permissions ?? {};
     if (permissions.issues !== "write") {
@@ -227,9 +365,9 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
         return "none";
       }
       if (error instanceof GitHubApiError && error.status === 403) {
-        throw new Error(
-          "GitHub Appでrepository権限を確認できません。Administration read権限を確認してください。",
-        );
+        // 権限APIを読めない場合にglobal候補へ戻すとprivate repositoryが漏れるため、
+        // 例外ではなくnoneとしてfail-closedで扱う。
+        return "none";
       }
       throw error;
     }
@@ -329,6 +467,19 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       method: "POST",
       body: JSON.stringify({ reviewers: reviewerLogins, team_reviewers: teamSlugs }),
     });
+  }
+
+  private async resolveIssueViewer(
+    command: CreateIssueCommand,
+    explicitViewer?: string,
+  ): Promise<string | null> {
+    if (explicitViewer !== undefined) {
+      return normalizeGitHubLogin(explicitViewer);
+    }
+    // 旧CLIやmigration用のJSON command（slackTeamIdを持たないもの）は、
+    // 既存の非対話契約を壊さないようviewer確認を明示指定時だけ行う。
+    if (!command.slackTeamId) return null;
+    return normalizeGitHubLogin(await this.resolveGitHubLogin(command.actor));
   }
 
   private async projectIssues(
@@ -569,6 +720,37 @@ export class GitHubApiError extends Error {
     this.name = "GitHubApiError";
     this.status = status;
   }
+}
+
+function normalizeGitHubLogin(value: string): string {
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9-]{1,39}$/.test(normalized)) {
+    throw new Error("GitHub loginが不正です。");
+  }
+  return normalized;
+}
+
+function normalizeRepositoryName(value: string): string {
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9_.-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/.test(normalized)) {
+    throw new Error("repository名が不正です。");
+  }
+  return normalized;
+}
+
+function normalizeVisibility(
+  visibility: string | null | undefined,
+  isPrivate: boolean | undefined,
+): AccessibleRepository["visibility"] | null {
+  if (visibility === "public") return "public";
+  if (visibility === "internal") return "internal";
+  if (visibility === "private" || isPrivate === true) return "private";
+  if (isPrivate === false) return "public";
+  return null;
+}
+
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function normalizeRepositoryPermission(value: string | undefined): RepositoryPermission {

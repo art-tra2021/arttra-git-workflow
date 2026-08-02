@@ -27,7 +27,16 @@ describe("GitHubIdentityService", () => {
     });
     expect(identity).not.toHaveProperty("token");
     expect(await service.get("T123", "U123")).toEqual(identity);
+    expect(await service.requireGitHubLogin("T123", "U123")).toBe("octocat");
     expect(service.complete("oauth-code", state)).rejects.toThrow("使用済み");
+  });
+
+  test("未連携viewerのlogin解決はglobal repository候補を返さず失敗する", async () => {
+    const root = await mkdtemp(join(tmpdir(), "arttra-identity-missing-"));
+    const service = identityService(root);
+    await expect(service.requireGitHubLogin("T123", "U404")).rejects.toThrow(
+      "<@U404> はGitHub未連携です",
+    );
   });
 
   test("改ざんしたstateをGitHubへ送る前に拒否する", async () => {
@@ -71,6 +80,55 @@ describe("GitHubIdentityService", () => {
     expect(await service.disconnect("T123", "U123")).toBe(true);
     expect(await service.get("T123", "U123")).toBeNull();
     expect(await service.findByGitHubUserId("T123", 987)).toBeNull();
+  });
+
+  test("別GitHubアカウントへの再連携前に旧projection失効処理を完了する", async () => {
+    const root = await mkdtemp(join(tmpdir(), "arttra-identity-relink-"));
+    let nonce = 0;
+    let currentCode = "";
+    const service = new GitHubIdentityService({
+      clientId: "client-id",
+      clientSecret: "client-secret",
+      stateSecret: "state-secret-with-at-least-32-characters",
+      publicBaseUrl: "https://slack.example",
+      store: new LocalStateStore(root),
+      now: () => NOW,
+      nonce: () => `nonce-${++nonce}`,
+      githubBaseUrl: "https://github.example",
+      githubApiBaseUrl: "https://api.github.example",
+      fetch: async (input, init) => {
+        if (input.endsWith("/login/oauth/access_token")) {
+          currentCode = String((JSON.parse(String(init?.body)) as { code: string }).code);
+          return Response.json({ access_token: `token-${currentCode}` });
+        }
+        if (input.endsWith("/user")) {
+          return Response.json(
+            currentCode === "first"
+              ? { id: 111, login: "old-account" }
+              : { id: 222, login: "new-account" },
+          );
+        }
+        throw new Error(`予期しないrequest: ${input}`);
+      },
+    });
+    const firstUrl = new URL(await service.connectUrl("T123", "U123"));
+    await service.complete("first", firstUrl.searchParams.get("state") ?? "");
+    const secondUrl = new URL(await service.connectUrl("T123", "U123"));
+    const order: string[] = [];
+
+    const replacement = await service.complete(
+      "second",
+      secondUrl.searchParams.get("state") ?? "",
+      async (previous, next) => {
+        order.push(`${previous.githubLogin}->${next.githubLogin}`);
+        expect((await service.get("T123", "U123"))?.githubLogin).toBe("old-account");
+      },
+    );
+
+    expect(order).toEqual(["old-account->new-account"]);
+    expect(replacement.githubLogin).toBe("new-account");
+    expect((await service.get("T123", "U123"))?.githubLogin).toBe("new-account");
+    expect(await service.findByGitHubUserId("T123", 111)).toBeNull();
   });
 });
 

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://art-tra2021.github.io/arttra-git-workflow/schema/template-lock.json",
+  "title": "ART-TRA materialized template lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "template_id", "profile", "baseline_version", "source_commit", "materialized_at", "managed_paths", "local_paths", "sync_policy", "secret_policy"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "template_id": {"type": "string", "const": "arttra-repository"},
+    "profile": {"type": "string", "enum": ["minimal", "python", "typescript", "business"]},
+    "baseline_version": {"type": "string", "pattern": "^[0-9]{4}\\.[0-9]{2}\\.[0-9]+$"},
+    "source_commit": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|__[A-Z_]+__)$"},
+    "materialized_at": {"type": "string", "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z|__[A-Z_]+__)$"},
+    "managed_paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "local_paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "sync_policy": {"type": "string", "const": "pull-request"},
+    "secret_policy": {"type": "string", "const": "never-copy"}
+  }
+}

@@ -98,6 +98,62 @@ describe("PullRequestReviewService", () => {
     await service.process("example/repo", 28, { reRequestChanges: true });
     expect(github.requests[1]).toEqual({ reviewers: ["alice", "bob"], teams: ["frontend"] });
   });
+
+  test("GitHubで手動指定されたreviewerをSlack identityへ通知し、再処理で重複通知しない", async () => {
+    const github = new FakeReviewClient({
+      ...context(),
+      files: [],
+      linkedIssues: [],
+      codeowners: "",
+      requestedReviewerLogins: ["carol"],
+      requestedTeamSlugs: ["backend"],
+    });
+    const notifications: ReviewRequestReadModel[] = [];
+    const service = new PullRequestReviewService(
+      github,
+      {
+        findByGitHubUserId: async (_teamId, githubUserId) =>
+          githubUserId === 303
+            ? {
+                schemaVersion: 1,
+                revision: 1,
+                slackTeamId: "T123",
+                slackUserId: "U_CAROL",
+                githubUserId,
+                githubLogin: "carol",
+                verifiedAt: "2026-08-01T00:00:00Z",
+              }
+            : null,
+      },
+      new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-review-requested-"))),
+      {
+        notify: async (model) => {
+          notifications.push(structuredClone(model));
+        },
+      },
+      { slackTeamId: "T123" },
+    );
+
+    const first = await service.process("example/repo", 28);
+    await service.process("example/repo", 28);
+
+    expect(first?.reviewers).toEqual([
+      expect.objectContaining({
+        githubUserId: 303,
+        githubLogin: "carol",
+        slackUserId: "U_CAROL",
+        notified: true,
+        reasons: ["GitHubで指定されたreviewer"],
+      }),
+    ]);
+    expect(first?.teams).toEqual([
+      { slug: "backend", reasons: ["GitHubで指定されたreviewer team"] },
+    ]);
+    expect(notifications).toHaveLength(1);
+    expect(
+      github.requests.every(({ reviewers, teams }) => reviewers.length === 0 && teams.length === 0),
+    ).toBe(true);
+  });
 });
 
 describe("reviewer構造", () => {
@@ -131,7 +187,7 @@ class FakeReviewClient implements GitHubReviewClient {
   }
 
   async resolveGitHubUsers(logins: string[]): Promise<GitHubReviewerIdentity[]> {
-    const ids: Record<string, number> = { alice: 101, bob: 202 };
+    const ids: Record<string, number> = { alice: 101, bob: 202, carol: 303 };
     return logins.map((login) => ({ id: ids[login] ?? 999, login }));
   }
 

@@ -10,6 +10,7 @@ import { buildCreateIssueCommand, MERGE_MODES } from "./issue-command.ts";
 import type { IssueMetadataSource } from "./issue-metadata-cache.ts";
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
 import { workItemBlocks } from "./presentation.ts";
+import { allAccessibleScope, type RepositoryScope, repositoryScope } from "./project-scope.ts";
 import { slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
 import type { SlackRequirementNotifier } from "./slack-requirement-notifier.ts";
 import type {
@@ -21,11 +22,14 @@ import type {
 
 const ISSUE_REPOSITORY_ACTION_ID = "ar.issue.repository.options";
 
-export interface SlackAdapterDependencies {
-  listRepositories(): Promise<string[]>;
-  listIssueTemplates(repository: string): Promise<IssueTemplateSchema[]>;
+export interface SlackAdapterDependencies extends IssueMetadataSource {
   loadWorkItems(slackUserId: string): Promise<HumanWorkItem[]>;
-  claimIssue(repository: string, issueNumber: number, slackUserId: string): Promise<HumanWorkItem>;
+  claimIssue(
+    repository: string,
+    issueNumber: number,
+    slackUserId: string,
+    viewerGitHubLogin?: string,
+  ): Promise<HumanWorkItem>;
   createIssue(command: CreateIssueCommand): Promise<CreatedIssue>;
   validateIssueAuthorization(command: CreateIssueCommand): Promise<void>;
   repositoryPermission(repository: string, githubLogin: string): Promise<RepositoryPermission>;
@@ -42,6 +46,7 @@ export interface SlackAppOptions {
   approvalService: IssueApprovalService;
   identityService: GitHubIdentityService;
   googleCalendarService?: GoogleCalendarService;
+  revokeProjectProjections?: (slackTeamId: string, slackUserId: string) => Promise<void>;
   requirementNotifier?: Pick<SlackRequirementNotifier, "requireGitHubConnection">;
   issueMetadata?: IssueMetadataSource;
   syncProjectList?: (
@@ -54,8 +59,27 @@ export interface SlackAppOptions {
     updated: number;
     deleted: number;
   }>;
+  syncProjectProjection?: (request: ProjectProjectionRequest) => Promise<ProjectProjectionResult>;
   receiver?: Receiver;
   tokenVerificationEnabled?: boolean;
+}
+
+export interface ProjectProjectionRequest {
+  kind: "list" | "canvas";
+  scope: RepositoryScope;
+  channelId: string;
+  slackTeamId: string;
+  slackUserId: string;
+}
+
+export interface ProjectProjectionResult {
+  kind: "list" | "canvas";
+  resourceId: string;
+  itemCount: number;
+  created: number;
+  updated: number;
+  deleted: number;
+  unchanged?: boolean;
 }
 
 export function createSlackApp(
@@ -75,23 +99,43 @@ export function createSlackApp(
       ? {}
       : { tokenVerificationEnabled: options.tokenVerificationEnabled }),
   });
+  const issueTemplatesForViewer = async (
+    slackTeamId: string,
+    slackUserId: string,
+    repository: string,
+  ) => {
+    const githubLogin = await options.identityService.requireGitHubLogin(slackTeamId, slackUserId);
+    if (!issueMetadata.listIssueTemplatesForViewer) {
+      throw new Error("repositoryごとのGitHub権限を確認できるbackendが設定されていません。");
+    }
+    return issueMetadata.listIssueTemplatesForViewer(githubLogin, repository);
+  };
 
   app.command("/ar", async ({ ack, client, command, respond }) => {
     const normalized = command.text.trim().toLowerCase();
     if (["new", "issue"].includes(normalized)) {
+      await ack();
       try {
-        await client.views.open({
-          trigger_id: command.trigger_id,
-          view: issueRepositoryPickerModal(
-            command.channel_id,
-            command.response_url,
-            command.team_id,
-            options.defaultRepository,
-          ),
+        await openIssueRepositoryFlow({
+          views: client.views as unknown as IssueModalViews,
+          listRepositories: async () => {
+            const githubLogin = await options.identityService.requireGitHubLogin(
+              command.team_id,
+              command.user_id,
+            );
+            if (!issueMetadata.listRepositoriesForViewer) {
+              throw new Error(
+                "repositoryごとのGitHub権限を確認できるbackendが設定されていません。",
+              );
+            }
+            return issueMetadata.listRepositoriesForViewer(githubLogin);
+          },
+          triggerId: command.trigger_id,
+          channelId: command.channel_id,
+          responseUrl: command.response_url,
+          slackTeamId: command.team_id,
         });
-        await ack();
       } catch (error) {
-        await ack();
         await respond({
           response_type: "ephemeral",
           text: slackPlain(
@@ -128,6 +172,7 @@ export function createSlackApp(
       return;
     }
     if (normalized === "disconnect github") {
+      await options.revokeProjectProjections?.(command.team_id, command.user_id);
       const removed = await options.identityService.disconnect(command.team_id, command.user_id);
       await respond({
         response_type: "ephemeral",
@@ -236,32 +281,43 @@ export function createSlackApp(
       });
       return;
     }
-    if (
-      ["project", "project sync", "list", "list sync", "canvas", "canvas sync"].includes(normalized)
-    ) {
-      if (!options.syncProjectList) {
+    let projectionRequest: Pick<ProjectProjectionRequest, "kind" | "scope"> | null;
+    try {
+      projectionRequest = parseProjectProjectionCommand(command.text, options.defaultRepository);
+    } catch (error) {
+      await respond({
+        response_type: "ephemeral",
+        text: slackPlain("error", projectProjectionErrorMessage(error)),
+      });
+      return;
+    }
+    if (projectionRequest) {
+      if (!options.syncProjectProjection) {
         await respond({
           response_type: "ephemeral",
-          text: slackPlain("warning", "Project List同期が設定されていません。"),
+          text: slackPlain("warning", "Project投影が設定されていません。"),
         });
         return;
       }
       try {
-        const result = await options.syncProjectList(command.channel_id, command.user_id);
+        const result = await options.syncProjectProjection({
+          ...projectionRequest,
+          channelId: command.channel_id,
+          slackTeamId: command.team_id,
+          slackUserId: command.user_id,
+        });
+        const label = result.kind === "canvas" ? "Canvas" : "List";
         await respond({
           response_type: "ephemeral",
           text: slackPlain(
             "success",
-            `Project Listを同期しました。対象${result.itemCount}件 / 新規${result.created}件 / 更新${result.updated}件 / 削除${result.deleted}件 / List ID: ${result.listId}`,
+            `Project ${label}を同期しました。対象${result.itemCount}件 / 新規${result.created}件 / 更新${result.updated}件 / 削除${result.deleted}件${result.unchanged ? " / 変更なし" : ""} / ${label} ID: ${result.resourceId}`,
           ),
         });
       } catch (error) {
         await respond({
           response_type: "ephemeral",
-          text: slackPlain(
-            "error",
-            error instanceof Error ? error.message : "Project Listを同期できませんでした。",
-          ),
+          text: slackPlain("error", projectProjectionErrorMessage(error)),
         });
       }
       return;
@@ -300,9 +356,22 @@ export function createSlackApp(
     await ack();
   });
 
-  app.options(ISSUE_REPOSITORY_ACTION_ID, async ({ ack, options: request }) => {
+  app.options(ISSUE_REPOSITORY_ACTION_ID, async ({ ack, body, options: request }) => {
     try {
-      const repositories = await issueMetadata.listRepositories();
+      const suggestion = body as unknown as {
+        team?: { id?: string };
+        user?: { id?: string };
+      };
+      const slackTeamId = suggestion.team?.id ?? "";
+      const slackUserId = suggestion.user?.id ?? "";
+      const githubLogin = await options.identityService.requireGitHubLogin(
+        slackTeamId,
+        slackUserId,
+      );
+      if (!issueMetadata.listRepositoriesForViewer) {
+        throw new Error("repository権限を確認できません。");
+      }
+      const repositories = await issueMetadata.listRepositoriesForViewer(githubLogin);
       await ack({ options: repositoryOptions(repositories, request.value) });
     } catch (error) {
       console.error(
@@ -312,7 +381,7 @@ export function createSlackApp(
     }
   });
 
-  app.view("ar.issue.repository", async ({ ack, client, view }) => {
+  app.view("ar.issue.repository", async ({ ack, body, client, view }) => {
     const metadata = parseMetadata(view.private_metadata);
     const repository = selectedValue(view.state.values, "repository", ISSUE_REPOSITORY_ACTION_ID);
     await transitionIssueModal({
@@ -321,13 +390,17 @@ export function createSlackApp(
       viewId: view.id,
       loadingText: "Issue種別を取得しています…",
       loadNextView: async () => {
-        const templates = await issueMetadata.listIssueTemplates(repository);
+        const templates = await issueTemplatesForViewer(
+          metadata.slackTeamId,
+          body.user.id,
+          repository,
+        );
         return issueTemplateModal({ ...metadata, repository }, templates);
       },
     });
   });
 
-  app.view("ar.issue.prepare", async ({ ack, client, view }) => {
+  app.view("ar.issue.prepare", async ({ ack, body, client, view }) => {
     const metadata = parseMetadata(view.private_metadata);
     const template = selectedValue(view.state.values, "template", "value") as IssueTemplateId;
     await transitionIssueModal({
@@ -336,9 +409,9 @@ export function createSlackApp(
       viewId: view.id,
       loadingText: "入力項目を取得しています…",
       loadNextView: async () => {
-        const schema = (await issueMetadata.listIssueTemplates(metadata.repository)).find(
-          (candidate) => candidate.id === template,
-        );
+        const schema = (
+          await issueTemplatesForViewer(metadata.slackTeamId, body.user.id, metadata.repository)
+        ).find((candidate) => candidate.id === template);
         if (!schema) {
           throw new Error(`Issue templateが見つかりません: ${template}`);
         }
@@ -351,9 +424,9 @@ export function createSlackApp(
     const metadata = parseMetadata(view.private_metadata);
     await ack();
     try {
-      const schema = (await issueMetadata.listIssueTemplates(metadata.repository)).find(
-        (candidate) => candidate.id === metadata.template,
-      );
+      const schema = (
+        await issueTemplatesForViewer(metadata.slackTeamId, body.user.id, metadata.repository)
+      ).find((candidate) => candidate.id === metadata.template);
       if (!schema) {
         throw new Error(`Issue templateが見つかりません: ${metadata.template}`);
       }
@@ -451,7 +524,26 @@ export function createSlackApp(
           if (!teamId) {
             throw new Error("承認申請のSlack workspace IDを読み取れませんでした。");
           }
+          const requesterGitHubLogin = await options.identityService.requireGitHubLogin(
+            teamId,
+            command.actor,
+          );
           resolvedCommand = await options.identityService.resolveCommand(command, teamId);
+          if (!dependencies.listRepositoriesForViewer) {
+            throw new Error("repositoryごとのGitHub権限を再確認できないbackendです。");
+          }
+          const viewerRepositories =
+            await dependencies.listRepositoriesForViewer(requesterGitHubLogin);
+          if (
+            !viewerRepositories.some(
+              (repository) =>
+                repository.toLowerCase() === resolvedCommand?.repository.toLowerCase(),
+            )
+          ) {
+            throw new Error(
+              `GitHub @${requesterGitHubLogin} は${resolvedCommand.repository}を参照できません。`,
+            );
+          }
           await dependencies.validateIssueAuthorization(resolvedCommand);
         },
         async () => {
@@ -527,20 +619,72 @@ export function createSlackApp(
       return;
     }
 
-    const item = await dependencies.claimIssue(target.repository, target.number, body.user.id);
-    await respond({
-      response_type: "ephemeral",
-      text: slackPlain("success", `${target.repository}#${target.number}を担当に設定しました。`),
-      blocks: [
-        slackHeader("success", "担当者を設定しました"),
-        slackDivider(),
-        ...workItemBlocks(item),
-      ],
-      replace_original: false,
-    });
+    try {
+      const slackTeamId = body.team?.id ?? "";
+      const viewerGitHubLogin = await options.identityService.requireGitHubLogin(
+        slackTeamId,
+        body.user.id,
+      );
+      if (!issueMetadata.listRepositoriesForViewer) {
+        throw new Error("repositoryごとのGitHub権限を確認できるbackendが設定されていません。");
+      }
+      const repositories = await issueMetadata.listRepositoriesForViewer(viewerGitHubLogin);
+      if (
+        !repositories.some(
+          (repository) => repository.toLowerCase() === target.repository.toLowerCase(),
+        )
+      ) {
+        throw new Error(`GitHub @${viewerGitHubLogin} は${target.repository}を参照できません。`);
+      }
+      const item = await dependencies.claimIssue(
+        target.repository,
+        target.number,
+        body.user.id,
+        viewerGitHubLogin,
+      );
+      await respond({
+        response_type: "ephemeral",
+        text: slackPlain("success", `${target.repository}#${target.number}を担当に設定しました。`),
+        blocks: [
+          slackHeader("success", "担当者を設定しました"),
+          slackDivider(),
+          ...workItemBlocks(item),
+        ],
+        replace_original: false,
+      });
+    } catch (error) {
+      await respond({
+        response_type: "ephemeral",
+        text: slackPlain(
+          "error",
+          error instanceof Error ? error.message : "Issueを担当に設定できませんでした。",
+        ),
+      });
+    }
   });
 
   return app;
+}
+
+function projectProjectionErrorMessage(error: unknown): string {
+  const code =
+    error && typeof error === "object" && "data" in error
+      ? (error.data as { error?: unknown } | undefined)?.error
+      : undefined;
+  if (code === "missing_scope") {
+    return "Slack Appの権限が不足しています。Canvasにはcanvases:write、Listにはlists:readとlists:writeを追加し、Appを再インストールしてください。";
+  }
+  if (
+    code === "canvas_disabled_user_team" ||
+    code === "free_teams_cannot_edit_standalone_canvases" ||
+    code === "team_tier_cannot_create_channel_canvases"
+  ) {
+    return "このSlackワークスペースの契約ではCanvas APIを利用できません。List表示を使用してください。";
+  }
+  if (code === "access_denied" || code === "no_permission") {
+    return "Slack Canvasへのアクセスを設定できません。Appの参加先とCanvas権限を確認してください。";
+  }
+  return error instanceof Error ? error.message : "Project投影を同期できませんでした。";
 }
 
 export function parseIssueUrl(value: string): { repository: string; number: number } | null {
@@ -551,6 +695,28 @@ export function parseIssueUrl(value: string): { repository: string; number: numb
     return null;
   }
   return { repository: match[1], number: Number(match[2]) };
+}
+
+export function parseProjectProjectionCommand(
+  value: string,
+  defaultRepository?: string,
+): Pick<ProjectProjectionRequest, "kind" | "scope"> | null {
+  const match = value
+    .trim()
+    .match(/^(project|list|canvas)(?:\s+sync)?(?:\s+(all|mine|repo\s+\S+|\S+))?$/i);
+  if (!match) return null;
+  const kind = match[1]?.toLowerCase() === "canvas" ? "canvas" : "list";
+  const rawScope = match[2]?.trim() ?? "";
+  if (/^(all|mine)$/i.test(rawScope)) {
+    return { kind, scope: allAccessibleScope() };
+  }
+  const repository = rawScope.replace(/^repo\s+/i, "").trim() || defaultRepository?.trim();
+  if (!repository) {
+    throw new Error(
+      "repositoryを指定してください。例: `/ar canvas repo art-tra2021/example` または `/ar canvas all`",
+    );
+  }
+  return { kind, scope: repositoryScope(repository) };
 }
 
 interface IssueModalMetadata {

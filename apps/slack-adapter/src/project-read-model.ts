@@ -1,3 +1,8 @@
+import {
+  matchesRepositoryScope,
+  type RepositoryScope,
+  repositoryFromUrl,
+} from "./project-scope.ts";
 import type { Priority, WorkItemSnapshot, WorkStatus } from "./types.ts";
 
 export const PROJECT_ISSUES_QUERY = `
@@ -8,6 +13,7 @@ query ArttraWorkItems($owner: String!, $name: String!, $limit: Int!, $assignee: 
         number
         title
         url
+        repository { nameWithOwner }
         labels(first: 20) { nodes { name } }
         assignees(first: 10) { nodes { login } }
         blockedBy(first: 20) { nodes { number title url state } }
@@ -70,6 +76,7 @@ query ArttraOrganizationProjectItems($owner: String!, $number: Int!, $limit: Int
               number
               title
               url
+              repository { nameWithOwner }
               state
               labels(first: 20) { nodes { name } }
               assignees(first: 10) { nodes { login } }
@@ -100,6 +107,7 @@ export interface ProjectIssueNode {
   number: number;
   title: string;
   url: string;
+  repository?: { nameWithOwner?: string | null } | null;
   labels: { nodes: Array<{ name: string }> };
   assignees: { nodes: Array<{ login: string }> };
   blockedBy?: {
@@ -167,14 +175,16 @@ export function organizationProjectIssueNodes(
   response: OrganizationProjectItemsResponse,
   projectNumber: number,
   assignee: string | null = null,
+  scope?: RepositoryScope,
 ): ProjectIssueNode[] {
-  return organizationProjectIssuePage(response, projectNumber, assignee).issues;
+  return organizationProjectIssuePage(response, projectNumber, assignee, scope).issues;
 }
 
 export function organizationProjectIssuePage(
   response: OrganizationProjectItemsResponse,
   projectNumber: number,
   assignee: string | null = null,
+  scope?: RepositoryScope,
 ): OrganizationProjectIssuePage {
   throwGraphqlErrors(response.errors);
   const organization = response.data?.organization;
@@ -199,6 +209,15 @@ export function organizationProjectIssuePage(
     ) {
       return [];
     }
+    if (
+      scope &&
+      !matchesRepositoryScope(
+        scope,
+        content.repository?.nameWithOwner ?? repositoryFromUrl(content.url),
+      )
+    ) {
+      return [];
+    }
     return [{ ...content, projectItems: { nodes: [{ fieldValues: item.fieldValues }] } }];
   });
   return {
@@ -219,6 +238,7 @@ export function projectIssueSnapshot(issue: ProjectIssueNode): WorkItemSnapshot 
       url: issue.url,
       type: issueType(labels),
     },
+    repository: issue.repository?.nameWithOwner ?? repositoryFromUrl(issue.url),
     project: {
       status: projectStatus(fieldValue(fields, "Status")) ?? labelStatus(labels) ?? "todo",
       priority: projectPriority(fieldValue(fields, "Priority")) ?? labelPriority(labels) ?? "P2",

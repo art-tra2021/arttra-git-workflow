@@ -1,0 +1,28 @@
+[commit]
+mode = "warn"
+require_ar_trailer = true
+max_subject_length = 72
+allowed_types = ["feat", "fix", "docs", "refactor", "test", "build", "ci", "chore", "revert"]
+
+[issue]
+require_background = true
+require_goal = true
+require_done = true
+
+[command_guard]
+mode = "block"
+javascript_package_manager = "bun"
+python_package_manager = "uv"
+runtime_manager = "mise"
+
+[doctor]
+managed_commands = ["gh", "hk", "jq", "yq", "actionlint", "gitleaks", "rumdl", "shellcheck", "shfmt", "taplo", "typos", "zizmor"]
+
+[branch]
+mode = "block"
+allowed_types = ["feature", "fix", "hotfix", "chore", "docs", "refactor", "test", "release"]
+protected_branches = ["main"]
+
+[telemetry]
+mode = "local"
+path = ".arttra/local/events.jsonl"

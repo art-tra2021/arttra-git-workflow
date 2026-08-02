@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "template_id": "arttra-repository-minimal",
+  "display_name": "ART-TRA Minimal",
+  "base": "../../base",
+  "profile": "minimal",
+  "ci_profile": "unmanaged",
+  "repo_kind": "product",
+  "overlay_paths": ["README.md"],
+  "managed_paths": ["AGENTS.md", ".github", ".mise.toml", "hk.pkl", "arttra.toml", "governance", "template.lock.json"],
+  "optional_tools": [],
+  "post_create": ["replace_placeholders", "mise_trust", "setup_ar", "ready"]
+}

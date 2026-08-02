@@ -1,0 +1,52 @@
+amends "package://github.com/jdx/hk/releases/download/v1.54.0/hk@1.54.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.54.0/hk@1.54.0#/Builtins.pkl"
+
+local linters = new Mapping<String, Step> {
+  ["actionlint"] = Builtins.actionlint
+  ["case-conflict"] = Builtins.check_case_conflict
+  ["merge-conflict"] = Builtins.check_merge_conflict
+  ["newlines"] = Builtins.newlines
+  ["private-key"] = Builtins.detect_private_key
+  ["shellcheck"] = Builtins.shellcheck
+  ["shfmt"] = Builtins.shfmt
+  ["taplo"] = Builtins.taplo
+  ["trailing-whitespace"] = Builtins.trailing_whitespace
+  ["markdown"] = Builtins.rumdl
+  ["gitleaks"] = Builtins.gitleaks
+}
+
+hooks {
+  ["pre-commit"] {
+    fix = false
+    stage = false
+    stash = "none"
+    steps = linters
+  }
+  ["commit-msg"] {
+    fix = false
+    stage = false
+    stash = "none"
+    steps {
+      ["commit-message"] {
+        check = "git ar validate-commit-file {{commit_msg_file}}"
+      }
+    }
+  }
+  ["pre-push"] {
+    fix = false
+    stage = false
+    stash = "none"
+    steps {
+      ["branch-name"] {
+        check = "git ar validate-push"
+        stdin = "{{hook_stdin}}"
+      }
+    }
+  }
+  ["check"] {
+    fix = false
+    stage = false
+    stash = "none"
+    steps = linters
+  }
+}

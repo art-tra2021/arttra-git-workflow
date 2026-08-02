@@ -3,6 +3,7 @@ import { WebClient } from "@slack/web-api";
 import { raw } from "express";
 import { createSlackApp } from "./app.ts";
 import { IssueApprovalService } from "./approval.ts";
+import { type CanvasClient, CanvasProjectionService } from "./canvas-service.ts";
 import { GitHubAppDependencies } from "./github-app.ts";
 import { GitHubCliDependencies } from "./github-cli.ts";
 import { parseGitHubWebhookJob, verifyGitHubWebhookSignature } from "./github-webhook.ts";
@@ -22,6 +23,7 @@ import { LifecycleNotificationService } from "./lifecycle-notification-service.t
 import { NotificationThreadService } from "./notification-thread-service.ts";
 import type { ProjectListClient } from "./project-list.ts";
 import { ProjectListSyncService, parseProjectListSyncCommand } from "./project-list-service.ts";
+import { filterItemsByAccessibleRepositories, normalizeRepositoryScope } from "./project-scope.ts";
 import { isRetryableWorkError } from "./retryable-error.ts";
 import { PullRequestReviewService } from "./review-service.ts";
 import { SlackLifecycleNotifier } from "./slack-lifecycle-notifier.ts";
@@ -80,7 +82,13 @@ const dependencies =
           return identity.githubLogin;
         },
       })
-    : new GitHubCliDependencies(repository, githubLogin, owners, project);
+    : new GitHubCliDependencies(
+        repository,
+        githubLogin,
+        owners,
+        project,
+        required("AR_SLACK_CLI_USER_ID"),
+      );
 const issueMetadata = new IssueMetadataCache(dependencies, store);
 try {
   await issueMetadata.listRepositories();
@@ -125,15 +133,39 @@ const projectListService = new ProjectListSyncService(
   store,
   resolveSlackUserId,
 );
+const canvasProjectionService = new CanvasProjectionService(
+  slackClient as unknown as CanvasClient,
+  store,
+);
 const projectListChannelId = optional("AR_SLACK_PROJECT_LIST_CHANNEL_ID");
 const workNotificationChannelId = optional("AR_SLACK_WORK_CHANNEL_ID") ?? projectListChannelId;
+const sharedRepository = optional("AR_SLACK_SHARED_REPOSITORY");
+if ((projectListChannelId || workNotificationChannelId) && !sharedRepository) {
+  throw new Error(
+    "共有Slack channelを使う場合はAR_SLACK_SHARED_REPOSITORYで公開を許可する単一repositoryを指定してください。",
+  );
+}
+const sharedWorkSource = {
+  loadProjectItems: async () =>
+    sharedRepository
+      ? filterItemsByAccessibleRepositories(await dependencies.loadProjectItems(), [
+          sharedRepository,
+        ])
+      : [],
+};
+const sharedProjectListService = new ProjectListSyncService(
+  slackClient as unknown as ProjectListClient,
+  sharedWorkSource,
+  store,
+  resolveSlackUserId,
+);
 const notificationThreads = new NotificationThreadService(store);
 const slackLifecycleNotifier = workNotificationChannelId
   ? new SlackLifecycleNotifier(slackClient, workNotificationChannelId)
   : null;
 const workNotificationService = workNotificationChannelId
   ? new WorkNotificationService(
-      dependencies,
+      sharedWorkSource,
       store,
       new SlackWorkNotifier(slackClient, workNotificationChannelId),
       Date.now,
@@ -159,6 +191,7 @@ const reviewService =
         new SlackReviewNotifier(slackLifecycleNotifier, notificationThreads, resolveSlackUserId),
         {
           slackTeamId,
+          ...(sharedRepository ? { allowedRepositories: [sharedRepository] } : {}),
           reminderMilliseconds:
             positiveInteger(
               process.env.AR_REVIEW_REMINDER_MINUTES ?? "1440",
@@ -175,6 +208,8 @@ const lifecycleNotificationService =
         notificationThreads,
         slackLifecycleNotifier,
         resolveSlackUserId,
+        Date.now,
+        sharedRepository ? [sharedRepository] : [],
       )
     : null;
 const webhookProcessor =
@@ -182,7 +217,15 @@ const webhookProcessor =
     ? new GitHubWebhookProcessor(
         reviewService,
         store,
-        projectListChannelId ? () => projectListService.sync(projectListChannelId) : undefined,
+        projectListChannelId && sharedRepository
+          ? () =>
+              sharedProjectListService.sync(projectListChannelId, undefined, {
+                teamId: slackTeamId,
+                scope: { kind: "repo", repository: sharedRepository },
+                target: { kind: "channel", id: projectListChannelId },
+                accessibleRepositories: [sharedRepository],
+              })
+          : undefined,
         workNotificationService,
         lifecycleNotificationService,
       )
@@ -203,7 +246,10 @@ receiver?.router.get("/github/callback", async (request, response) => {
     return;
   }
   try {
-    const identity = await identityService.complete(code, state);
+    const identity = await identityService.complete(code, state, async (previous) => {
+      await canvasProjectionService.revokeViewerAccess(previous.slackTeamId, previous.slackUserId);
+      await projectListService.revokeViewerAccess(previous.slackTeamId, previous.slackUserId);
+    });
     response
       .status(200)
       .type("text/html")
@@ -315,7 +361,7 @@ receiver?.router.post(
   "/internal/project-list-sync",
   raw({ type: "application/json", limit: "1kb" }),
   async (request, response) => {
-    if (!projectListChannelId) {
+    if (!projectListChannelId || !sharedRepository) {
       response.status(503).json({ ok: false, error: "project_list_channel_required" });
       return;
     }
@@ -326,7 +372,12 @@ receiver?.router.post(
     }
     try {
       parseProjectListSyncCommand(body);
-      const result = await projectListService.sync(projectListChannelId);
+      const result = await sharedProjectListService.sync(projectListChannelId, undefined, {
+        teamId: slackTeamId,
+        scope: { kind: "repo", repository: sharedRepository },
+        target: { kind: "channel", id: projectListChannelId },
+        accessibleRepositories: [sharedRepository],
+      });
       response.status(200).json({ ok: true, schemaVersion: 1, ...result });
     } catch (error) {
       if (isRetryableWorkError(error)) {
@@ -498,11 +549,76 @@ const app = createSlackApp(dependencies, {
   identityService,
   requirementNotifier,
   issueMetadata,
+  revokeProjectProjections: async (teamId, userId) => {
+    await canvasProjectionService.revokeViewerAccess(teamId, userId);
+    await projectListService.revokeViewerAccess(teamId, userId);
+  },
   ...(googleCalendarService ? { googleCalendarService } : {}),
   syncProjectList: (channelId, requesterUserId) =>
     projectListService.sync(channelId, requesterUserId),
+  syncProjectProjection: async (request) => {
+    const githubViewer = await identityService.requireGitHubLogin(
+      request.slackTeamId,
+      request.slackUserId,
+    );
+    const accessibleRepositories = await issueMetadata.listRepositoriesForViewer(githubViewer);
+    const normalizedScope = normalizeRepositoryScope(request.scope);
+    if (
+      normalizedScope.kind === "repo" &&
+      !accessibleRepositories.some(
+        (candidate) => candidate.toLowerCase() === normalizedScope.repository?.toLowerCase(),
+      )
+    ) {
+      await canvasProjectionService.revokeViewerAccess(request.slackTeamId, request.slackUserId);
+      await projectListService.revokeViewerAccess(request.slackTeamId, request.slackUserId);
+      throw new Error(`GitHub @${githubViewer} は${normalizedScope.repository}を参照できません。`);
+    }
+    const items = filterItemsByAccessibleRepositories(
+      await dependencies.loadProjectItems(),
+      accessibleRepositories,
+    );
+    const target = { kind: "user" as const, id: request.slackUserId };
+    if (request.kind === "canvas") {
+      const result = await canvasProjectionService.sync({
+        teamId: request.slackTeamId,
+        viewerId: request.slackUserId,
+        target,
+        scope: request.scope,
+        items,
+        accessibleRepositories,
+      });
+      return {
+        kind: "canvas" as const,
+        resourceId: result.canvasId,
+        itemCount: result.itemCount,
+        created: result.created ? 1 : 0,
+        updated: result.updated ? 1 : 0,
+        deleted: 0,
+        unchanged: result.unchanged,
+      };
+    }
+    const result = await projectListService.sync(request.channelId, request.slackUserId, {
+      teamId: request.slackTeamId,
+      viewerId: request.slackUserId,
+      scope: request.scope,
+      target,
+      accessibleRepositories,
+    });
+    return {
+      kind: "list" as const,
+      resourceId: result.listId,
+      itemCount: result.itemCount,
+      created: result.created,
+      updated: result.updated,
+      deleted: result.deleted,
+    };
+  },
   tokenVerificationEnabled: process.env.AR_SLACK_TOKEN_VERIFICATION !== "off",
 });
+
+if (projectListChannelId) {
+  await sharedProjectListService.migrateLegacyChannelState(projectListChannelId);
+}
 
 if (transport === "http") {
   const port = positiveInteger(process.env.PORT ?? "8080", "PORT");

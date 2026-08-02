@@ -1,0 +1,18 @@
+name: 相談・受付
+description: 思いつき、営業相談、不具合らしきものをまず置く
+title: "[Intake] "
+labels: ["type/intake", "status/triage"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: 何がありましたか
+      description: 分かる範囲だけでよい。タスク化は整理する人が行う。
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: どうなればよいか
+    validations:
+      required: true

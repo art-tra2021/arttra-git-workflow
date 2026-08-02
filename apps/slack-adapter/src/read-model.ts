@@ -3,6 +3,7 @@ import type { HumanWorkItem, WorkItemSnapshot } from "./types.ts";
 export function toHumanWorkItem(snapshot: WorkItemSnapshot, viewer: string): HumanWorkItem {
   const base = {
     schemaVersion: 1 as const,
+    repository: snapshot.repository ?? null,
     issueNumber: snapshot.issue.number,
     title: snapshot.issue.title,
     url: snapshot.issue.url,

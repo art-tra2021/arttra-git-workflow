@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://art-tra2021.github.io/arttra-git-workflow/schema/template-registry.json",
+  "title": "ART-TRA template registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "base", "repository_profiles", "project", "sync"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "source_of_truth"],
+      "properties": {
+        "id": {"type": "string", "const": "arttra-repository-base"},
+        "path": {"type": "string", "const": "templates/repository/base"},
+        "source_of_truth": {"type": "string", "minLength": 1}
+      }
+    },
+    "repository_profiles": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["profile", "path"],
+        "properties": {
+          "profile": {"type": "string", "enum": ["minimal", "python", "typescript", "business"]},
+          "path": {"type": "string", "pattern": "^templates/repository/wrappers/[a-z]+/template\\.json$"}
+        }
+      },
+      "uniqueItems": true
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "default_mode"],
+      "properties": {
+        "id": {"type": "string", "const": "arttra-project-standard"},
+        "path": {"type": "string", "const": "templates/project/standard-project.json"},
+        "default_mode": {"type": "string", "const": "shared-view"}
+      }
+    },
+    "sync": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "managed_paths", "never_copy"],
+      "properties": {
+        "mode": {"type": "string", "const": "pull-request"},
+        "managed_paths": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true},
+        "never_copy": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true}
+      }
+    }
+  }
+}

@@ -77,6 +77,24 @@ describe("ProjectListSyncService", () => {
     await expect(service.sync("C123")).rejects.toThrow("lists:readとlists:write");
   });
 
+  test("GitHubで確認済みのrepository集合がないscope投影をfail-closedにする", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "arttra-project-list-"));
+    const service = new ProjectListSyncService(
+      {} as ProjectListClient,
+      { loadProjectItems: async () => [] },
+      new LocalStateStore(directory),
+    );
+
+    await expect(
+      service.sync("D123", "U123", {
+        teamId: "T123",
+        viewerId: "U123",
+        scope: { kind: "all-accessible" },
+        target: { kind: "user", id: "U123" },
+      }),
+    ).rejects.toThrow("確認済みのrepository集合が必要");
+  });
+
   test("既存Listを同期実行者へ共有する", async () => {
     const directory = await mkdtemp(join(tmpdir(), "arttra-project-list-"));
     const store = new LocalStateStore(directory);
@@ -152,6 +170,65 @@ describe("ProjectListSyncService", () => {
     expect((await store.get<ProjectListState>("project-list", "C123"))?.schemaVersion).toBe(3);
   });
 
+  test("scope導入前の共有ListはACLと全行を除去してからrepository限定版へ移行する", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "arttra-project-list-"));
+    const store = new LocalStateStore(directory);
+    await store.set("project-list", "C123", {
+      schemaVersion: 3,
+      listId: "FLEGACY",
+      columns: {
+        task: "Col00000000",
+        status: "Col00000001",
+        github: "Col00000002",
+        assignee: "Col00000004",
+        target_date: "Col00000005",
+      },
+    });
+    const deletedAccess: unknown[] = [];
+    const deletedRows: unknown[] = [];
+    const renamed: string[] = [];
+    const client = {
+      slackLists: {
+        create: async () => ({
+          list_id: "FSCOPED",
+          list_metadata: {
+            schema: listMetadataSchema().map((column, index) => ({
+              ...column,
+              id: `Col0000000${index}`,
+            })),
+          },
+        }),
+        access: {
+          set: async () => {},
+          delete: async (input: unknown) => void deletedAccess.push(input),
+        },
+        update: async (input: { id: string }) => void renamed.push(input.id),
+        items: {
+          list: async ({ list_id }: { list_id: string }) => ({
+            items: list_id === "FLEGACY" ? [{ id: "RecPRIVATE" }] : [],
+          }),
+          create: async () => ({ item: { id: "RecNEW" } }),
+          update: async () => {},
+          deleteMultiple: async (input: unknown) => void deletedRows.push(input),
+        },
+      },
+    } as unknown as ProjectListClient;
+    const service = new ProjectListSyncService(client, { loadProjectItems: async () => [] }, store);
+
+    const result = await service.sync("C123", undefined, {
+      teamId: "T123",
+      scope: { kind: "repo", repository: "art-tra2021/work" },
+      target: { kind: "channel", id: "C123" },
+      accessibleRepositories: ["art-tra2021/work"],
+    });
+
+    expect(result.listId).toBe("FSCOPED");
+    expect(deletedAccess).toEqual([{ list_id: "FLEGACY", channel_ids: ["C123"] }]);
+    expect(deletedRows).toEqual([{ list_id: "FLEGACY", ids: ["RecPRIVATE"] }]);
+    expect(renamed).toContain("FLEGACY");
+    expect(await store.get("project-list", "C123")).toBeNull();
+  });
+
   test("同じchannelへの同期を同時実行しない", async () => {
     const directory = await mkdtemp(join(tmpdir(), "arttra-project-list-"));
     const store = new LocalStateStore(directory);
@@ -195,6 +272,40 @@ describe("ProjectListSyncService", () => {
     release();
     await first;
     expect((await service.sync("C123")).listId).toBe("FPROJECTLIST");
+  });
+
+  test("GitHub連携解除時に個人Listのread ACLとstateを失効させる", async () => {
+    const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-project-list-")));
+    await store.set<ProjectListState>("project-list", "viewer-state", {
+      schemaVersion: 3,
+      listId: "FPROJECTPRIVATE",
+      columns: {
+        task: "Col00000000",
+        status: "Col00000001",
+        github: "Col00000002",
+        assignee: "Col00000004",
+        target_date: "Col00000005",
+      },
+      binding: {
+        teamId: "T123",
+        viewerId: "U123",
+        target: { kind: "user", id: "U123" },
+        kind: "list",
+        scope: { kind: "all-accessible" },
+      },
+      stateKey: "viewer-state",
+    });
+    const deleted: unknown[] = [];
+    const client = {
+      slackLists: {
+        access: { delete: async (input: unknown) => void deleted.push(input) },
+      },
+    } as unknown as ProjectListClient;
+    const service = new ProjectListSyncService(client, { loadProjectItems: async () => [] }, store);
+
+    expect(await service.revokeViewerAccess("T123", "U123")).toBe(1);
+    expect(deleted).toEqual([{ list_id: "FPROJECTPRIVATE", user_ids: ["U123"] }]);
+    expect(await store.get("project-list", "viewer-state")).toBeNull();
   });
 });
 

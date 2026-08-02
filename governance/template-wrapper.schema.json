@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://art-tra2021.github.io/arttra-git-workflow/schema/template-wrapper.json",
+  "title": "ART-TRA repository template wrapper",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "template_id", "display_name", "base", "profile", "ci_profile", "repo_kind", "overlay_paths", "managed_paths", "optional_tools", "post_create"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "template_id": {"type": "string", "pattern": "^arttra-repository-[a-z0-9-]+$"},
+    "display_name": {"type": "string", "minLength": 1},
+    "base": {"type": "string", "const": "../../base"},
+    "profile": {"type": "string", "enum": ["minimal", "python", "typescript", "business"]},
+    "ci_profile": {"type": "string", "enum": ["unmanaged", "python", "typescript", "documents"]},
+    "repo_kind": {"type": "string", "enum": ["product", "business", "platform", "workflow-lab"]},
+    "overlay_paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "managed_paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "optional_tools": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"}, "uniqueItems": true},
+    "post_create": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["replace_placeholders", "merge_mise_profile", "mise_trust", "setup_ar", "ready"]},
+      "uniqueItems": true
+    }
+  }
+}

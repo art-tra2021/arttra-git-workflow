@@ -3,6 +3,7 @@ import { GoogleCalendarService } from "./google-calendar-service.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
 
 const slackUserId = argument("--user") ?? required("AR_SLACK_CALENDAR_USER_ID");
+const authorizedSlackUserId = required("AR_SLACK_CLI_USER_ID");
 const owners = csv("AR_GITHUB_OWNERS");
 const service = new GoogleCalendarService({
   clientId: required("GOOGLE_OAUTH_CLIENT_ID"),
@@ -16,6 +17,7 @@ const service = new GoogleCalendarService({
     required("AR_GITHUB_LOGIN"),
     owners.length > 0 ? owners : undefined,
     projectConfig(),
+    authorizedSlackUserId,
   ),
 });
 const result = await service.syncUser(required("AR_SLACK_TEAM_ID"), slackUserId);

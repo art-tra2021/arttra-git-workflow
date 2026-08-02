@@ -1,0 +1,42 @@
+min_version = "2026.2.2"
+
+[settings]
+experimental = true
+lockfile = true
+
+[tools]
+gh = "2.97.0"
+hk = "1.54.0"
+jq = "1.8.2"
+yq = "4.53.3"
+actionlint = "1.7.12"
+gitleaks = "8.30.0"
+rumdl = "0.2.47"
+shellcheck = "0.11.0"
+shfmt = "3.13.1"
+taplo = "0.10.0"
+typos = "1.48.0"
+zizmor = "1.28.0"
+
+[tasks.setup-ar]
+description = "ART-TRAのtoolchain、hook、AI連携を初期化する"
+run = """
+mise install
+if ! command -v git-ar >/dev/null 2>&1; then
+  echo "git arが未導入です。社内セットアップ手順を確認してください。" >&2
+  exit 1
+fi
+git ar setup
+"""
+
+[tasks.doctor]
+description = "mise管理の環境を検査する"
+run = "git ar doctor"
+
+[tasks.verify]
+description = "Repository共通検査を実行する"
+run = "hk check --all --check"
+
+[tasks.ready]
+description = "セットアップと検査の完了を確認する"
+depends = ["doctor", "verify"]
