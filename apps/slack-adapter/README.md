@@ -127,7 +127,9 @@ Google OAuthのcallback URLは`AR_PUBLIC_BASE_URL/google/callback`である。
 
 依存管理とtestにはBunを使い、Socket Modeの実行にはmise管理のNode.jsを使う。
 テスト時のGitHub操作には認証済みの`gh`を使う。本番では同じdependency interfaceをGitHub App実装へ差し替える。
-`/ar new`はrepositoryを選択した後、そのrepositoryの`.github/ISSUE_TEMPLATE/*.yml`を読み、実際のfieldからmodalを生成する。
+`/ar new`はFirestoreへ永続化したrepository一覧とIssue templateを読み、実際のfieldからmodalを生成する。
+Cloud Runのinstanceが切り替わっても同じcacheを利用し、操作のたびにGitHub APIの応答を待たない。
+未登録repositoryのtemplateだけは初回選択時にGitHubから取得して永続化する。
 
 ## Cloud Run runtime
 
@@ -181,6 +183,11 @@ Project項目、Issue、PR、reviewの変更を処理したworkerはGitHub Proje
 Webhookの取りこぼしを修復する定期同期は、固定JSON `{"schemaVersion":1,"kind":"project-list.sync"}` を`/internal/project-list-sync`へ送る。
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
 定期同期と`/ar project sync`は同じ同期serviceと決定的なrow変換を使用する。
+
+Issue作成metadataの定期同期は、固定JSON `{"schemaVersion":1,"kind":"issue-metadata.sync"}` を`/internal/issue-metadata-sync`へ送る。
+本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
+同期はrepository一覧、既定repository、一度利用されたrepositoryのIssue templateをGitHubから再取得し、Firestore cacheを更新する。
+Slackの通常操作はこのcacheだけを読み、GitHubの一時的な遅延やCloud Runのcold startから分離する。
 
 個人Calendarの定期同期は、固定JSON `{"schemaVersion":1,"kind":"calendar.sync"}` を`/internal/calendar-sync`へ送る。
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
