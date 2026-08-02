@@ -85,7 +85,7 @@ export class ProjectListSyncService {
   ): Promise<ProjectListSyncResult> {
     let state = await this.store.get<ProjectListState>(STATE_NAMESPACE, channelId);
     try {
-      if (state?.schemaVersion !== 2) {
+      if (state?.schemaVersion !== 3) {
         const legacyListId = state?.listId;
         state = await createProjectList(this.client, channelId);
         await this.store.set(STATE_NAMESPACE, channelId, state);

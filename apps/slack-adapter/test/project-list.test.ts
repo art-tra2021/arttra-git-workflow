@@ -12,11 +12,15 @@ import {
 import { toHumanWorkItem } from "../src/read-model.ts";
 import { snapshot } from "./fixtures.ts";
 
-const columns = Object.fromEntries(
-  projectListSchema.map((column, index) => [column.key, `Col0000000${index}`]),
-) as ProjectListColumns;
+const columns: ProjectListColumns = {
+  task: "Col00000000",
+  status: "Col00000001",
+  github: "Col00000002",
+  assignee: "Col00000004",
+  target_date: "Col00000005",
+};
 
-const state: ProjectListState = { schemaVersion: 2, listId: "FPROJECTLIST", columns };
+const state: ProjectListState = { schemaVersion: 3, listId: "FPROJECTLIST", columns };
 
 describe("Slack Project List", () => {
   test("Projects投影用Listをread権限でchannelへ共有する", async () => {
@@ -24,17 +28,11 @@ describe("Slack Project List", () => {
     const client = clientStub({
       create: async (input) => {
         expect(input.todo_mode).toBe(true);
-        expect(input.schema.map((column) => column.key)).toEqual([
-          "task",
-          "assignee",
-          "target_date",
-          "status",
-          "github",
-        ]);
+        expect(input.schema.map((column) => column.key)).toEqual(["task", "status", "github"]);
         return {
           list_id: "FPROJECTLIST",
           list_metadata: {
-            schema: input.schema.map((column, index) => ({
+            schema: listMetadataSchema(input.schema).map((column, index) => ({
               ...column,
               id: `Col0000000${index}`,
             })),
@@ -204,7 +202,7 @@ function clientStub(overrides: ClientOverrides = {}): ProjectListClient {
         (async () => ({
           list_id: "FPROJECTLIST",
           list_metadata: {
-            schema: projectListSchema.map((column, index) => ({
+            schema: listMetadataSchema().map((column, index) => ({
               ...column,
               id: `Col0000000${index}`,
             })),
@@ -227,4 +225,13 @@ function row(id: string, url: string): ProjectListItem {
     id,
     fields: [{ column_id: columns.github, link: [{ originalUrl: url }] }],
   };
+}
+
+function listMetadataSchema(custom = projectListSchema) {
+  return [
+    ...custom,
+    { key: "todo_completed", name: "完了済み", type: "todo_completed" },
+    { key: "todo_assignee", name: "担当者", type: "todo_assignee" },
+    { key: "todo_due_date", name: "期限日", type: "todo_due_date" },
+  ];
 }

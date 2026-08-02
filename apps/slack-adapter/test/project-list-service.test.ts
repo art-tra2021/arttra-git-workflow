@@ -31,7 +31,7 @@ describe("ProjectListSyncService", () => {
           return {
             list_id: "FPROJECTLIST",
             list_metadata: {
-              schema: projectListSchema.map((column, index) => ({
+              schema: listMetadataSchema().map((column, index) => ({
                 ...column,
                 id: `Col0000000${index}`,
               })),
@@ -80,11 +80,15 @@ describe("ProjectListSyncService", () => {
     const directory = await mkdtemp(join(tmpdir(), "arttra-project-list-"));
     const store = new LocalStateStore(directory);
     await store.set("project-list", "C123", {
-      schemaVersion: 2,
+      schemaVersion: 3,
       listId: "FPROJECTLIST",
-      columns: Object.fromEntries(
-        projectListSchema.map((column, index) => [column.key, `Col0000000${index}`]),
-      ),
+      columns: {
+        task: "Col00000000",
+        status: "Col00000001",
+        github: "Col00000002",
+        assignee: "Col00000004",
+        target_date: "Col00000005",
+      },
     });
     const accessCalls: unknown[] = [];
     const client = {
@@ -109,7 +113,7 @@ describe("ProjectListSyncService", () => {
     ]);
   });
 
-  test("旧9列版を残して新しい5列版へ移行する", async () => {
+  test("独自の担当者・期限列を持つ版を残して標準5列版へ移行する", async () => {
     const directory = await mkdtemp(join(tmpdir(), "arttra-project-list-"));
     const store = new LocalStateStore(directory);
     await store.set("project-list", "C123", {
@@ -123,7 +127,7 @@ describe("ProjectListSyncService", () => {
         create: async () => ({
           list_id: "FPROJECTLIST",
           list_metadata: {
-            schema: projectListSchema.map((column, index) => ({
+            schema: listMetadataSchema().map((column, index) => ({
               ...column,
               id: `Col0000000${index}`,
             })),
@@ -145,7 +149,7 @@ describe("ProjectListSyncService", () => {
     expect(updateCalls).toContainEqual(
       expect.objectContaining({ id: "FLEGACY", name: "ART-TRA Work（旧表示）" }),
     );
-    expect((await store.get<ProjectListState>("project-list", "C123"))?.schemaVersion).toBe(2);
+    expect((await store.get<ProjectListState>("project-list", "C123"))?.schemaVersion).toBe(3);
   });
 
   test("同じchannelへの同期を同時実行しない", async () => {
@@ -160,7 +164,7 @@ describe("ProjectListSyncService", () => {
         create: async () => ({
           list_id: "FPROJECTLIST",
           list_metadata: {
-            schema: projectListSchema.map((column, index) => ({
+            schema: listMetadataSchema().map((column, index) => ({
               ...column,
               id: `Col0000000${index}`,
             })),
@@ -189,3 +193,12 @@ describe("ProjectListSyncService", () => {
     expect((await service.sync("C123")).listId).toBe("FPROJECTLIST");
   });
 });
+
+function listMetadataSchema() {
+  return [
+    ...projectListSchema,
+    { key: "todo_completed", name: "完了済み", type: "todo_completed" },
+    { key: "todo_assignee", name: "担当者", type: "todo_assignee" },
+    { key: "todo_due_date", name: "期限日", type: "todo_due_date" },
+  ];
+}

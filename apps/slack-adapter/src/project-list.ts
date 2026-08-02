@@ -5,7 +5,7 @@ export type ProjectListColumnKey = "task" | "status" | "assignee" | "target_date
 export type ProjectListColumns = Record<ProjectListColumnKey, string>;
 
 export interface ProjectListState {
-  schemaVersion: 2;
+  schemaVersion: 3;
   listId: string;
   columns: ProjectListColumns;
 }
@@ -77,23 +77,16 @@ export interface ProjectListSyncResult {
 
 export type ResolveSlackUserId = (githubLogin: string) => Promise<string | null>;
 
-const projectListColumnKeys: ProjectListColumnKey[] = [
-  "task",
-  "assignee",
-  "target_date",
-  "status",
-  "github",
-];
+const projectListColumnKeys: Record<ProjectListColumnKey, string> = {
+  task: "task",
+  assignee: "todo_assignee",
+  target_date: "todo_due_date",
+  status: "status",
+  github: "github",
+};
 
 export const projectListSchema: ProjectListSchemaColumn[] = [
   { key: "task", name: "タスク", type: "text", is_primary_column: true },
-  {
-    key: "assignee",
-    name: "担当者",
-    type: "user",
-    options: { format: "single_entity", show_member_name: true, notify_users: false },
-  },
-  { key: "target_date", name: "期限", type: "date", options: { date_format: "YYYY/MM/DD" } },
   {
     key: "status",
     name: "状態",
@@ -143,7 +136,7 @@ export async function createProjectList(
       user_ids: [requesterUserId],
     });
   }
-  return { schemaVersion: 2, listId, columns };
+  return { schemaVersion: 3, listId, columns };
 }
 
 export async function ensureProjectListDefinition(
@@ -300,12 +293,12 @@ function githubUrl(item: ProjectListItem, githubColumnId: string): string | null
 }
 
 function columnsFromSchema(schema: ProjectListSchemaColumn[]): ProjectListColumns {
-  const entries = projectListColumnKeys.map((key) => {
-    const id = schema.find((column) => column.key === key)?.id;
+  const entries = Object.entries(projectListColumnKeys).map(([stateKey, slackKey]) => {
+    const id = schema.find((column) => column.key === slackKey)?.id;
     if (!id || !/^Col[A-Z0-9]+$/i.test(id)) {
-      throw new Error(`Slack Listの列IDを取得できません: ${key}`);
+      throw new Error(`Slack Listの列IDを取得できません: ${slackKey}`);
     }
-    return [key, id] as const;
+    return [stateKey, id] as const;
   });
   return Object.fromEntries(entries) as ProjectListColumns;
 }
@@ -325,11 +318,16 @@ function assertChannelId(channelId: string): void {
 }
 
 function assertState(state: ProjectListState): void {
-  if (state.schemaVersion !== 2 || !/^F[A-Z0-9]+$/.test(state.listId)) {
+  if (state.schemaVersion !== 3 || !/^F[A-Z0-9]+$/.test(state.listId)) {
     throw new Error("Slack Listの保存状態が不正です。");
   }
   columnsFromSchema(
-    Object.entries(state.columns).map(([key, id]) => ({ key, id, name: key, type: "text" })),
+    Object.entries(state.columns).map(([key, id]) => ({
+      key: projectListColumnKeys[key as ProjectListColumnKey],
+      id,
+      name: key,
+      type: "text",
+    })),
   );
 }
 
