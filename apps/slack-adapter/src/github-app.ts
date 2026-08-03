@@ -107,6 +107,7 @@ interface ApiIssue {
   user: { login: string };
   labels: Array<string | { name?: string }>;
   assignees: Array<{ login: string }>;
+  parent_issue_url?: string | null;
   pull_request?: unknown;
 }
 
@@ -554,6 +555,7 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       body: string | null;
       draft: boolean;
       state: "open" | "closed";
+      mergeable_state?: string;
       user: { login: string };
       head: { sha: string };
       requested_reviewers: Array<{ login: string }>;
@@ -581,6 +583,7 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       headSha: pullRequest.head.sha,
       draft: pullRequest.draft,
       state: pullRequest.state,
+      mergeableState: pullRequest.mergeable_state ?? "unknown",
       body: pullRequest.body ?? "",
       files: files.map((file) => file.filename),
       linkedIssues,
@@ -613,6 +616,42 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       throw new Error(`Issue #${issueNumber}はPull Requestです。`);
     }
     return issueContext(issue);
+  }
+
+  async stopSelfMerge(
+    repository: string,
+    issueNumber: number,
+    actorLogin: string,
+    reason: string,
+  ): Promise<GitHubIssueContext> {
+    const issue = await this.loadIssueContext(repository, issueNumber);
+    if (!issue.labels.includes("merge/self")) {
+      throw new Error(`Issue #${issueNumber}はセルフマージ予定ではありません。`);
+    }
+    await this.api(`/repos/${repository}/issues/${issueNumber}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        labels: [
+          ...issue.labels.filter((label) => label !== "merge/self" && label !== "merge/review"),
+          "merge/review",
+        ],
+      }),
+    });
+    await this.api(`/repos/${repository}/issues/${issueNumber}/comments`, {
+      method: "POST",
+      body: JSON.stringify({
+        body: [
+          "## セルフマージを停止しました",
+          "",
+          `- 停止者: @${actorLogin}`,
+          `- 理由: ${reason.trim()}`,
+          "- マージ方針: `merge/self` → `merge/review`",
+          "",
+          "第三者レビューを通過するまでマージしないでください。",
+        ].join("\n"),
+      }),
+    });
+    return this.loadIssueContext(repository, issueNumber);
   }
 
   async resolveGitHubUsers(logins: string[]): Promise<GitHubReviewerIdentity[]> {
@@ -938,6 +977,11 @@ function issueContext(issue: ApiIssue): GitHubIssueContext {
     state: issue.state,
     authorLogin: issue.user.login,
     assigneeLogins: issue.assignees.map((assignee) => assignee.login),
+    labels: (issue.labels ?? []).flatMap((label) => {
+      const name = typeof label === "string" ? label : label.name;
+      return name ? [name] : [];
+    }),
+    parentIssueUrl: issue.parent_issue_url ?? null,
   };
 }
 

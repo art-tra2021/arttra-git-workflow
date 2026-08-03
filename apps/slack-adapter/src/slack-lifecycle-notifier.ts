@@ -59,6 +59,17 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
         {
           type: "actions",
           elements: [
+            ...(notification.selfMergeControl
+              ? [
+                  {
+                    type: "button" as const,
+                    text: { type: "plain_text" as const, text: "セルフマージを停止" },
+                    style: "danger" as const,
+                    action_id: "ar.self-merge.stop",
+                    value: JSON.stringify(notification.selfMergeControl),
+                  },
+                ]
+              : []),
             {
               type: "button",
               text: { type: "plain_text", text: "GitHubで確認" },
@@ -89,6 +100,9 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
 
 function kindLabel(kind: LifecycleNotificationKind): string {
   const labels: Record<LifecycleNotificationKind, string> = {
+    "issue-opened": "新しいIssue",
+    "issue-reopened": "Issueが再開されました",
+    "issue-assignment-changed": "Issueの担当者変更",
     "comment-created": "コメントが追加されました",
     "issue-completed": "Issueが完了しました",
     "pr-merged": "PRがマージされました",
@@ -98,6 +112,8 @@ function kindLabel(kind: LifecycleNotificationKind): string {
     "review-commented": "レビューコメントが追加されました",
     "review-dismissed": "レビュー結果が取り消されました",
     "revision-pushed": "差し戻し後の修正がpushされました",
+    "self-merge-scheduled": "⚠️ セルフマージ予定",
+    "self-merge-ready": "⚠️ セルフマージ予定・CI通過",
   };
   return labels[kind];
 }

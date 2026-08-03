@@ -63,4 +63,45 @@ describe("SlackLifecycleNotifier", () => {
       text: { text: "⚠️ PRが差し戻されました" },
     });
   });
+
+  test("セルフマージ予定には停止buttonを大きく表示する", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const notifier = new SlackLifecycleNotifier(
+      {
+        chat: {
+          postMessage: async (arguments_: Record<string, unknown>) => {
+            calls.push(arguments_);
+            return { ok: true, ts: "960.1" };
+          },
+        },
+      } as unknown as ConstructorParameters<typeof SlackLifecycleNotifier>[0],
+      "CWORK",
+    );
+    await notifier.notify(
+      {
+        schemaVersion: 1,
+        kind: "self-merge-scheduled",
+        resource: {
+          kind: "issue",
+          number: 44,
+          title: "通知",
+          url: "https://github.example/issues/44",
+        },
+        pullRequest: null,
+        actorLogin: "owner",
+        slackUserIds: [],
+        summary: "このIssueはセルフマージ予定です。",
+        detail: "第三者承認を待たず、本人がCI後にマージします。",
+        nextAction: "問題なら停止してください",
+        actionUrl: "https://github.example/issues/44",
+        selfMergeControl: { repository: "example/repo", issueNumber: 44 },
+      },
+      null,
+    );
+
+    const encoded = JSON.stringify(calls[0]?.blocks);
+    expect(encoded).toContain("⚠️ セルフマージ予定");
+    expect(encoded).toContain("セルフマージを停止");
+    expect(encoded).toContain("ar.self-merge.stop");
+  });
 });

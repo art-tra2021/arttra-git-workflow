@@ -29,8 +29,8 @@ describe("Issue approval policy", () => {
     expect(requiresIssueApproval(command("通常レビュー（既定）"))).toBe(false);
   });
 
-  test("自己マージと緊急マージは承認を要求する", () => {
-    expect(requiresIssueApproval(command("自分でマージ可"))).toBe(true);
+  test("自己マージは事前承認を待たず、緊急マージだけ承認を要求する", () => {
+    expect(requiresIssueApproval(command("自分でマージ可"))).toBe(false);
     expect(requiresIssueApproval(command("緊急マージ（事後レビュー必須）"))).toBe(true);
   });
 

@@ -75,7 +75,7 @@ enum Commands {
     /// Build and optionally create a policy-compliant branch.
     Branch(BranchArgs),
     /// Build and optionally create a GitHub Issue.
-    Issue(IssueArgs),
+    Issue(Box<IssueArgs>),
     /// Emit minimal repository context for AI or automation.
     Context {
         /// Return machine-readable output.
@@ -448,15 +448,57 @@ struct IssueArgs {
     merge: Option<MergeMode>,
     #[arg(long)]
     title: Option<String>,
+    /// Intake summary.
+    #[arg(long)]
+    summary: Option<String>,
+    /// Intake urgency: normal, urgent, or unknown.
+    #[arg(long, value_enum)]
+    urgency: Option<IntakeUrgency>,
+    /// Work background. Also accepted as a compatibility input for other kinds.
     #[arg(long)]
     background: Option<String>,
+    /// Work outcome. `--goal` remains as a compatibility alias.
+    #[arg(long, alias = "goal")]
+    outcome: Option<String>,
+    /// Task action.
     #[arg(long)]
-    goal: Option<String>,
+    action: Option<String>,
+    /// Current state for a business change.
+    #[arg(long)]
+    current: Option<String>,
+    /// Document, condition, or operation changed by a business Issue.
+    #[arg(long)]
+    change: Option<String>,
+    /// Required approval and approver for a business Issue.
+    #[arg(long)]
+    approval: Option<String>,
+    /// Target, impact, and do-not-touch boundaries for work and business Issues.
+    #[arg(long)]
+    scope: Option<String>,
+    /// Explicitly excluded work.
+    #[arg(long)]
+    out_of_scope: Option<String>,
+    /// Known constraints or concerns.
+    #[arg(long)]
+    known_constraints: Option<String>,
+    /// Verification procedure for work and business Issues.
+    #[arg(long)]
+    verification: Option<String>,
+    /// Optional requester acceptance notes for a work Issue.
+    #[arg(long)]
+    acceptance: Option<String>,
+    /// Optional allowed and forbidden boundaries for a task.
+    #[arg(long)]
+    boundaries: Option<String>,
+    /// Completion condition for work and task Issues.
     #[arg(long)]
     done: Option<String>,
     /// Parent Issue number.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "top_level")]
     parent: Option<u64>,
+    /// Explicitly declare a work or business Issue as a top-level outcome.
+    #[arg(long, conflicts_with = "parent")]
+    top_level: bool,
     /// Blocking Issue number. May be repeated.
     #[arg(long)]
     blocked_by: Vec<u64>,
@@ -481,6 +523,30 @@ enum IssueKind {
     Work,
     Task,
     Business,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum IntakeUrgency {
+    Normal,
+    Urgent,
+    Unknown,
+}
+
+impl IntakeUrgency {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "通常",
+            Self::Urgent => "急ぎ・まだ誰も着手していない",
+            Self::Unknown => "判断できない",
+        }
+    }
+}
+
+impl std::fmt::Display for IntakeUrgency {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
 }
 
 impl IssueKind {
@@ -514,6 +580,7 @@ impl std::fmt::Display for IssueKind {
 enum MergeMode {
     Review,
     #[value(name = "self")]
+    #[serde(rename = "self")]
     SelfMerge,
     Emergency,
 }
@@ -562,21 +629,107 @@ struct IssueDraft {
     kind: IssueKind,
     merge: Option<MergeMode>,
     title: String,
-    background: String,
-    goal: String,
-    done: String,
+    #[serde(flatten)]
+    content: IssueContent,
     parent: Option<u64>,
+    top_level: bool,
     blocked_by: Vec<u64>,
     blocking: Vec<u64>,
     target_date: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "template", rename_all = "lowercase")]
+enum IssueContent {
+    Intake {
+        summary: String,
+        urgency: IntakeUrgency,
+    },
+    Work {
+        background: String,
+        outcome: String,
+        done: String,
+        scope: String,
+        out_of_scope: Option<String>,
+        known_constraints: Option<String>,
+        verification: String,
+        acceptance: Option<String>,
+    },
+    Task {
+        action: String,
+        done: String,
+        boundaries: Option<String>,
+    },
+    Business {
+        current: String,
+        change: String,
+        approval: String,
+        scope: String,
+        out_of_scope: Option<String>,
+        known_constraints: Option<String>,
+        verification: String,
+    },
+}
+
+fn push_optional_issue_section(body: &mut String, heading: &str, value: &Option<String>) {
+    if let Some(value) = value {
+        body.push_str(&format!("\n## {heading}\n\n{value}\n"));
+    }
+}
+
 impl IssueDraft {
     fn body(&self) -> String {
-        let mut body = format!(
-            "## 背景\n\n{}\n\n## 目的\n\n{}\n\n## 完了条件\n\n- [ ] {}\n",
-            self.background, self.goal, self.done
-        );
+        let mut body = match &self.content {
+            IssueContent::Intake { summary, urgency } => {
+                format!(
+                    "## 何がありましたか\n\n{summary}\n\n## 急ぎですか\n\n{}\n",
+                    urgency.label()
+                )
+            }
+            IssueContent::Work {
+                background,
+                outcome,
+                done,
+                scope,
+                out_of_scope,
+                known_constraints,
+                verification,
+                acceptance,
+            } => {
+                let mut body = format!(
+                    "## 背景\n\n{background}\n\n## 完成するとどうなるか\n\n{outcome}\n\n## 完了条件\n\n- [ ] {done}\n\n## 対象・影響・触らない範囲\n\n{scope}\n\n## 確認方法\n\n{verification}\n"
+                );
+                push_optional_issue_section(&mut body, "今回やらないこと", out_of_scope);
+                push_optional_issue_section(&mut body, "既知の制約・懸念", known_constraints);
+                push_optional_issue_section(&mut body, "依頼者の受入確認", acceptance);
+                body
+            }
+            IssueContent::Task {
+                action,
+                done,
+                boundaries,
+            } => {
+                let mut body = format!("## やること\n\n{action}\n\n## 完了条件\n\n- [ ] {done}\n");
+                push_optional_issue_section(&mut body, "触ってよい範囲・触らない範囲", boundaries);
+                body
+            }
+            IssueContent::Business {
+                current,
+                change,
+                approval,
+                scope,
+                out_of_scope,
+                known_constraints,
+                verification,
+            } => {
+                let mut body = format!(
+                    "## 現状\n\n{current}\n\n## 変更する文書・条件・運用\n\n{change}\n\n## 誰が何を確認すればよいか\n\n{approval}\n\n## 対象・影響・触らない範囲\n\n{scope}\n\n## 確認方法\n\n{verification}\n"
+                );
+                push_optional_issue_section(&mut body, "今回やらないこと", out_of_scope);
+                push_optional_issue_section(&mut body, "既知の制約・懸念", known_constraints);
+                body
+            }
+        };
         if let Some(merge) = self.merge {
             body.push_str(&format!("\n## マージ方針\n\n`{}`\n", merge.label()));
         }
@@ -706,7 +859,7 @@ fn run() -> Result<()> {
         Some(Commands::Push(args)) => push(args),
         Some(Commands::Pr(args)) => pull_request(args),
         Some(Commands::Branch(args)) => branch_command(args),
-        Some(Commands::Issue(args)) => issue(args),
+        Some(Commands::Issue(args)) => issue(*args),
         Some(Commands::Context { json }) => context(json),
         Some(Commands::Status { issue, json }) => {
             status::show(issue, json, &Policy::load()?.branch)
@@ -970,42 +1123,356 @@ fn tui_issue(
     else {
         return Ok(None);
     };
-    let Some(background) = shell.input(
-        action,
-        home,
-        "ISSUE · 4/7",
-        "背景",
-        "なぜ今この仕事が必要なのかを入力します。",
-        "",
-        true,
-    )?
-    else {
-        return Ok(None);
-    };
-    let Some(goal) = shell.input(
-        action,
-        home,
-        "ISSUE · 5/7",
-        "目的",
-        "完了後に誰がどう助かるかを入力します。",
-        "",
-        true,
-    )?
-    else {
-        return Ok(None);
-    };
-    let Some(done) = shell.input(
-        action,
-        home,
-        "ISSUE · 6/7",
-        "完了条件",
-        "確認できる状態を一文で入力します。",
-        "",
-        true,
-    )?
-    else {
-        return Ok(None);
-    };
+    let mut content_args = Vec::new();
+    match kind {
+        IssueKind::Intake => {
+            let Some(summary) = shell.input(
+                action,
+                home,
+                "ISSUE · 4/7",
+                "何がありましたか",
+                "まだ整理できていなくても、起きたことや相談内容を書きます。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let urgency_values = ["normal", "urgent", "unknown"];
+            let urgency_choices = vec![
+                tui::PromptChoice::new("通常", "通常の順番で確認します"),
+                tui::PromptChoice::new("急ぎ・まだ誰も着手していない", "早めの確認が必要です"),
+                tui::PromptChoice::new("判断できない", "担当者が確認して判断します"),
+            ];
+            let Some(urgency_index) = shell.choose(
+                action,
+                home,
+                "ISSUE · 5/7",
+                "急ぎですか",
+                "現在の緊急度を選びます。",
+                &urgency_choices,
+                0,
+            )?
+            else {
+                return Ok(None);
+            };
+            content_args.extend([
+                "--summary".into(),
+                summary,
+                "--urgency".into(),
+                urgency_values[urgency_index].into(),
+            ]);
+        }
+        IssueKind::Work => {
+            let Some(background) = shell.input(
+                action,
+                home,
+                "ISSUE · 4/7",
+                "背景",
+                "なぜ今この仕事が必要なのかを入力します。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(outcome) = shell.input(
+                action,
+                home,
+                "ISSUE · 5/7",
+                "完成するとどうなるか",
+                "完了後に誰がどう助かるかを入力します。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(done) = shell.input(
+                action,
+                home,
+                "ISSUE · 6/7",
+                "完了条件",
+                "確認できる状態を一文で入力します。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(scope) = shell.input(
+                action,
+                home,
+                "ISSUE · 詳細",
+                "対象・影響・触らない範囲",
+                "変更対象、影響する利用者や機能、変更しない境界を入力します。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(verification) = shell.input(
+                action,
+                home,
+                "ISSUE · 詳細",
+                "確認方法",
+                "完了条件を誰がどの手順で確認できるかを入力します。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(out_of_scope) = shell.input(
+                action,
+                home,
+                "ISSUE · 詳細",
+                "今回やらないこと",
+                "別Issueへ分けた内容など。なければ空欄で構いません。",
+                "",
+                false,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(known_constraints) = shell.input(
+                action,
+                home,
+                "ISSUE · 詳細",
+                "既知の制約・懸念",
+                "制約がなければ空欄で構いません。",
+                "",
+                false,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(acceptance) = shell.input(
+                action,
+                home,
+                "ISSUE · 詳細",
+                "依頼者の受入確認",
+                "必要な場合だけ、確認手順や確認点を入力します。",
+                "",
+                false,
+            )?
+            else {
+                return Ok(None);
+            };
+            content_args.extend([
+                "--background".into(),
+                background,
+                "--outcome".into(),
+                outcome,
+                "--done".into(),
+                done,
+                "--scope".into(),
+                scope,
+                "--verification".into(),
+                verification,
+            ]);
+            push_optional_arg(&mut content_args, "--out-of-scope", &out_of_scope);
+            push_optional_arg(&mut content_args, "--known-constraints", &known_constraints);
+            push_optional_arg(&mut content_args, "--acceptance", &acceptance);
+        }
+        IssueKind::Task => {
+            let Some(action_text) = shell.input(
+                action,
+                home,
+                "ISSUE · 4/7",
+                "やること",
+                "親Issueを進めるための具体的な作業を入力します。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(done) = shell.input(
+                action,
+                home,
+                "ISSUE · 5/7",
+                "完了条件",
+                "確認できる状態を一文で入力します。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(boundaries) = shell.input(
+                action,
+                home,
+                "ISSUE · 詳細",
+                "触ってよい範囲・触らない範囲",
+                "他の人へ渡せるTaskでは、対象、禁止範囲、確認方法、相談先を入力します。",
+                "",
+                false,
+            )?
+            else {
+                return Ok(None);
+            };
+            content_args.extend(["--action".into(), action_text, "--done".into(), done]);
+            push_optional_arg(&mut content_args, "--boundaries", &boundaries);
+        }
+        IssueKind::Business => {
+            let Some(current) = shell.input(
+                action,
+                home,
+                "ISSUE · 4/7",
+                "現状",
+                "現在の文書・条件・運用と困りごとを入力します。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(change) = shell.input(
+                action,
+                home,
+                "ISSUE · 5/7",
+                "変更する文書・条件・運用",
+                "何をどう変えるかを入力します。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(approval) = shell.input(
+                action,
+                home,
+                "ISSUE · 6/7",
+                "誰が何を確認すればよいか",
+                "確認する人と承認条件を入力します。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(scope) = shell.input(
+                action,
+                home,
+                "ISSUE · 詳細",
+                "対象・影響・触らない範囲",
+                "対象文書・顧客・運用、影響、変更しない境界を入力します。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(verification) = shell.input(
+                action,
+                home,
+                "ISSUE · 詳細",
+                "確認方法",
+                "変更結果を誰がどの手順で確認できるかを入力します。",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(out_of_scope) = shell.input(
+                action,
+                home,
+                "ISSUE · 詳細",
+                "今回やらないこと",
+                "今回の完了条件に含めない内容。なければ空欄で構いません。",
+                "",
+                false,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(known_constraints) = shell.input(
+                action,
+                home,
+                "ISSUE · 詳細",
+                "既知の制約・懸念",
+                "制約がなければ空欄で構いません。",
+                "",
+                false,
+            )?
+            else {
+                return Ok(None);
+            };
+            content_args.extend([
+                "--current".into(),
+                current,
+                "--change".into(),
+                change,
+                "--approval".into(),
+                approval,
+                "--scope".into(),
+                scope,
+                "--verification".into(),
+                verification,
+            ]);
+            push_optional_arg(&mut content_args, "--out-of-scope", &out_of_scope);
+            push_optional_arg(&mut content_args, "--known-constraints", &known_constraints);
+        }
+    }
+
+    let mut parent = String::new();
+    let mut top_level = false;
+    match kind {
+        IssueKind::Task => {
+            let Some(value) = shell.input(
+                action,
+                home,
+                "ISSUE · 6/7",
+                "親の作業チケット",
+                "小タスクは親Issueが必須です。例: 86",
+                "",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            parent = value;
+        }
+        IssueKind::Work | IssueKind::Business => {
+            let hierarchy_choices = vec![
+                tui::PromptChoice::new("既存Issueの子にする", "親Issue番号を指定します"),
+                tui::PromptChoice::new("最上位として作る", "新しい成果・案件の起点にします"),
+            ];
+            let Some(index) = shell.choose(
+                action,
+                home,
+                "ISSUE · 7/7",
+                "Issueの階層",
+                "親子関係を曖昧にせず、どちらかを明示します。",
+                &hierarchy_choices,
+                0,
+            )?
+            else {
+                return Ok(None);
+            };
+            if index == 0 {
+                let Some(value) = shell.input(
+                    action,
+                    home,
+                    "ISSUE · 階層",
+                    "親Issue番号",
+                    "このIssueをまとめる上位Issueです。例: 86",
+                    "",
+                    true,
+                )?
+                else {
+                    return Ok(None);
+                };
+                parent = value;
+            } else {
+                top_level = true;
+            }
+        }
+        IssueKind::Intake => {}
+    }
     let Some(with_relations) = shell.confirm(
         action,
         home,
@@ -1021,24 +1488,25 @@ fn tui_issue(
         return Ok(None);
     };
 
-    let mut parent = String::new();
     let mut blocked_by = String::new();
     let mut blocking = String::new();
     let mut target_date = String::new();
     if with_relations {
-        let Some(value) = shell.input(
-            action,
-            home,
-            "ISSUE · 追加 1/4",
-            "親Issue番号",
-            "このIssueをまとめる上位Issueです。例: 60",
-            "",
-            false,
-        )?
-        else {
-            return Ok(None);
-        };
-        parent = value;
+        if matches!(kind, IssueKind::Intake) {
+            let Some(value) = shell.input(
+                action,
+                home,
+                "ISSUE · 追加 1/4",
+                "親Issue番号",
+                "受付内容をまとめる上位Issueがある場合だけ指定します。例: 86",
+                "",
+                false,
+            )?
+            else {
+                return Ok(None);
+            };
+            parent = value;
+        }
         let Some(value) = shell.input(
             action,
             home,
@@ -1084,17 +1552,12 @@ fn tui_issue(
     if let Some(merge) = merge {
         args.extend(["--merge".into(), merge_mode_arg(merge).into()]);
     }
-    args.extend([
-        "--title".into(),
-        title,
-        "--background".into(),
-        background,
-        "--goal".into(),
-        goal,
-        "--done".into(),
-        done,
-    ]);
+    args.extend(["--title".into(), title]);
+    args.extend(content_args);
     push_optional_arg(&mut args, "--parent", &parent);
+    if top_level {
+        args.push("--top-level".into());
+    }
     push_repeated_args(&mut args, "--blocked-by", &blocked_by);
     push_repeated_args(&mut args, "--blocking", &blocking);
     push_optional_arg(&mut args, "--target-date", &target_date);
@@ -2301,9 +2764,13 @@ fn issue(mut args: IssueArgs) -> Result<()> {
             .prompt()?,
         );
     }
-    let merge = kind
-        .needs_merge_policy()
-        .then_some(args.merge.unwrap_or(MergeMode::Review));
+    let merge = match kind {
+        IssueKind::Work | IssueKind::Business => Some(args.merge.unwrap_or(MergeMode::Review)),
+        IssueKind::Intake | IssueKind::Task if args.merge.is_none() => None,
+        IssueKind::Intake | IssueKind::Task => {
+            bail!("{}では`--merge`を指定できません", kind.label())
+        }
+    };
     if args.title.is_none() {
         ensure_interactive()?;
         args.title = Some(prompt_required_text(
@@ -2311,27 +2778,185 @@ fn issue(mut args: IssueArgs) -> Result<()> {
             "何を実現する仕事かを一文で書きます。例: Slackから営業Issueを登録できるようにする",
         )?);
     }
-    if args.background.is_none() {
-        ensure_interactive()?;
-        args.background = Some(prompt_required_text(
-            "背景（必須）",
-            "なぜ今この仕事が必要なのかを書きます。例: 営業担当がGitHubを開かず依頼したい",
-        )?);
+    let content = match kind {
+        IssueKind::Intake => {
+            if args.summary.is_none() {
+                ensure_interactive()?;
+                args.summary = Some(prompt_required_text(
+                    "何がありましたか（必須）",
+                    "まだ整理できていなくても、起きたことや相談内容を書きます",
+                )?);
+            }
+            if args.urgency.is_none() {
+                ensure_interactive()?;
+                args.urgency = Some(
+                    Select::new(
+                        "急ぎですか",
+                        vec![
+                            IntakeUrgency::Normal,
+                            IntakeUrgency::Urgent,
+                            IntakeUrgency::Unknown,
+                        ],
+                    )
+                    .prompt()?,
+                );
+            }
+            IssueContent::Intake {
+                summary: required(args.summary, "--summary", "何がありましたか")?,
+                urgency: args.urgency.ok_or_else(|| {
+                    anyhow!("急ぎですかを`--urgency <normal|urgent|unknown>`で指定してください")
+                })?,
+            }
+        }
+        IssueKind::Work => {
+            if args.background.is_none() {
+                ensure_interactive()?;
+                args.background = Some(prompt_required_text(
+                    "背景（必須）",
+                    "なぜ今この仕事が必要なのかを書きます",
+                )?);
+            }
+            if args.outcome.is_none() {
+                ensure_interactive()?;
+                args.outcome = Some(prompt_required_text(
+                    "完成するとどうなるか（必須）",
+                    "完了後に誰がどう助かるかを書きます",
+                )?);
+            }
+            if args.done.is_none() {
+                ensure_interactive()?;
+                args.done = Some(prompt_required_text(
+                    "完了条件（必須）",
+                    "確認できる状態を書きます。例: /ar newからIssueが1件作成される",
+                )?);
+            }
+            if args.scope.is_none() {
+                ensure_interactive()?;
+                args.scope = Some(prompt_required_text(
+                    "対象・影響・触らない範囲（必須）",
+                    "変更対象、影響する利用者や機能、変更しない境界を書きます",
+                )?);
+            }
+            if args.verification.is_none() {
+                ensure_interactive()?;
+                args.verification = Some(prompt_required_text(
+                    "確認方法（必須）",
+                    "完了条件を誰がどの手順で確認できるかを書きます",
+                )?);
+            }
+            if interactive {
+                prompt_issue_optional_fields(&mut args, IssueKind::Work)?;
+            }
+            IssueContent::Work {
+                background: required(args.background, "--background", "背景")?,
+                outcome: required(args.outcome, "--outcome", "完成するとどうなるか")?,
+                done: required(args.done, "--done", "完了条件")?,
+                scope: required(args.scope, "--scope", "対象・影響・触らない範囲")?,
+                out_of_scope: optional_trimmed(args.out_of_scope),
+                known_constraints: optional_trimmed(args.known_constraints),
+                verification: required(args.verification, "--verification", "確認方法")?,
+                acceptance: optional_trimmed(args.acceptance),
+            }
+        }
+        IssueKind::Task => {
+            if args.action.is_none() {
+                ensure_interactive()?;
+                args.action = Some(prompt_required_text(
+                    "やること（必須）",
+                    "親Issueを進めるための具体的な作業を書きます",
+                )?);
+            }
+            if args.done.is_none() {
+                ensure_interactive()?;
+                args.done = Some(prompt_required_text(
+                    "完了条件（必須）",
+                    "確認できる状態を書きます",
+                )?);
+            }
+            if interactive {
+                prompt_issue_optional_fields(&mut args, IssueKind::Task)?;
+            }
+            IssueContent::Task {
+                action: required(args.action, "--action", "やること")?,
+                done: required(args.done, "--done", "完了条件")?,
+                boundaries: optional_trimmed(args.boundaries),
+            }
+        }
+        IssueKind::Business => {
+            if args.current.is_none() {
+                ensure_interactive()?;
+                args.current = Some(prompt_required_text(
+                    "現状（必須）",
+                    "現在の文書・条件・運用と困りごとを書きます",
+                )?);
+            }
+            if args.change.is_none() {
+                ensure_interactive()?;
+                args.change = Some(prompt_required_text(
+                    "変更する文書・条件・運用（必須）",
+                    "何をどう変えるかを書きます",
+                )?);
+            }
+            if args.approval.is_none() {
+                ensure_interactive()?;
+                args.approval = Some(prompt_required_text(
+                    "誰が何を確認すればよいか（必須）",
+                    "確認する人と承認条件を書きます",
+                )?);
+            }
+            if args.scope.is_none() {
+                ensure_interactive()?;
+                args.scope = Some(prompt_required_text(
+                    "対象・影響・触らない範囲（必須）",
+                    "対象文書・顧客・運用、影響、変更しない境界を書きます",
+                )?);
+            }
+            if args.verification.is_none() {
+                ensure_interactive()?;
+                args.verification = Some(prompt_required_text(
+                    "確認方法（必須）",
+                    "変更結果を誰がどの手順で確認できるかを書きます",
+                )?);
+            }
+            if interactive {
+                prompt_issue_optional_fields(&mut args, IssueKind::Business)?;
+            }
+            IssueContent::Business {
+                current: required(args.current, "--current", "現状")?,
+                change: required(args.change, "--change", "変更する文書・条件・運用")?,
+                approval: required(args.approval, "--approval", "誰が何を確認すればよいか")?,
+                scope: required(args.scope, "--scope", "対象・影響・触らない範囲")?,
+                out_of_scope: optional_trimmed(args.out_of_scope),
+                known_constraints: optional_trimmed(args.known_constraints),
+                verification: required(args.verification, "--verification", "確認方法")?,
+            }
+        }
+    };
+
+    if interactive && args.parent.is_none() && !args.top_level {
+        match kind {
+            IssueKind::Task => {
+                args.parent = Some(prompt_required_issue_number(
+                    "親の作業チケット（必須）",
+                    "小タスクは親Issueが必須です。例: 86",
+                )?);
+            }
+            IssueKind::Work | IssueKind::Business => {
+                args.top_level = Confirm::new("最上位Issueとして作成しますか？")
+                    .with_help_message("いいえを選ぶと、このIssueをまとめる親Issue番号を入力します")
+                    .with_default(false)
+                    .prompt()?;
+                if !args.top_level {
+                    args.parent = Some(prompt_required_issue_number(
+                        "親Issue番号（必須）",
+                        "このIssueをまとめる上位Issueです。例: 86",
+                    )?);
+                }
+            }
+            IssueKind::Intake => {}
+        }
     }
-    if args.goal.is_none() {
-        ensure_interactive()?;
-        args.goal = Some(prompt_required_text(
-            "目的（必須）",
-            "完了後に誰がどう助かるかを書きます。例: Slack内で依頼登録を完結できる",
-        )?);
-    }
-    if args.done.is_none() {
-        ensure_interactive()?;
-        args.done = Some(prompt_required_text(
-            "完了条件（必須）",
-            "確認できる状態を書きます。例: /ar newからIssueが1件作成される",
-        )?);
-    }
+    validate_issue_hierarchy(kind, args.parent, args.top_level)?;
     if interactive
         && args.parent.is_none()
         && args.blocked_by.is_empty()
@@ -2341,10 +2966,12 @@ fn issue(mut args: IssueArgs) -> Result<()> {
             .with_default(false)
             .prompt()?
     {
-        args.parent = prompt_optional_issue_number(
-            "親Issue番号（任意）",
-            "このIssueをまとめる上位Issueです。例: 60",
-        )?;
+        if matches!(kind, IssueKind::Intake) {
+            args.parent = prompt_optional_issue_number(
+                "親Issue番号（任意）",
+                "受付内容をまとめる上位Issueがある場合だけ指定します。例: 86",
+            )?;
+        }
         args.blocked_by = parse_issue_numbers(
             &Text::new("先に終わる必要があるIssue（任意、カンマ区切り）")
                 .with_help_message("このIssueを止めている仕事です。例: 12, 34")
@@ -2367,10 +2994,9 @@ fn issue(mut args: IssueArgs) -> Result<()> {
         kind,
         merge,
         title: required(args.title, "--title", "Issueタイトル")?,
-        background: required(args.background, "--background", "背景")?,
-        goal: required(args.goal, "--goal", "目的")?,
-        done: required(args.done, "--done", "完了条件")?,
+        content,
         parent: args.parent,
+        top_level: args.top_level,
         blocked_by: args.blocked_by,
         blocking: args.blocking,
         target_date: args.target_date,
@@ -3032,6 +3658,65 @@ fn required(value: Option<String>, flag: &str, label: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{label}は空にできません。`{flag} <内容>`を指定してください"))
 }
 
+fn optional_trimmed(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn prompt_issue_optional_fields(args: &mut IssueArgs, kind: IssueKind) -> Result<()> {
+    if matches!(kind, IssueKind::Work | IssueKind::Business) {
+        if args.out_of_scope.is_none() {
+            args.out_of_scope = prompt_optional_text(
+                "今回やらないこと（任意）",
+                "別Issueへ分けた内容や今回の完了条件に含めない内容を書きます",
+            )?;
+        }
+        if args.known_constraints.is_none() {
+            args.known_constraints =
+                prompt_optional_text("既知の制約・懸念（任意）", "制約がなければ空欄で構いません")?;
+        }
+    }
+    if matches!(kind, IssueKind::Work) && args.acceptance.is_none() {
+        args.acceptance = prompt_optional_text(
+            "依頼者の受入確認（任意）",
+            "必要な場合だけ、確認手順や確認点を書きます",
+        )?;
+    }
+    if matches!(kind, IssueKind::Task) && args.boundaries.is_none() {
+        args.boundaries = prompt_optional_text(
+            "触ってよい範囲・触らない範囲（任意）",
+            "他の人へ渡せるTaskでは、対象、禁止範囲、確認方法、相談先を書きます",
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_issue_hierarchy(kind: IssueKind, parent: Option<u64>, top_level: bool) -> Result<()> {
+    if parent == Some(0) {
+        bail!("親Issue番号は1以上で指定してください");
+    }
+    if parent.is_some() && top_level {
+        bail!("`--parent`と`--top-level`は同時に指定できません");
+    }
+    match kind {
+        IssueKind::Task if parent.is_none() => {
+            bail!("type/taskでは親Issueが必須です。`--parent <Issue番号>`を指定してください")
+        }
+        IssueKind::Task if top_level => {
+            bail!("type/taskは最上位にできません。`--parent <Issue番号>`を指定してください")
+        }
+        IssueKind::Work | IssueKind::Business if parent.is_none() && !top_level => bail!(
+            "{}では階層の明示が必須です。`--parent <Issue番号>`または`--top-level`を指定してください",
+            kind.label()
+        ),
+        IssueKind::Intake if top_level => bail!(
+            "type/intakeでは`--top-level`を指定できません。親は必要な場合だけ`--parent <Issue番号>`で指定してください"
+        ),
+        _ => Ok(()),
+    }
+}
+
 fn prompt_required_text(prompt: &str, help: &str) -> Result<String> {
     Ok(Text::new(prompt)
         .with_help_message(help)
@@ -3039,6 +3724,11 @@ fn prompt_required_text(prompt: &str, help: &str) -> Result<String> {
         .prompt()?
         .trim()
         .to_owned())
+}
+
+fn prompt_optional_text(prompt: &str, help: &str) -> Result<Option<String>> {
+    let value = Text::new(prompt).with_help_message(help).prompt()?;
+    Ok(optional_trimmed(Some(value)))
 }
 
 fn prompt_required_issue_number(prompt: &str, help: &str) -> Result<u64> {
@@ -3244,8 +3934,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        IssueDraft, IssueKind, MergeMode, branch_type_description, commit_type_description,
-        is_hk_commit_msg_command, parse_issue_numbers, path_is_mise_managed, required,
+        IntakeUrgency, IssueContent, IssueDraft, IssueKind, MergeMode, branch_type_description,
+        commit_type_description, is_hk_commit_msg_command, parse_issue_numbers,
+        path_is_mise_managed, required, validate_issue_hierarchy,
     };
 
     #[test]
@@ -3254,18 +3945,106 @@ mod tests {
             kind: IssueKind::Work,
             merge: Some(MergeMode::Review),
             title: "title".into(),
-            background: "background".into(),
-            goal: "goal".into(),
-            done: "done".into(),
+            content: IssueContent::Work {
+                background: "background".into(),
+                outcome: "outcome".into(),
+                done: "done".into(),
+                scope: "scope".into(),
+                out_of_scope: None,
+                known_constraints: None,
+                verification: "verification".into(),
+                acceptance: None,
+            },
             parent: None,
+            top_level: true,
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
         };
         assert_eq!(
             draft.body(),
-            "## 背景\n\nbackground\n\n## 目的\n\ngoal\n\n## 完了条件\n\n- [ ] done\n\n## マージ方針\n\n`merge/review`\n"
+            "## 背景\n\nbackground\n\n## 完成するとどうなるか\n\noutcome\n\n## 完了条件\n\n- [ ] done\n\n## 対象・影響・触らない範囲\n\nscope\n\n## 確認方法\n\nverification\n\n## マージ方針\n\n`merge/review`\n"
         );
+    }
+
+    #[test]
+    fn issue_bodies_follow_kind_specific_templates() {
+        let intake = IssueDraft {
+            kind: IssueKind::Intake,
+            merge: None,
+            title: "相談".into(),
+            content: IssueContent::Intake {
+                summary: "困っています".into(),
+                urgency: IntakeUrgency::Unknown,
+            },
+            parent: None,
+            top_level: false,
+            blocked_by: Vec::new(),
+            blocking: Vec::new(),
+            target_date: None,
+        };
+        assert!(intake.body().contains("## 何がありましたか"));
+        assert!(intake.body().contains("判断できない"));
+
+        let task = IssueDraft {
+            kind: IssueKind::Task,
+            merge: None,
+            title: "小タスク".into(),
+            content: IssueContent::Task {
+                action: "validatorを追加する".into(),
+                done: "テストが通る".into(),
+                boundaries: Some("srcだけ".into()),
+            },
+            parent: Some(86),
+            top_level: false,
+            blocked_by: Vec::new(),
+            blocking: Vec::new(),
+            target_date: None,
+        };
+        assert!(task.body().contains("## やること"));
+        assert!(task.body().contains("## 親Issue\n\n#86"));
+
+        let business = IssueDraft {
+            kind: IssueKind::Business,
+            merge: Some(MergeMode::Review),
+            title: "運用変更".into(),
+            content: IssueContent::Business {
+                current: "現行運用".into(),
+                change: "新運用".into(),
+                approval: "責任者が確認".into(),
+                scope: "対象部署".into(),
+                out_of_scope: None,
+                known_constraints: None,
+                verification: "責任者が確認".into(),
+            },
+            parent: Some(86),
+            top_level: false,
+            blocked_by: Vec::new(),
+            blocking: Vec::new(),
+            target_date: None,
+        };
+        assert!(business.body().contains("## 現状"));
+        assert!(business.body().contains("## 変更する文書・条件・運用"));
+        assert!(business.body().contains("## 誰が何を確認すればよいか"));
+    }
+
+    #[test]
+    fn hierarchy_rules_are_deterministic_for_every_issue_kind() {
+        assert!(validate_issue_hierarchy(IssueKind::Task, None, false).is_err());
+        assert!(validate_issue_hierarchy(IssueKind::Task, Some(86), false).is_ok());
+        assert!(validate_issue_hierarchy(IssueKind::Task, Some(86), true).is_err());
+
+        assert!(validate_issue_hierarchy(IssueKind::Work, None, false).is_err());
+        assert!(validate_issue_hierarchy(IssueKind::Work, Some(86), false).is_ok());
+        assert!(validate_issue_hierarchy(IssueKind::Work, None, true).is_ok());
+
+        assert!(validate_issue_hierarchy(IssueKind::Business, None, false).is_err());
+        assert!(validate_issue_hierarchy(IssueKind::Business, Some(86), false).is_ok());
+        assert!(validate_issue_hierarchy(IssueKind::Business, None, true).is_ok());
+
+        assert!(validate_issue_hierarchy(IssueKind::Intake, None, false).is_ok());
+        assert!(validate_issue_hierarchy(IssueKind::Intake, Some(86), false).is_ok());
+        assert!(validate_issue_hierarchy(IssueKind::Intake, None, true).is_err());
     }
 
     #[test]

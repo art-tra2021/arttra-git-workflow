@@ -222,6 +222,7 @@ function context(): PullRequestReviewContext {
         state: "open",
         authorLogin: "requester",
         assigneeLogins: ["owner"],
+        labels: ["type/work", "merge/review"],
         body: [
           "## 目標日",
           "",

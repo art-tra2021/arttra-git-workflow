@@ -3,6 +3,21 @@ description: 成果と完了条件を持つ、PRに対応する作業
 title: "[Work] "
 labels: ["type/work", "status/todo", "merge/review"]
 body:
+  - type: dropdown
+    id: hierarchy
+    attributes:
+      label: 階層
+      description: 独立した成果ならトップレベル、既存成果の一部なら子Issueを選ぶ。
+      options:
+        - トップレベル成果
+        - 既存Issueの子
+    validations:
+      required: true
+  - type: input
+    id: parent
+    attributes:
+      label: 親Issue
+      description: 「既存Issueの子」を選んだ場合は必須。例：#123
   - type: textarea
     id: background
     attributes:
@@ -23,6 +38,35 @@ body:
         - [ ]
     validations:
       required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 対象・影響・触らない範囲
+      description: 変更対象、影響する利用者や機能、変更しない境界を短く書く。
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: 今回やらないこと
+      description: 別Issueへ分けた内容や、今回の完了条件に含めない内容を書く。
+  - type: textarea
+    id: known_constraints
+    attributes:
+      label: 既知の制約・懸念
+      description: 制約がなければ空欄でよい。高リスク変更では切り戻し方法も書く。
+  - type: textarea
+    id: verification
+    attributes:
+      label: 確認方法
+      description: 完了条件を誰がどの手順で確認できるかを書く。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 依頼者の受入確認（必要な場合）
+      description: 実現したこと、確認手順、確認点、既存影響、対象外、制約をまとめる。不要なら空欄でよい。
   - type: dropdown
     id: merge
     attributes:

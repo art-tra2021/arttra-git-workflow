@@ -15,6 +15,9 @@ import type { StateStore } from "./state-store.ts";
 const NOTIFICATION_NAMESPACE = "lifecycle-notification";
 
 export type LifecycleNotificationKind =
+  | "issue-opened"
+  | "issue-reopened"
+  | "issue-assignment-changed"
   | "comment-created"
   | "issue-completed"
   | "pr-merged"
@@ -23,7 +26,9 @@ export type LifecycleNotificationKind =
   | "review-changes-requested"
   | "review-commented"
   | "review-dismissed"
-  | "revision-pushed";
+  | "revision-pushed"
+  | "self-merge-scheduled"
+  | "self-merge-ready";
 
 export interface LifecycleResource {
   kind: "issue" | "pull-request";
@@ -49,6 +54,7 @@ export interface LifecycleNotification {
   detail: string;
   nextAction: string;
   actionUrl: string;
+  selfMergeControl?: { repository: string; issueNumber: number } | null;
 }
 
 export interface LifecycleNotifier {
@@ -114,6 +120,9 @@ export class LifecycleNotificationService {
         return this.processReview(job);
       case "pull_request_review_comment":
         return this.processReviewComment(job);
+      case "check_run":
+      case "check_suite":
+        return this.processCheck(job);
       default:
         return 0;
     }
@@ -121,11 +130,61 @@ export class LifecycleNotificationService {
 
   private async processIssue(job: GitHubWebhookJob): Promise<number> {
     const payload = objectPayload(job);
-    if (stringValue(payload.action) !== "closed") return 0;
+    const action = stringValue(payload.action);
     const repository = repositoryName(payload);
     const issueNumber = nestedNumber(payload, "issue", "number");
     const actor = nestedString(payload, "sender", "login");
     const issue = await this.github.loadIssueContext(repository, issueNumber);
+    if (action === "opened") {
+      const opened = await this.send(
+        issueResource(issue),
+        null,
+        "issue-opened",
+        actor,
+        issue.assigneeLogins,
+        "Issueが作成されました。",
+        issueOverview(issue),
+        "担当・完了条件・親子関係を確認し、着手または調整する",
+        issue.url,
+        fingerprint({ action, url: issue.url }),
+        job.deliveryId,
+      );
+      return opened + (await this.notifySelfMergeScheduled(issue, repository, actor, job));
+    }
+    if (action === "reopened") {
+      return this.send(
+        issueResource(issue),
+        null,
+        "issue-reopened",
+        actor,
+        [...issue.assigneeLogins, issue.authorLogin],
+        "Issueが再開されました。",
+        `#${issue.number} ${issue.title} がreopenされました。`,
+        "再開理由と残作業を確認する",
+        issue.url,
+        fingerprint({ action, state: issue.state }),
+        job.deliveryId,
+      );
+    }
+    if (action === "assigned" || action === "unassigned") {
+      return this.send(
+        issueResource(issue),
+        null,
+        "issue-assignment-changed",
+        actor,
+        [...issue.assigneeLogins, issue.authorLogin],
+        "Issueの担当者が変更されました。",
+        `現在の担当: ${issue.assigneeLogins.map((login) => `@${login}`).join("、") || "未設定"}`,
+        "担当と次の操作を確認する",
+        issue.url,
+        fingerprint({ action, assignees: issue.assigneeLogins }),
+        job.deliveryId,
+      );
+    }
+    if (action === "labeled" && nestedString(payload, "label", "name") === "merge/self") {
+      return this.notifySelfMergeScheduled(issue, repository, actor, job);
+    }
+    if (action !== "closed") return 0;
     return this.send(
       issueResource(issue),
       null,
@@ -218,6 +277,68 @@ export class LifecycleNotificationService {
       context.url,
       fingerprint({ mergeCommitSha, headSha: context.headSha }),
       job.deliveryId,
+    );
+  }
+
+  private async processCheck(job: GitHubWebhookJob): Promise<number> {
+    const payload = objectPayload(job);
+    if (stringValue(payload.action) !== "completed") return 0;
+    const checkKey = job.event === "check_run" ? "check_run" : "check_suite";
+    const check = nestedObject(payload, checkKey);
+    if (stringValue(check.conclusion).toLowerCase() !== "success") return 0;
+    const pullRequests = check.pull_requests;
+    if (!Array.isArray(pullRequests) || pullRequests.length === 0) return 0;
+    const repository = repositoryName(payload);
+    const actor = nestedString(payload, "sender", "login");
+    let notified = 0;
+    for (const value of pullRequests) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const number = numberValue((value as Record<string, unknown>).number);
+      if (number < 1) continue;
+      const context = await this.github.loadPullRequestReviewContext(repository, number);
+      if (context.draft || context.state !== "open" || context.mergeableState !== "clean") continue;
+      for (const issue of context.linkedIssues.filter((candidate) =>
+        candidate.labels.includes("merge/self"),
+      )) {
+        notified += await this.send(
+          issueResource(issue),
+          { number: context.number, title: context.title, url: context.url },
+          "self-merge-ready",
+          actor,
+          issue.assigneeLogins,
+          "セルフマージ予定のPRがCIを通過しました。",
+          "第三者承認を待たず、PR作成者本人が必須CI通過後にマージします。",
+          "問題がある場合は、マージ前にセルフマージを停止してください",
+          context.url,
+          fingerprint({ headSha: context.headSha, conclusion: "success" }),
+          job.deliveryId,
+          { repository, issueNumber: issue.number },
+        );
+      }
+    }
+    return notified;
+  }
+
+  private async notifySelfMergeScheduled(
+    issue: GitHubIssueContext,
+    repository: string,
+    actor: string,
+    job: GitHubWebhookJob,
+  ): Promise<number> {
+    if (!issue.labels.includes("merge/self")) return 0;
+    return this.send(
+      issueResource(issue),
+      null,
+      "self-merge-scheduled",
+      actor,
+      issue.assigneeLogins,
+      "このIssueはセルフマージ予定です。",
+      "第三者承認を待たず、PR作成者本人が必須CI通過後にマージします。",
+      "問題がある場合は、マージ前にセルフマージを停止してください",
+      issue.url,
+      fingerprint({ labels: issue.labels, action: stringValue(objectPayload(job).action) }),
+      job.deliveryId,
+      { repository, issueNumber: issue.number },
     );
   }
 
@@ -377,6 +498,7 @@ export class LifecycleNotificationService {
     actionUrl: string,
     eventFingerprint: string,
     sourceDeliveryId: string,
+    selfMergeControl: { repository: string; issueNumber: number } | null = null,
   ): Promise<number> {
     const stateKey = `${resource.url}:${kind}`;
     const previous = await this.store.get<LifecycleNotificationState>(
@@ -398,6 +520,7 @@ export class LifecycleNotificationService {
           detail,
           nextAction,
           actionUrl,
+          selfMergeControl,
         },
         threadTs,
         {
@@ -437,6 +560,41 @@ export class LifecycleNotificationService {
 
 function issueResource(issue: GitHubIssueContext): LifecycleResource {
   return { kind: "issue", number: issue.number, title: issue.title, url: issue.url };
+}
+
+function issueOverview(issue: GitHubIssueContext): string {
+  const type = issue.labels.find((label) => label.startsWith("type/")) ?? "種別未設定";
+  const merge = issue.labels.find((label) => label.startsWith("merge/")) ?? "merge方針未設定";
+  const owners = issue.assigneeLogins.map((login) => `@${login}`).join("、") || "未担当";
+  const parent = issue.parentIssueUrl ? issueReferenceFromUrl(issue.parentIssueUrl) : "なし";
+  const done = issueSectionSummary(issue.body, "完了条件") ?? "未記載";
+  const targetDate = issueSectionSummary(issue.body, "目標日") ?? "未設定";
+  return [
+    `種別: ${type}`,
+    `親Issue: ${parent}`,
+    `担当: ${owners}`,
+    `完了条件: ${done}`,
+    `目標日: ${targetDate}`,
+    `マージ方針: ${merge}`,
+  ].join("\n");
+}
+
+function issueReferenceFromUrl(url: string): string {
+  const match = url.match(/\/repos\/([^/]+\/[^/]+)\/issues\/([1-9][0-9]*)$/u);
+  return match?.[1] && match[2] ? `${match[1]}#${match[2]}` : url;
+}
+
+function issueSectionSummary(body: string, heading: string): string | null {
+  const marker = `## ${heading}`;
+  const start = body.indexOf(marker);
+  if (start < 0) return null;
+  const contentStart = start + marker.length;
+  const nextHeading = body.indexOf("\n## ", contentStart);
+  const section = body
+    .slice(contentStart, nextHeading < 0 ? undefined : nextHeading)
+    .trim()
+    .replace(/^- \[[ xX]\]\s*/u, "");
+  return section ? excerpt(section) : null;
 }
 
 function mentionedLogins(body: string): string[] {
@@ -517,4 +675,8 @@ function nestedValue(value: Record<string, unknown>, keys: string[]): unknown {
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function numberValue(value: unknown): number {
+  return Number.isSafeInteger(value) ? Number(value) : 0;
 }

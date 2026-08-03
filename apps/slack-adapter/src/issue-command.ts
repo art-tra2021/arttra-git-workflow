@@ -45,7 +45,7 @@ export function buildCreateIssueCommand(input: CreateIssueInput): CreateIssueCom
   const fields: Record<string, string> = Object.fromEntries(
     schema.fields.map((field) => [field.id, input.fields[field.id]?.trim() ?? ""]),
   );
-  if (input.template === "work") {
+  if (input.template === "work" || input.template === "business") {
     const mergeMode = (input.mergeMode ?? input.fields.merge ?? MERGE_MODES[0]).trim();
     if (!MERGE_MODES.includes(mergeMode as MergeMode)) {
       throw new Error("PRのマージ方針を選択してください");
@@ -53,6 +53,19 @@ export function buildCreateIssueCommand(input: CreateIssueInput): CreateIssueCom
     fields.merge = mergeMode;
   }
   const relationships = parseIssueRelationships(input.relationships, fields, repository);
+  if (input.template === "work" || input.template === "business") {
+    const hierarchy = input.fields.hierarchy?.trim() ?? "";
+    if (hierarchy !== "トップレベル成果" && hierarchy !== "既存Issueの子") {
+      throw new Error("階層を選択してください");
+    }
+    fields.hierarchy = hierarchy;
+    if (hierarchy === "トップレベル成果" && relationships.parent) {
+      throw new Error("トップレベル成果には親Issueを指定できません");
+    }
+    if (hierarchy === "既存Issueの子" && !relationships.parent) {
+      throw new Error("既存Issueの子には親Issueを指定してください");
+    }
+  }
   for (const field of schema.fields) {
     if (ISSUE_RELATIONSHIP_FIELD_IDS.has(field.id)) {
       continue;
