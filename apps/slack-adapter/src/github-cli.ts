@@ -8,7 +8,7 @@ import {
   normalizeIssueRelationships,
   parseIssueRelationships,
 } from "./issue-relationships.ts";
-import type { IssueTemplateSchema } from "./issue-schema.ts";
+import { type IssueTemplateSchema, resolveIssueTemplate } from "./issue-schema.ts";
 import {
   ORGANIZATION_PROJECT_ITEMS_QUERY,
   type OrganizationProjectItemsResponse,
@@ -125,10 +125,22 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
     const cached = this.templateCache.get(repository);
     if (cached && cached.expiresAt > Date.now()) return [...cached.templates];
     if (cached) this.templateCache.delete(repository);
-    const entries = await ghJson<GhContentEntry[]>([
-      "api",
-      `repos/${repository}/contents/.github/ISSUE_TEMPLATE`,
-    ]);
+    let entries: GhContentEntry[];
+    try {
+      entries = await ghJson<GhContentEntry[]>([
+        "api",
+        `repos/${repository}/contents/.github/ISSUE_TEMPLATE`,
+      ]);
+    } catch (error) {
+      if (isMissingIssueTemplateDirectory(error)) {
+        this.templateCache.set(repository, {
+          templates: [],
+          expiresAt: Date.now() + 5 * 60 * 1000,
+        });
+        return [];
+      }
+      throw error;
+    }
     const forms = await Promise.all(
       entries
         .filter(
@@ -210,9 +222,8 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
   }
 
   async createIssue(command: CreateIssueCommand): Promise<CreatedIssue> {
-    const schema = (await this.listIssueTemplates(command.repository)).find(
-      (template) => template.id === command.template,
-    );
+    const templates = await this.listIssueTemplates(command.repository);
+    const schema = resolveIssueTemplate(templates, command.template);
     if (!schema) {
       throw new Error(`Issue templateが見つかりません: ${command.template}`);
     }
@@ -259,9 +270,8 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
     if (canWrite !== "true") {
       throw new Error(`GitHubで${command.repository}のIssueを作成する権限がありません。`);
     }
-    const template = (await this.listIssueTemplates(command.repository)).find(
-      (candidate) => candidate.id === command.template,
-    );
+    const templates = await this.listIssueTemplates(command.repository);
+    const template = resolveIssueTemplate(templates, command.template);
     if (!template) {
       throw new Error(`Issue templateが見つかりません: ${command.template}`);
     }
@@ -397,4 +407,12 @@ async function gh(args: string[]): Promise<string> {
 
 async function ghJson<T>(args: string[]): Promise<T> {
   return JSON.parse(await gh(args)) as T;
+}
+
+function isMissingIssueTemplateDirectory(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /\b404\b/.test(error.message) &&
+    /ISSUE_TEMPLATE|Not Found/i.test(error.message)
+  );
 }

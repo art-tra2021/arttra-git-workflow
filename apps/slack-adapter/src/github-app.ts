@@ -10,7 +10,7 @@ import {
   normalizeIssueRelationships,
   parseIssueRelationships,
 } from "./issue-relationships.ts";
-import type { IssueTemplateSchema } from "./issue-schema.ts";
+import { type IssueTemplateSchema, resolveIssueTemplate } from "./issue-schema.ts";
 import {
   ORGANIZATION_PROJECT_ITEMS_QUERY,
   type OrganizationProjectItemsResponse,
@@ -260,9 +260,21 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     const cached = this.templateCache.get(repository);
     if (cached && cached.expiresAt > this.now()) return [...cached.templates];
     if (cached) this.templateCache.delete(repository);
-    const entries = await this.api<ContentEntry[]>(
-      `/repos/${repository}/contents/.github/ISSUE_TEMPLATE`,
-    );
+    let entries: ContentEntry[];
+    try {
+      entries = await this.api<ContentEntry[]>(
+        `/repos/${repository}/contents/.github/ISSUE_TEMPLATE`,
+      );
+    } catch (error) {
+      if (error instanceof GitHubApiError && error.status === 404) {
+        this.templateCache.set(repository, {
+          templates: [],
+          expiresAt: this.now() + 5 * 60 * 1000,
+        });
+        return [];
+      }
+      throw error;
+    }
     const templates = (
       await Promise.all(
         entries
@@ -322,9 +334,8 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     if (viewer) {
       await this.assertRepositoryAccess(command.repository, viewer);
     }
-    const schema = (await this.listIssueTemplates(command.repository)).find(
-      (template) => template.id === command.template,
-    );
+    const templates = await this.listIssueTemplates(command.repository);
+    const schema = resolveIssueTemplate(templates, command.template);
     if (!schema) {
       throw new Error(`Issue templateが見つかりません: ${command.template}`);
     }
@@ -503,9 +514,8 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       throw new Error("GitHub AppにContents read権限がありません。App設定を確認してください。");
     }
     await this.api<unknown>(`/repos/${command.repository}`);
-    const template = (await this.listIssueTemplates(command.repository)).find(
-      (candidate) => candidate.id === command.template,
-    );
+    const templates = await this.listIssueTemplates(command.repository);
+    const template = resolveIssueTemplate(templates, command.template);
     if (!template) {
       throw new Error(`Issue templateが見つかりません: ${command.template}`);
     }

@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { parseIssueUrl } from "../src/app.ts";
 import { buildCreateIssueCommand } from "../src/issue-command.ts";
-import { issueTemplate } from "../src/issue-schema.ts";
+import {
+  GENERIC_ISSUE_TEMPLATE,
+  issueTemplate,
+  resolveIssueTemplate,
+} from "../src/issue-schema.ts";
 
 describe("Issue作成command", () => {
   test("SlackとAIが共有できる安定したJSONへ変換する", () => {
@@ -112,6 +116,21 @@ describe("Issue作成command", () => {
         schema: issueTemplate("task"),
       }),
     ).toThrow("親の作業チケットを入力してください");
+  });
+
+  test("テンプレート未導入repositoryでは標準Issueを構造化できる", () => {
+    const schema = resolveIssueTemplate([], GENERIC_ISSUE_TEMPLATE.id);
+    expect(schema).toEqual(GENERIC_ISSUE_TEMPLATE);
+    const command = buildCreateIssueCommand({
+      repository: "art-tra2021/no-template",
+      template: GENERIC_ISSUE_TEMPLATE.id,
+      title: "標準Issue",
+      fields: { summary: "テンプレート導入前の相談", done: "" },
+      actor: "U123",
+      schema: GENERIC_ISSUE_TEMPLATE,
+    });
+    expect(command.template).toBe("generic");
+    expect(command.fields.summary).toBe("テンプレート導入前の相談");
   });
 });
 

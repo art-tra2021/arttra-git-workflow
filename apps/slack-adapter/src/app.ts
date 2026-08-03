@@ -15,7 +15,11 @@ import {
   type IssueRelationships,
   issueReferenceLabel,
 } from "./issue-relationships.ts";
-import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
+import {
+  GENERIC_ISSUE_TEMPLATE,
+  type IssueTemplateId,
+  type IssueTemplateSchema,
+} from "./issue-schema.ts";
 import { workItemBlocks } from "./presentation.ts";
 import { allAccessibleScope, type RepositoryScope, repositoryScope } from "./project-scope.ts";
 import { slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
@@ -115,7 +119,8 @@ export function createSlackApp(
     if (!issueMetadata.listIssueTemplatesForViewer) {
       throw new Error("repositoryごとのGitHub権限を確認できるbackendが設定されていません。");
     }
-    return issueMetadata.listIssueTemplatesForViewer(githubLogin, repository);
+    const templates = await issueMetadata.listIssueTemplatesForViewer(githubLogin, repository);
+    return templates.length > 0 ? templates : [GENERIC_ISSUE_TEMPLATE];
   };
 
   app.command("/ar", async ({ ack, client, command, respond }) => {
@@ -137,6 +142,7 @@ export function createSlackApp(
             }
             return issueMetadata.listRepositoriesForViewer(githubLogin);
           },
+          ...(options.defaultRepository ? { defaultRepository: options.defaultRepository } : {}),
           triggerId: command.trigger_id,
           channelId: command.channel_id,
           responseUrl: command.response_url,
@@ -379,7 +385,9 @@ export function createSlackApp(
         throw new Error("repository権限を確認できません。");
       }
       const repositories = await issueMetadata.listRepositoriesForViewer(githubLogin);
-      await ack({ options: repositoryOptions(repositories, request.value) });
+      await ack({
+        options: repositoryOptions(repositories, request.value, options.defaultRepository),
+      });
     } catch (error) {
       console.error(
         error instanceof Error ? error.message : "repository一覧を取得できませんでした。",
@@ -751,6 +759,7 @@ type IssueModalAck = (input: { response_action: "update"; view: unknown }) => Pr
 interface IssueRepositoryFlowOptions {
   views: IssueModalViews;
   listRepositories(): Promise<string[]>;
+  defaultRepository?: string;
   triggerId: string;
   channelId: string;
   responseUrl: string;
@@ -775,6 +784,7 @@ export async function openIssueRepositoryFlow(options: IssueRepositoryFlowOption
       options.responseUrl,
       options.slackTeamId,
       repositories,
+      options.defaultRepository,
     );
   } catch (error) {
     nextView = issueErrorModal(
@@ -845,11 +855,13 @@ function issueRepositoryModal(
   responseUrl: string,
   slackTeamId: string,
   repositories: string[],
+  defaultRepository?: string,
 ) {
   if (repositories.length === 0) {
     throw new Error("Issueを作成できるrepositoryがありません");
   }
-  const firstRepository = repositories[0] ?? "";
+  const orderedRepositories = prioritizeRepository(repositories, defaultRepository);
+  const firstRepository = orderedRepositories[0] ?? "";
   return {
     type: "modal" as const,
     callback_id: "ar.issue.repository",
@@ -866,7 +878,9 @@ function issueRepositoryModal(
           type: "static_select" as const,
           action_id: "value",
           initial_option: option(firstRepository, firstRepository),
-          options: repositories.slice(0, 100).map((repository) => option(repository, repository)),
+          options: orderedRepositories
+            .slice(0, 100)
+            .map((repository) => option(repository, repository)),
         },
       },
     ],
@@ -905,12 +919,27 @@ export function issueRepositoryPickerModal(
   };
 }
 
-export function repositoryOptions(repositories: string[], query: string) {
+export function repositoryOptions(
+  repositories: string[],
+  query: string,
+  defaultRepository?: string,
+) {
   const normalized = query.trim().toLowerCase();
-  return repositories
+  const ordered = prioritizeRepository(repositories, defaultRepository);
+  return ordered
     .filter((repository) => !normalized || repository.toLowerCase().includes(normalized))
     .slice(0, 100)
     .map((repository) => option(repository, repository));
+}
+
+function prioritizeRepository(repositories: string[], defaultRepository?: string): string[] {
+  const unique = [...new Set(repositories.map((repository) => repository.trim()).filter(Boolean))];
+  const normalizedDefault = defaultRepository?.trim().toLowerCase();
+  if (!normalizedDefault) return unique;
+  const index = unique.findIndex((repository) => repository.toLowerCase() === normalizedDefault);
+  if (index <= 0) return unique;
+  const [defaultCandidate] = unique.splice(index, 1);
+  return defaultCandidate ? [defaultCandidate, ...unique] : unique;
 }
 
 function issueTemplateModal(metadata: IssueModalMetadata, templates: IssueTemplateSchema[]) {
@@ -926,6 +955,17 @@ function issueTemplateModal(metadata: IssueModalMetadata, templates: IssueTempla
     submit: { type: "plain_text" as const, text: "次へ" },
     close: { type: "plain_text" as const, text: "キャンセル" },
     blocks: [
+      ...(firstTemplate.id === GENERIC_ISSUE_TEMPLATE.id
+        ? [
+            {
+              type: "section" as const,
+              text: {
+                type: "mrkdwn" as const,
+                text: "⚠️ *テンプレート未導入です*\nこのrepositoryには共通のIssueテンプレートがありません。標準Issueで作成します。作成後に管理者へテンプレート導入を依頼してください。",
+              },
+            },
+          ]
+        : []),
       {
         type: "section" as const,
         text: { type: "mrkdwn" as const, text: `*作成先*\n${metadata.repository}` },
