@@ -1,25 +1,25 @@
 //! Full-screen human interface for `git ar`.
 //!
-//! The icon, responsive header composition, 60-column layout breakpoint,
-//! gradient behavior, and semantic colors are copied and ported from Gemini
-//! CLI (Apache-2.0, Copyright 2025–2026 Google LLC). The Ink/React renderer is
-//! translated to Ratatui/Rust and its content is edited for ART-TRA.
+//! The responsive header composition, 60-column layout breakpoint, and
+//! semantic color model are copied and ported from Gemini CLI (Apache-2.0,
+//! Copyright 2025–2026 Google LLC). The Ink/React renderer is translated to
+//! Ratatui/Rust and its content is edited for marumado.
 //!
 //! Pinned source revision: f47d6c6f7a1308d81f9f57acf7d279f0928c5249
 //! - AppHeader.tsx: <https://github.com/google-gemini/gemini-cli/blob/f47d6c6f7a1308d81f9f57acf7d279f0928c5249/packages/cli/src/ui/components/AppHeader.tsx>
-//! - ThemedGradient.tsx: <https://github.com/google-gemini/gemini-cli/blob/f47d6c6f7a1308d81f9f57acf7d279f0928c5249/packages/cli/src/ui/components/ThemedGradient.tsx>
 //! - theme.ts: <https://github.com/google-gemini/gemini-cli/blob/f47d6c6f7a1308d81f9f57acf7d279f0928c5249/packages/cli/src/ui/themes/theme.ts>
 //! - License: `LICENSES/Apache-2.0.txt`
 
 use std::fmt;
-use std::io::{self, stdout};
+use std::io::{self, Write, stdout};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use inquire::Select;
 use ratatui::backend::CrosstermBackend;
@@ -36,8 +36,21 @@ const SPLIT_PANE_BREAKPOINT: u16 = 86;
 const MIN_DETAIL_HEIGHT: u16 = 18;
 const LOGO_METADATA_PADDING: u16 = 20;
 
-// Copied from Gemini CLI AppHeader.tsx and rendered through Ratatui instead of Ink.
-const DEFAULT_ICON: &str = "▝▜▄  \n  ▝▜▄\n ▗▟▀ \n▝▀    ";
+const LOGO_WIDTH: u16 = 10;
+const LOGO_HEIGHT: u16 = 5;
+const LOGO_OUTLINE: [&str; LOGO_HEIGHT as usize] = [
+    "  ╭────╮  ",
+    " ╱      ╲ ",
+    "│        │",
+    " ╲      ╱ ",
+    "  ╰────╯  ",
+];
+
+// Sampled from the supplied marumado brand mark.
+const BRAND_GREEN: Color = Color::Rgb(144, 227, 166);
+const BRAND_YELLOW: Color = Color::Rgb(241, 202, 90);
+const BRAND_CORAL: Color = Color::Rgb(255, 146, 137);
+const BRAND_BLUE: Color = Color::Rgb(129, 165, 225);
 
 // Ported from Gemini CLI's default dark semantic theme.
 const PRIMARY: Color = Color::Rgb(255, 255, 255);
@@ -51,7 +64,6 @@ const ACCENT_CYAN: Color = Color::Rgb(135, 215, 215);
 const WARNING: Color = Color::Rgb(255, 255, 175);
 const ERROR: Color = Color::Rgb(255, 135, 175);
 const SUCCESS: Color = Color::Rgb(215, 255, 215);
-const GRADIENT: [(u8, u8, u8); 3] = [(71, 150, 228), (132, 122, 206), (195, 103, 127)];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -199,30 +211,106 @@ struct TerminalRestore;
 impl Drop for TerminalRestore {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = execute!(stdout(), Show, LeaveAlternateScreen);
     }
 }
 
-pub fn run(status: &HomeStatus) -> Result<Option<Action>> {
-    if simple_terminal() {
-        return run_simple();
+pub struct Shell {
+    terminal: Option<Terminal<CrosstermBackend<io::Stdout>>>,
+    _restore: Option<TerminalRestore>,
+}
+
+impl Shell {
+    pub fn start() -> Result<Self> {
+        if simple_terminal() {
+            return Ok(Self {
+                terminal: None,
+                _restore: None,
+            });
+        }
+
+        enable_raw_mode().context("terminalをraw modeへ切り替えられませんでした")?;
+        let restore = TerminalRestore;
+        execute!(stdout(), EnterAlternateScreen, Hide)
+            .context("terminalの全画面表示を開始できませんでした")?;
+        let backend = CrosstermBackend::new(stdout());
+        let mut terminal = Terminal::new(backend).context("TUIを初期化できませんでした")?;
+        terminal
+            .clear()
+            .context("TUI画面を初期化できませんでした")?;
+        Ok(Self {
+            terminal: Some(terminal),
+            _restore: Some(restore),
+        })
     }
 
-    enable_raw_mode().context("terminalをraw modeへ切り替えられませんでした")?;
-    let restore = TerminalRestore;
-    execute!(stdout(), EnterAlternateScreen)
-        .context("terminalの全画面表示を開始できませんでした")?;
-    let backend = CrosstermBackend::new(stdout());
-    let mut terminal = Terminal::new(backend).context("TUIを初期化できませんでした")?;
-    terminal
-        .clear()
-        .context("TUI画面を初期化できませんでした")?;
+    pub fn is_full_screen(&self) -> bool {
+        self.terminal.is_some()
+    }
 
-    let result = event_loop(&mut terminal, status);
-    terminal.show_cursor().ok();
-    drop(terminal);
-    drop(restore);
-    result
+    pub fn select(&mut self, status: &HomeStatus) -> Result<Option<Action>> {
+        match &mut self.terminal {
+            Some(terminal) => event_loop(terminal, status),
+            None => run_simple(),
+        }
+    }
+
+    pub fn begin_action(&mut self, action: Action, status: &HomeStatus) -> Result<()> {
+        let Some(terminal) = &mut self.terminal else {
+            return Ok(());
+        };
+        clear_for_redraw(terminal).context("実行画面を初期化できませんでした")?;
+        let mut output_row = 0;
+        terminal
+            .draw(|frame| output_row = render_action_shell(frame, action, status))
+            .context("実行画面を描画できませんでした")?;
+        disable_raw_mode().context("terminalの入力モードを切り替えられませんでした")?;
+        execute!(stdout(), Show, MoveTo(2, output_row))
+            .context("実行画面へ移動できませんでした")?;
+        Ok(())
+    }
+
+    pub fn finish_action(&mut self, error: Option<&anyhow::Error>) -> Result<bool> {
+        if self.terminal.is_none() {
+            return Ok(false);
+        }
+        if let Some(error) = error {
+            println!("\nERROR  {error:#}");
+        }
+        println!("\n────────────────────────");
+        println!("Enter  ホームへ戻る    q  git arを終了");
+        stdout().flush().context("実行結果を表示できませんでした")?;
+        enable_raw_mode().context("terminalをraw modeへ戻せませんでした")?;
+        loop {
+            let Event::Key(key) = event::read().context("キー入力を読み取れませんでした")?
+            else {
+                continue;
+            };
+            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                continue;
+            }
+            match key.code {
+                KeyCode::Enter | KeyCode::Esc => {
+                    execute!(stdout(), Hide).context("カーソルを隠せませんでした")?;
+                    clear_for_redraw(self.terminal.as_mut().expect("全画面terminalが存在する"))
+                        .context("ホーム画面へ戻れませんでした")?;
+                    return Ok(true);
+                }
+                KeyCode::Char('q') => return Ok(false),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn clear_for_redraw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+    execute!(stdout(), Clear(ClearType::All), MoveTo(0, 0))?;
+    // Command output bypasses Ratatui, so invalidate both diff buffers and
+    // preserve the active-buffer index. The next frame then repaints all cells.
+    terminal.current_buffer_mut().reset();
+    terminal.swap_buffers();
+    terminal.swap_buffers();
+    Ok(())
 }
 
 fn run_simple() -> Result<Option<Action>> {
@@ -284,7 +372,7 @@ fn render(frame: &mut Frame<'_>, app: &mut HomeApp, status: &HomeStatus) {
     }
 
     let compact = area.width < NARROW_TERMINAL_BREAKPOINT || area.height < MIN_DETAIL_HEIGHT;
-    let header_height = if compact { 8 } else { 5 };
+    let header_height = if compact { 9 } else { 5 };
     let [header_area, content_area, footer_area] = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Min(3),
@@ -301,22 +389,59 @@ fn render(frame: &mut Frame<'_>, app: &mut HomeApp, status: &HomeStatus) {
     render_footer(frame, footer_area, status, area.width);
 }
 
+fn render_action_shell(frame: &mut Frame<'_>, action: Action, status: &HomeStatus) -> u16 {
+    let frame_area = frame.area();
+    let area = inset(frame_area, 1, 1);
+    if area.width < 24 || area.height < 15 {
+        render_too_small(frame, area);
+        return frame_area.bottom().saturating_sub(1);
+    }
+
+    let compact = area.width < NARROW_TERMINAL_BREAKPOINT || area.height < MIN_DETAIL_HEIGHT;
+    let header_height = if compact { 9 } else { 5 };
+    let [header_area, workflow_area, _output_area] = Layout::vertical([
+        Constraint::Length(header_height),
+        Constraint::Length(5),
+        Constraint::Min(1),
+    ])
+    .areas(area);
+    render_header(frame, header_area, status, compact);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                action.label(),
+                Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                action.description(),
+                Style::default().fg(SECONDARY),
+            )),
+            Line::from(vec![
+                Span::styled("実行  ", Style::default().fg(COMMENT)),
+                Span::styled(action.command(), Style::default().fg(ACCENT_PURPLE)),
+            ]),
+        ])
+        .block(section_block("WORKFLOW"))
+        .wrap(Wrap { trim: true }),
+        workflow_area,
+    );
+    workflow_area
+        .bottom()
+        .saturating_add(1)
+        .min(frame_area.bottom().saturating_sub(1))
+}
+
 fn render_header(frame: &mut Frame<'_>, area: Rect, status: &HomeStatus, compact: bool) {
     if compact {
         let [logo_area, metadata_area] =
-            Layout::vertical([Constraint::Length(4), Constraint::Length(4)]).areas(area);
+            Layout::vertical([Constraint::Length(LOGO_HEIGHT), Constraint::Length(4)]).areas(area);
         render_logo(frame, logo_area);
         render_metadata(frame, metadata_area, status, true);
         return;
     }
 
-    let logo_width = DEFAULT_ICON
-        .lines()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0) as u16;
     let [logo_area, metadata_area] = Layout::horizontal([
-        Constraint::Length(logo_width + 2),
+        Constraint::Length(LOGO_WIDTH + 2),
         Constraint::Min(LOGO_METADATA_PADDING),
     ])
     .areas(area);
@@ -325,7 +450,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, status: &HomeStatus, compact
 }
 
 fn render_logo(frame: &mut Frame<'_>, area: Rect) {
-    frame.render_widget(Paragraph::new(themed_gradient(DEFAULT_ICON)), area);
+    frame.render_widget(Paragraph::new(marumado_logo()), area);
 }
 
 fn render_metadata(frame: &mut Frame<'_>, area: Rect, status: &HomeStatus, is_below: bool) {
@@ -333,19 +458,19 @@ fn render_metadata(frame: &mut Frame<'_>, area: Rect, status: &HomeStatus, is_be
         || "Issueなし".into(),
         |issue| format!("Issue #{}  {}", issue.number, safe_text(&issue.title)),
     );
-    let title = Line::from(vec![
+    let japanese_title = Line::from(vec![
         Span::styled(
-            "ART-TRA Work",
+            "まるまど",
             Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("  git ar v{}", env!("CARGO_PKG_VERSION")),
+            format!("  marumado / git ar v{}", env!("CARGO_PKG_VERSION")),
             Style::default().fg(SECONDARY),
         ),
     ]);
     let lines = if is_below {
         vec![
-            title,
+            japanese_title,
             Line::from(vec![
                 Span::styled(safe_text(&status.repository), Style::default().fg(PRIMARY)),
                 Span::styled("  /  ", Style::default().fg(COMMENT)),
@@ -362,8 +487,11 @@ fn render_metadata(frame: &mut Frame<'_>, area: Rect, status: &HomeStatus, is_be
         ]
     } else {
         vec![
-            title,
-            Line::default(),
+            japanese_title,
+            Line::from(Span::styled(
+                "marumado",
+                Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD),
+            )),
             key_value_line("repository", &status.repository, PRIMARY),
             key_value_line(
                 "branch",
@@ -579,7 +707,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, status: &HomeStatus, width: 
 fn render_too_small(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(
         Paragraph::new(Text::from(vec![
-            themed_gradient_line("ART-TRA"),
+            Line::from(Span::styled(
+                "marumado / git ar",
+                Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+            )),
             Line::from(Span::styled(
                 "terminalを広げてください",
                 Style::default().fg(WARNING),
@@ -601,56 +732,38 @@ fn section_block(title: &'static str) -> Block<'static> {
         ))
 }
 
-// Port of Gemini CLI ThemedGradient.tsx. The source delegates interpolation to
-// ink-gradient; this version performs the same horizontal interpolation for
-// Ratatui spans and keeps the accent-color fallback.
-fn themed_gradient(value: &str) -> Text<'static> {
-    Text::from(value.lines().map(themed_gradient_line).collect::<Vec<_>>())
-}
-
-fn themed_gradient_line(value: &str) -> Line<'static> {
-    let width = value.chars().count();
-    if GRADIENT.len() < 2 {
-        return Line::from(Span::styled(
-            value.to_owned(),
-            Style::default().fg(ACCENT_PURPLE),
-        ));
-    }
-    Line::from(
-        value
-            .chars()
+fn marumado_logo() -> Text<'static> {
+    Text::from(
+        LOGO_OUTLINE
+            .iter()
             .enumerate()
-            .map(|(index, character)| {
-                Span::styled(
-                    character.to_string(),
-                    Style::default().fg(gradient_color(index, width)),
+            .map(|(row, line)| {
+                Line::from(
+                    line.chars()
+                        .enumerate()
+                        .map(|(column, character)| {
+                            let mut style = Style::default().fg(PRIMARY);
+                            if let Some(background) = logo_background(row, column) {
+                                style = style.bg(background);
+                            }
+                            Span::styled(character.to_string(), style)
+                        })
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect::<Vec<_>>(),
     )
 }
 
-fn gradient_color(index: usize, width: usize) -> Color {
-    let factor = if width <= 1 {
-        0.0
-    } else {
-        index as f32 / (width - 1) as f32
-    };
-    let scaled = factor * (GRADIENT.len() - 1) as f32;
-    let left = (scaled.floor() as usize).min(GRADIENT.len() - 1);
-    let right = (left + 1).min(GRADIENT.len() - 1);
-    let local = scaled - left as f32;
-    let start = GRADIENT[left];
-    let end = GRADIENT[right];
-    Color::Rgb(
-        interpolate(start.0, end.0, local),
-        interpolate(start.1, end.1, local),
-        interpolate(start.2, end.2, local),
-    )
-}
-
-fn interpolate(start: u8, end: u8, factor: f32) -> u8 {
-    (start as f32 + (end as f32 - start as f32) * factor).round() as u8
+fn logo_background(row: usize, column: usize) -> Option<Color> {
+    match (row, column) {
+        (0, 0 | 9) | (4, 0 | 9) => None,
+        (0..=1, 0..=5) => Some(BRAND_GREEN),
+        (0..=2, 6..=9) => Some(BRAND_YELLOW),
+        (2..=4, 0..=2) => Some(BRAND_CORAL),
+        (3..=4, 3..=9) => Some(BRAND_BLUE),
+        _ => None,
+    }
 }
 
 fn key_value_line(label: &str, value: &str, color: Color) -> Line<'static> {
@@ -709,7 +822,8 @@ mod tests {
     use ratatui::style::Color;
 
     use super::{
-        Action, DEFAULT_ICON, HomeApp, NARROW_TERMINAL_BREAKPOINT, gradient_color, render,
+        Action, BRAND_BLUE, BRAND_CORAL, BRAND_GREEN, BRAND_YELLOW, HomeApp, LOGO_OUTLINE,
+        NARROW_TERMINAL_BREAKPOINT, logo_background, render, render_action_shell,
     };
     use crate::status::{
         HomeAction, HomeChanges, HomeIssue, HomePullRequest, HomeStatus, HomeUpstream,
@@ -773,6 +887,21 @@ mod tests {
     }
 
     #[test]
+    fn renders_action_shell_without_leaving_the_full_screen_layout() {
+        for (width, height) in [(110, 32), (58, 24), (42, 18)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            let mut output_row = 0;
+            terminal
+                .draw(|frame| {
+                    output_row = render_action_shell(frame, Action::Commit, &status());
+                })
+                .expect("action shell render");
+            assert!(output_row < height);
+        }
+    }
+
+    #[test]
     fn actions_are_text_only_and_have_noninteractive_commands() {
         for action in Action::ALL {
             assert!(!action.label().is_empty());
@@ -788,11 +917,17 @@ mod tests {
     }
 
     #[test]
-    fn gemini_header_port_keeps_upstream_breakpoint_icon_and_gradient_stops() {
+    fn header_keeps_gemini_breakpoint_and_uses_sampled_marumado_brand_colors() {
         assert_eq!(NARROW_TERMINAL_BREAKPOINT, 60);
-        assert_eq!(DEFAULT_ICON, "▝▜▄  \n  ▝▜▄\n ▗▟▀ \n▝▀    ");
-        assert_eq!(gradient_color(0, 3), Color::Rgb(71, 150, 228));
-        assert_eq!(gradient_color(1, 3), Color::Rgb(132, 122, 206));
-        assert_eq!(gradient_color(2, 3), Color::Rgb(195, 103, 127));
+        assert!(LOGO_OUTLINE.iter().all(|line| line.chars().count() == 10));
+        assert_eq!(BRAND_GREEN, Color::Rgb(144, 227, 166));
+        assert_eq!(BRAND_YELLOW, Color::Rgb(241, 202, 90));
+        assert_eq!(BRAND_CORAL, Color::Rgb(255, 146, 137));
+        assert_eq!(BRAND_BLUE, Color::Rgb(129, 165, 225));
+        assert_eq!(logo_background(1, 2), Some(BRAND_GREEN));
+        assert_eq!(logo_background(1, 8), Some(BRAND_YELLOW));
+        assert_eq!(logo_background(3, 1), Some(BRAND_CORAL));
+        assert_eq!(logo_background(3, 7), Some(BRAND_BLUE));
+        assert_eq!(logo_background(2, 4), None);
     }
 }

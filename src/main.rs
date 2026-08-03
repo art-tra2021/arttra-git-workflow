@@ -682,30 +682,52 @@ fn run() -> Result<()> {
 
 fn tui() -> Result<()> {
     ensure_interactive()?;
-    let policy = Policy::load()?;
-    let home = status::home(None, &policy.branch)?;
-    let Some(action) = tui::run(&home)? else {
-        return Ok(());
-    };
+    let mut shell = tui::Shell::start()?;
+    loop {
+        let policy = Policy::load()?;
+        let home = status::home(None, &policy.branch)?;
+        let Some(action) = shell.select(&home)? else {
+            return Ok(());
+        };
+        shell.begin_action(action, &home)?;
 
-    match action {
-        tui::Action::Status => status::show(None, false, &policy.branch),
-        tui::Action::Tasks => tasks::show(false, false, true, &policy.tasks),
-        tui::Action::Issue => issue(IssueArgs::default()),
-        tui::Action::Branch => branch_command(BranchArgs::default()),
-        tui::Action::Commit => commit(CommitArgs::default()),
-        tui::Action::Push => push(PushArgs::default()),
-        tui::Action::PullRequest => pull_request(PullRequestArgs {
-            create: true,
-            ..PullRequestArgs::default()
-        }),
-        tui::Action::Presence => presence::check(&policy.presence, false),
-        tui::Action::Check => check(false, false),
-        tui::Action::Rules => governance::rules(10, None, false),
-        tui::Action::Doctor => doctor(false),
-        tui::Action::Context => context(false),
-        tui::Action::Exit => Ok(()),
+        let result = match action {
+            tui::Action::Status => status::show(None, false, &policy.branch),
+            tui::Action::Tasks => tasks::show(false, false, false, &policy.tasks),
+            tui::Action::Issue => issue(IssueArgs::default()),
+            tui::Action::Branch => branch_command(BranchArgs::default()),
+            tui::Action::Commit => commit(CommitArgs::default()),
+            tui::Action::Push => push(PushArgs::default()),
+            tui::Action::PullRequest => pull_request(PullRequestArgs {
+                create: true,
+                ..PullRequestArgs::default()
+            }),
+            tui::Action::Presence => presence::check(&policy.presence, false),
+            tui::Action::Check => check(false, false),
+            tui::Action::Rules => governance::rules(10, None, false),
+            tui::Action::Doctor => doctor(false),
+            tui::Action::Context => context(false),
+            tui::Action::Exit => Ok(()),
+        };
+
+        if !shell.is_full_screen() {
+            return result;
+        }
+        let visible_error = result
+            .as_ref()
+            .err()
+            .filter(|error| !interactive_operation_cancelled(error));
+        if !shell.finish_action(visible_error)? {
+            return Ok(());
+        }
     }
+}
+
+fn interactive_operation_cancelled(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<InquireError>(),
+        Some(InquireError::OperationCanceled | InquireError::OperationInterrupted)
+    )
 }
 
 fn commit(mut args: CommitArgs) -> Result<()> {
