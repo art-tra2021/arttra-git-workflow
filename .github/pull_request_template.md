@@ -21,6 +21,10 @@
 Closes #
 
 <!--
+Closesは、このPRが直接完了させる type/task のIssueを1件だけ指定します。
+Taskの直接の親であるWork / BusinessはClosesせず、独立したIssue・Slack threadとして残します。
+Taskのnative parentは Relates to https://github.com/owner/repo/issues/456 と記載します。
+
 関連Issueに次のいずれか一つを付けます。
 - merge/review: 作成者以外の承認が1件必要（既定）
 - merge/self: 承認なしで本人マージ可

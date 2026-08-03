@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parseIssueUrl } from "../src/app.ts";
+import { buildIssueCreateInput } from "../src/github-shared.ts";
 import { buildCreateIssueCommand } from "../src/issue-command.ts";
 import {
   GENERIC_ISSUE_TEMPLATE,
@@ -11,50 +12,40 @@ describe("Issue作成command", () => {
   test("SlackとAIが共有できる安定したJSONへ変換する", () => {
     const command = buildCreateIssueCommand({
       repository: "art-tra2021/arttra-git-workflow",
-      template: "work",
+      template: "task",
       title: " SlackからIssueを作る ",
       fields: {
-        hierarchy: "トップレベル成果",
         parent: "",
-        background: " 手作業が必要 ",
-        outcome: " Slackから作成できる ",
+        action: " Slackから作成できる ",
         done: "- [ ] Issueが作成される",
-        scope: "Slack adapterのみ",
-        out_of_scope: "GitHub UI",
-        known_constraints: "",
-        verification: "/ar newで確認する",
-        acceptance: "",
+        boundaries: "Slack adapterのみ",
         merge: "自分でマージ可",
-        blocked_by: "",
-        target_date: "2026-08-15",
       },
+      relationships: { parent: "86" },
       actor: "U123",
-      schema: issueTemplate("work"),
+      schema: issueTemplate("task"),
     });
     expect(command).toEqual({
       schemaVersion: 1,
       kind: "issue.create",
       repository: "art-tra2021/arttra-git-workflow",
-      template: "work",
+      template: "task",
       title: "SlackからIssueを作る",
       fields: {
-        hierarchy: "トップレベル成果",
         parent: "",
-        background: "手作業が必要",
-        outcome: "Slackから作成できる",
+        action: "Slackから作成できる",
         done: "- [ ] Issueが作成される",
-        scope: "Slack adapterのみ",
-        out_of_scope: "GitHub UI",
-        known_constraints: "",
-        verification: "/ar newで確認する",
-        acceptance: "",
+        boundaries: "Slack adapterのみ",
         merge: "自分でマージ可",
-        blocked_by: "",
-        target_date: "2026-08-15",
       },
       actor: "U123",
       assigneeSlackUserIds: [],
       reviewerSlackUserIds: [],
+      relationships: {
+        parent: { repository: "art-tra2021/arttra-git-workflow", number: 86 },
+        blockedBy: [],
+        blocking: [],
+      },
     });
   });
 
@@ -71,27 +62,28 @@ describe("Issue作成command", () => {
     ).toThrow("何がありましたかを入力してください");
   });
 
-  test("repository側templateに項目がなくても共通のマージ方針をJSONへ保持する", () => {
+  test("repository側Task templateに項目がなくても共通のマージ方針をJSONへ保持する", () => {
     const command = buildCreateIssueCommand({
       repository: "art-tra2021/service",
-      template: "work",
+      template: "task",
       title: "共通方針",
-      fields: { hierarchy: "トップレベル成果", outcome: "運用を統一する" },
+      fields: { action: "運用を統一する" },
       mergeMode: "緊急マージ（事後レビュー必須）",
+      relationships: { parent: "42" },
       actor: "U123",
       schema: {
-        id: "work",
-        name: "作業",
-        titlePrefix: "[Work] ",
-        labels: ["type/work"],
-        fields: [{ id: "outcome", label: "成果", kind: "textarea", required: true }],
+        id: "task",
+        name: "PR実装タスク",
+        titlePrefix: "[Task] ",
+        labels: ["type/task"],
+        fields: [{ id: "action", label: "実装", kind: "textarea", required: true }],
       },
     });
     expect(command.fields.merge).toBe("緊急マージ（事後レビュー必須）");
-    expect(command.fields.hierarchy).toBe("トップレベル成果");
+    expect(command.relationships?.parent?.number).toBe(42);
   });
 
-  test("workとbusinessはトップレベルか親Issue付きの子を明示する", () => {
+  test("workとbusinessは親Intakeが必須の成果Issueにする", () => {
     const schema = {
       id: "work",
       name: "作業",
@@ -103,44 +95,53 @@ describe("Issue作成command", () => {
       buildCreateIssueCommand({
         repository: "art-tra2021/service",
         template: "work",
-        title: "階層なし",
+        title: "親なしWork",
         fields: { outcome: "成果" },
         actor: "U123",
         schema,
       }),
-    ).toThrow("階層を選択してください");
-    expect(() =>
-      buildCreateIssueCommand({
-        repository: "art-tra2021/service",
-        template: "work",
-        title: "親なしの子",
-        fields: { hierarchy: "既存Issueの子", outcome: "成果" },
-        actor: "U123",
-        schema,
-      }),
-    ).toThrow("既存Issueの子には親Issueを指定してください");
-    expect(() =>
-      buildCreateIssueCommand({
-        repository: "art-tra2021/service",
-        template: "work",
-        title: "親付きトップレベル",
-        fields: { hierarchy: "トップレベル成果", outcome: "成果" },
-        relationships: { parent: "42" },
-        actor: "U123",
-        schema,
-      }),
-    ).toThrow("トップレベル成果には親Issueを指定できません");
+    ).toThrow("親Intakeを指定してください");
 
-    const child = buildCreateIssueCommand({
+    const decomposed = buildCreateIssueCommand({
       repository: "art-tra2021/service",
       template: "work",
-      title: "親付きの子",
-      fields: { hierarchy: "既存Issueの子", outcome: "成果" },
+      title: "Intakeから分解したWork",
+      fields: { outcome: "成果" },
       relationships: { parent: "42" },
       actor: "U123",
       schema,
     });
-    expect(child.relationships?.parent?.number).toBe(42);
+    expect(decomposed.relationships?.parent?.number).toBe(42);
+  });
+
+  test("古いWork templateのmerge項目とlabelを成果Issueへ引き継がない", () => {
+    const schema = {
+      id: "work",
+      name: "旧Work",
+      titlePrefix: "[Work] ",
+      labels: ["type/work", "merge/review"],
+      fields: [
+        { id: "outcome", label: "成果", kind: "textarea" as const, required: true },
+        { id: "merge", label: "マージ方式", kind: "select" as const, required: true },
+      ],
+    };
+    const command = buildCreateIssueCommand({
+      repository: "art-tra2021/service",
+      template: "work",
+      title: "成果",
+      fields: {
+        outcome: "成果を調整する",
+        merge: "自分でマージ可",
+      },
+      relationships: { parent: "42" },
+      actor: "U123",
+      schema,
+    });
+    expect(command.fields).not.toHaveProperty("merge");
+
+    const createInput = buildIssueCreateInput(command, schema);
+    expect(createInput.labels).toEqual(["type/work"]);
+    expect(createInput.body).not.toContain("マージ方式");
   });
 
   test("親Issueとブロック関係を構造化してcommandへ保持する", () => {
@@ -182,7 +183,7 @@ describe("Issue作成command", () => {
         actor: "U123",
         schema: issueTemplate("task"),
       }),
-    ).toThrow("親の作業チケットを入力してください");
+    ).toThrow("Taskには親Work / Businessを指定してください");
   });
 
   test("テンプレート未導入repositoryでは標準Issueを構造化できる", () => {

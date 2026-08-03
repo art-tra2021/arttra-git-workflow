@@ -1,23 +1,15 @@
 name: 営業・業務変更
-description: コード以外もPRで変更履歴を残すための作業
+description: 複数のTaskを束ねる営業・業務成果の調整Issue。Slackでは独立した親投稿を持つ
 title: "[Business] "
-labels: ["type/business", "status/todo", "merge/review"]
+labels: ["type/business", "status/todo"]
 body:
-  - type: dropdown
-    id: hierarchy
-    attributes:
-      label: 階層
-      description: 独立した成果ならトップレベル、既存成果の一部なら子Issueを選ぶ。
-      options:
-        - トップレベル成果
-        - 既存Issueの子
-    validations:
-      required: true
   - type: input
     id: parent
     attributes:
-      label: 親Issue
-      description: 「既存Issueの子」を選んだ場合は必須。例：#123
+      label: 親Intake
+      description: type/intake Issueを1件指定する。別repositoryの場合はIssue URLを書く。例：#123
+    validations:
+      required: true
   - type: textarea
     id: current
     attributes:
@@ -58,16 +50,6 @@ body:
     attributes:
       label: 確認方法
       description: 変更結果を誰がどの手順で確認できるかを書く。
-    validations:
-      required: true
-  - type: dropdown
-    id: merge
-    attributes:
-      label: マージ方式
-      options:
-        - 通常レビュー（既定）
-        - 自分でマージ可
-        - 緊急マージ（事後レビュー必須）
     validations:
       required: true
   - type: input

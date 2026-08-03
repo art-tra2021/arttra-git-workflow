@@ -17,7 +17,7 @@ function command(merge: string): CreateIssueCommand {
     schemaVersion: 1,
     kind: "issue.create",
     repository: "example/repo",
-    template: "work",
+    template: "task",
     title: "test",
     fields: { merge },
     actor: "U_REQUESTER",

@@ -377,7 +377,7 @@ struct PullRequestArgs {
     /// Pull Request body. A standard body is generated when omitted.
     #[arg(long)]
     body: Option<String>,
-    /// Related GitHub Issue number. Defaults to the number in the branch name.
+    /// The single type/task Issue closed by this Pull Request. Defaults to the branch Issue.
     #[arg(long)]
     issue: Option<u64>,
     /// Base branch. Defaults to the first protected branch.
@@ -405,7 +405,7 @@ struct BranchArgs {
     /// Branch type such as feature, fix, or hotfix.
     #[arg(long = "type", value_name = "TYPE")]
     kind: Option<String>,
-    /// Related GitHub Issue number.
+    /// Related type/task Issue number.
     #[arg(long)]
     issue: Option<u64>,
     /// Short ASCII/kebab description.
@@ -443,7 +443,7 @@ struct IssueArgs {
     /// Issue class: intake, work, task, or business.
     #[arg(long, value_enum)]
     kind: Option<IssueKind>,
-    /// Merge policy for work and business Issues.
+    /// Merge policy for a PR-sized task Issue.
     #[arg(long, value_enum)]
     merge: Option<MergeMode>,
     #[arg(long)]
@@ -493,12 +493,9 @@ struct IssueArgs {
     /// Completion condition for work and task Issues.
     #[arg(long)]
     done: Option<String>,
-    /// Parent Issue number.
-    #[arg(long, conflicts_with = "top_level")]
-    parent: Option<u64>,
-    /// Explicitly declare a work or business Issue as a top-level outcome.
-    #[arg(long, conflicts_with = "parent")]
-    top_level: bool,
+    /// Parent Issue number, owner/repo#number, or GitHub Issue URL.
+    #[arg(long)]
+    parent: Option<String>,
     /// Blocking Issue number. May be repeated.
     #[arg(long)]
     blocked_by: Vec<u64>,
@@ -560,17 +557,17 @@ impl IssueKind {
     }
 
     fn needs_merge_policy(self) -> bool {
-        matches!(self, Self::Work | Self::Business)
+        matches!(self, Self::Task)
     }
 }
 
 impl std::fmt::Display for IssueKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Intake => "相談・受付 — まだ整理できていない依頼やアイデア",
-            Self::Work => "作業チケット — 単独で目的と完了条件を持つ仕事",
-            Self::Task => "小タスク — 親Issueを分けた具体的な作業",
-            Self::Business => "営業・業務変更 — 開発以外の提案・契約・運用作業",
+            Self::Intake => "相談・受付 — WorkまたはBusinessへ整理・分解する入口",
+            Self::Work => "開発成果 — 複数のTaskをまとめる独立した調整単位",
+            Self::Task => "PR単位の実装 — WorkまたはBusinessを親に持つleaf",
+            Self::Business => "業務成果 — 複数のTaskをまとめる独立した調整単位",
         })
     }
 }
@@ -631,8 +628,7 @@ struct IssueDraft {
     title: String,
     #[serde(flatten)]
     content: IssueContent,
-    parent: Option<u64>,
-    top_level: bool,
+    parent: Option<String>,
     blocked_by: Vec<u64>,
     blocking: Vec<u64>,
     target_date: Option<String>,
@@ -733,8 +729,13 @@ impl IssueDraft {
         if let Some(merge) = self.merge {
             body.push_str(&format!("\n## マージ方針\n\n`{}`\n", merge.label()));
         }
-        if let Some(parent) = self.parent {
-            body.push_str(&format!("\n## 親Issue\n\n#{parent}\n"));
+        if let Some(parent) = &self.parent {
+            let display = if parent.parse::<u64>().is_ok() {
+                format!("#{parent}")
+            } else {
+                parent.clone()
+            };
+            body.push_str(&format!("\n## 親Issue\n\n{display}\n"));
         }
         if !self.blocked_by.is_empty() {
             let issues = self
@@ -1064,17 +1065,17 @@ fn tui_issue(
         IssueKind::Business,
     ];
     let choices = vec![
-        tui::PromptChoice::new("相談・受付", "まだ整理できていない依頼やアイデア"),
-        tui::PromptChoice::new("作業チケット", "単独で目的と完了条件を持つ仕事"),
-        tui::PromptChoice::new("小タスク", "親Issueを分けた具体的な作業"),
-        tui::PromptChoice::new("営業・業務変更", "提案、契約、運用など開発以外の仕事"),
+        tui::PromptChoice::new("相談・受付", "WorkまたはBusinessへ整理・分解する入口"),
+        tui::PromptChoice::new("開発成果", "複数のTaskをまとめる独立した調整単位"),
+        tui::PromptChoice::new("PR単位のTask", "WorkまたはBusinessを親に持つ実装leaf"),
+        tui::PromptChoice::new("業務成果", "複数のTaskをまとめる独立した調整単位"),
     ];
     let Some(kind_index) = shell.choose(
         action,
         home,
         "ISSUE · 1/7",
         "Issueの種類",
-        "迷ったら、完了条件が決まっている仕事は作業チケットを選びます。",
+        "未整理ならIntake、成果の調整はWork/Business、PRにする実装はTaskです。",
         &choices,
         1,
     )?
@@ -1099,7 +1100,7 @@ fn tui_issue(
             home,
             "ISSUE · 2/7",
             "マージ方針",
-            "変更の影響と権限に合わせて選びます。",
+            "Taskを閉じるPRの影響と権限に合わせて選びます。",
             &choices,
             0,
         )?
@@ -1282,7 +1283,7 @@ fn tui_issue(
                 home,
                 "ISSUE · 4/7",
                 "やること",
-                "親Issueを進めるための具体的な作業を入力します。",
+                "親のWork/Businessを進め、1本のPRで閉じられる作業を入力します。",
                 "",
                 true,
             )?
@@ -1419,15 +1420,14 @@ fn tui_issue(
     }
 
     let mut parent = String::new();
-    let mut top_level = false;
     match kind {
         IssueKind::Task => {
             let Some(value) = shell.input(
                 action,
                 home,
                 "ISSUE · 6/7",
-                "親の作業チケット",
-                "小タスクは親Issueが必須です。例: 86",
+                "親のWorkまたはBusiness",
+                "Taskはtype/workまたはtype/businessの親Issueが必須です。例: 86、owner/repo#86、Issue URL",
                 "",
                 true,
             )?
@@ -1437,39 +1437,19 @@ fn tui_issue(
             parent = value;
         }
         IssueKind::Work | IssueKind::Business => {
-            let hierarchy_choices = vec![
-                tui::PromptChoice::new("既存Issueの子にする", "親Issue番号を指定します"),
-                tui::PromptChoice::new("最上位として作る", "新しい成果・案件の起点にします"),
-            ];
-            let Some(index) = shell.choose(
+            let Some(value) = shell.input(
                 action,
                 home,
                 "ISSUE · 7/7",
-                "Issueの階層",
-                "親子関係を曖昧にせず、どちらかを明示します。",
-                &hierarchy_choices,
-                0,
+                "親Intake",
+                "type/intakeの親が必須です。別repositoryならowner/repo#番号またはIssue URLを指定します。",
+                "",
+                true,
             )?
             else {
                 return Ok(None);
             };
-            if index == 0 {
-                let Some(value) = shell.input(
-                    action,
-                    home,
-                    "ISSUE · 階層",
-                    "親Issue番号",
-                    "このIssueをまとめる上位Issueです。例: 86",
-                    "",
-                    true,
-                )?
-                else {
-                    return Ok(None);
-                };
-                parent = value;
-            } else {
-                top_level = true;
-            }
+            parent = value;
         }
         IssueKind::Intake => {}
     }
@@ -1492,21 +1472,6 @@ fn tui_issue(
     let mut blocking = String::new();
     let mut target_date = String::new();
     if with_relations {
-        if matches!(kind, IssueKind::Intake) {
-            let Some(value) = shell.input(
-                action,
-                home,
-                "ISSUE · 追加 1/4",
-                "親Issue番号",
-                "受付内容をまとめる上位Issueがある場合だけ指定します。例: 86",
-                "",
-                false,
-            )?
-            else {
-                return Ok(None);
-            };
-            parent = value;
-        }
         let Some(value) = shell.input(
             action,
             home,
@@ -1555,9 +1520,6 @@ fn tui_issue(
     args.extend(["--title".into(), title]);
     args.extend(content_args);
     push_optional_arg(&mut args, "--parent", &parent);
-    if top_level {
-        args.push("--top-level".into());
-    }
     push_repeated_args(&mut args, "--blocked-by", &blocked_by);
     push_repeated_args(&mut args, "--blocking", &blocking);
     push_optional_arg(&mut args, "--target-date", &target_date);
@@ -1609,8 +1571,8 @@ fn tui_branch(
         action,
         home,
         "BRANCH · 2/5",
-        "関連Issue番号",
-        "このbranchで対応するIssue番号です。",
+        "対応Task番号",
+        "このbranchとPRで閉じるtype/taskのIssue番号です。",
         &issue_default,
         true,
     )?
@@ -1986,10 +1948,10 @@ fn tui_pull_request(
         action,
         home,
         "PULL REQUEST · 2/5",
-        "関連Issue番号",
-        "branch名から推測できる場合は自動入力されています。",
+        "Closing Task番号",
+        "PRが閉じるtype/taskを1件指定します。branch名から推測できる場合は自動入力されています。",
         &issue_default,
-        false,
+        true,
     )?
     else {
         return Ok(None);
@@ -2507,10 +2469,7 @@ fn pull_request(mut args: PullRequestArgs) -> Result<()> {
     if !args.json {
         println!("[PULL REQUEST] 作成準備");
         println!("  branch: {} → {}", draft.branch, draft.base);
-        match draft.issue {
-            Some(issue) => println!("  関連Issue: #{issue}"),
-            None => println!("  関連Issue: なし"),
-        }
+        println!("  Closing Task: #{}", draft.issue);
         println!(
             "  状態: {}",
             if draft.draft {
@@ -2595,12 +2554,12 @@ fn branch_command(mut args: BranchArgs) -> Result<()> {
     }
     if args.issue.is_none() {
         if args.json {
-            bail!("関連Issue番号が必要です。`--issue <番号>`を指定してください");
+            bail!("対応Task番号が必要です。`--issue <type/taskのIssue番号>`を指定してください");
         }
         ensure_interactive()?;
         args.issue = Some(prompt_required_issue_number(
-            "関連Issue番号（必須）",
-            "このbranchで対応するIssue番号です。例: 71",
+            "対応Task番号（必須）",
+            "このbranchとPRで閉じるtype/taskのIssue番号です。例: 71",
         )?);
     }
     if args.slug.is_none() {
@@ -2645,12 +2604,15 @@ fn branch_command(mut args: BranchArgs) -> Result<()> {
         args.stash = true;
     }
 
+    let issue = args.issue.ok_or_else(|| {
+        anyhow!("関連Task番号が必要です。`--issue <type/taskのIssue番号>`を指定してください")
+    })?;
+    let issue_metadata = delivery::github_issue_metadata(&issue.to_string())?;
+    delivery::require_issue_kind(&issue_metadata, &["task"], "branchの対象")?;
     let draft = branch::draft(
         &policy.branch,
         required(args.kind, "--type", "branchの種類")?,
-        args.issue.ok_or_else(|| {
-            anyhow!("関連Issue番号が必要です。`--issue <番号>`を指定してください")
-        })?,
+        issue,
         required(args.slug, "--slug", "作業内容")?,
         required(args.owner, "--owner", "担当者")?,
     )?;
@@ -2722,7 +2684,7 @@ fn branch_command(mut args: BranchArgs) -> Result<()> {
         );
     } else {
         println!(
-            "✓ Issue #{}に紐づくbranchを作成しました: {}",
+            "✓ Task #{}に紐づくbranchを作成しました: {}",
             draft.issue, draft.name
         );
         if args.stash {
@@ -2745,7 +2707,9 @@ fn issue(mut args: IssueArgs) -> Result<()> {
                     IssueKind::Business,
                 ],
             )
-            .with_help_message("迷ったら、完了条件が決まっている仕事は作業チケットを選びます")
+            .with_help_message(
+                "未整理ならIntake、成果の調整はWork/Business、PRにする実装はTaskです",
+            )
             .prompt()?,
         );
     }
@@ -2765,9 +2729,9 @@ fn issue(mut args: IssueArgs) -> Result<()> {
         );
     }
     let merge = match kind {
-        IssueKind::Work | IssueKind::Business => Some(args.merge.unwrap_or(MergeMode::Review)),
-        IssueKind::Intake | IssueKind::Task if args.merge.is_none() => None,
-        IssueKind::Intake | IssueKind::Task => {
+        IssueKind::Task => Some(args.merge.unwrap_or(MergeMode::Review)),
+        IssueKind::Intake | IssueKind::Work | IssueKind::Business if args.merge.is_none() => None,
+        IssueKind::Intake | IssueKind::Work | IssueKind::Business => {
             bail!("{}では`--merge`を指定できません", kind.label())
         }
     };
@@ -2863,7 +2827,7 @@ fn issue(mut args: IssueArgs) -> Result<()> {
                 ensure_interactive()?;
                 args.action = Some(prompt_required_text(
                     "やること（必須）",
-                    "親Issueを進めるための具体的な作業を書きます",
+                    "親のWork/Businessを進め、1本のPRで閉じられる作業を書きます",
                 )?);
             }
             if args.done.is_none() {
@@ -2933,30 +2897,24 @@ fn issue(mut args: IssueArgs) -> Result<()> {
         }
     };
 
-    if interactive && args.parent.is_none() && !args.top_level {
+    if interactive && args.parent.is_none() {
         match kind {
             IssueKind::Task => {
-                args.parent = Some(prompt_required_issue_number(
-                    "親の作業チケット（必須）",
-                    "小タスクは親Issueが必須です。例: 86",
+                args.parent = Some(prompt_required_issue_reference(
+                    "親のWorkまたはBusiness（必須）",
+                    "番号、owner/repo#番号、またはGitHub Issue URLを指定します",
                 )?);
             }
             IssueKind::Work | IssueKind::Business => {
-                args.top_level = Confirm::new("最上位Issueとして作成しますか？")
-                    .with_help_message("いいえを選ぶと、このIssueをまとめる親Issue番号を入力します")
-                    .with_default(false)
-                    .prompt()?;
-                if !args.top_level {
-                    args.parent = Some(prompt_required_issue_number(
-                        "親Issue番号（必須）",
-                        "このIssueをまとめる上位Issueです。例: 86",
-                    )?);
-                }
+                args.parent = Some(prompt_required_issue_reference(
+                    "親Intake（必須）",
+                    "番号、owner/repo#番号、またはGitHub Issue URLを指定します",
+                )?);
             }
             IssueKind::Intake => {}
         }
     }
-    validate_issue_hierarchy(kind, args.parent, args.top_level)?;
+    validate_issue_hierarchy(kind, args.parent.as_deref())?;
     if interactive
         && args.parent.is_none()
         && args.blocked_by.is_empty()
@@ -2966,12 +2924,6 @@ fn issue(mut args: IssueArgs) -> Result<()> {
             .with_default(false)
             .prompt()?
     {
-        if matches!(kind, IssueKind::Intake) {
-            args.parent = prompt_optional_issue_number(
-                "親Issue番号（任意）",
-                "受付内容をまとめる上位Issueがある場合だけ指定します。例: 86",
-            )?;
-        }
         args.blocked_by = parse_issue_numbers(
             &Text::new("先に終わる必要があるIssue（任意、カンマ区切り）")
                 .with_help_message("このIssueを止めている仕事です。例: 12, 34")
@@ -2989,6 +2941,17 @@ fn issue(mut args: IssueArgs) -> Result<()> {
             args.target_date = Some(target_date.trim().to_owned());
         }
     }
+    if let Some(parent) = args.parent.clone() {
+        let parent_metadata = delivery::github_issue_metadata(&parent)?;
+        let allowed = match kind {
+            IssueKind::Task => &["work", "business"][..],
+            IssueKind::Work | IssueKind::Business => &["intake"][..],
+            IssueKind::Intake => &[][..],
+        };
+        delivery::require_issue_kind(&parent_metadata, allowed, "親")?;
+        delivery::require_no_merge_mode(&parent_metadata, "親")?;
+        args.parent = Some(parent_metadata.url);
+    }
 
     let draft = IssueDraft {
         kind,
@@ -2996,7 +2959,6 @@ fn issue(mut args: IssueArgs) -> Result<()> {
         title: required(args.title, "--title", "Issueタイトル")?,
         content,
         parent: args.parent,
-        top_level: args.top_level,
         blocked_by: args.blocked_by,
         blocking: args.blocking,
         target_date: args.target_date,
@@ -3026,8 +2988,9 @@ fn issue(mut args: IssueArgs) -> Result<()> {
     if let Some(merge) = draft.merge {
         command.args(["--label", merge.label()]);
     }
-    if let Some(parent) = draft.parent {
-        command.args(["--parent", &parent.to_string()]);
+    if let Some(parent) = draft.parent.as_deref() {
+        let normalized_parent = delivery::normalize_issue_reference(parent)?;
+        command.args(["--parent", &normalized_parent]);
     }
     if !draft.blocked_by.is_empty() {
         let blocked_by = draft
@@ -3692,26 +3655,19 @@ fn prompt_issue_optional_fields(args: &mut IssueArgs, kind: IssueKind) -> Result
     Ok(())
 }
 
-fn validate_issue_hierarchy(kind: IssueKind, parent: Option<u64>, top_level: bool) -> Result<()> {
-    if parent == Some(0) {
-        bail!("親Issue番号は1以上で指定してください");
-    }
-    if parent.is_some() && top_level {
-        bail!("`--parent`と`--top-level`は同時に指定できません");
-    }
+fn validate_issue_hierarchy(kind: IssueKind, parent: Option<&str>) -> Result<()> {
     match kind {
         IssueKind::Task if parent.is_none() => {
-            bail!("type/taskでは親Issueが必須です。`--parent <Issue番号>`を指定してください")
+            bail!(
+                "type/taskでは親WorkまたはBusinessが必須です。`--parent <Issue参照>`を指定してください"
+            )
         }
-        IssueKind::Task if top_level => {
-            bail!("type/taskは最上位にできません。`--parent <Issue番号>`を指定してください")
-        }
-        IssueKind::Work | IssueKind::Business if parent.is_none() && !top_level => bail!(
-            "{}では階層の明示が必須です。`--parent <Issue番号>`または`--top-level`を指定してください",
+        IssueKind::Work | IssueKind::Business if parent.is_none() => bail!(
+            "{}では親Intakeが必須です。`--parent <Issue参照>`を指定してください",
             kind.label()
         ),
-        IssueKind::Intake if top_level => bail!(
-            "type/intakeでは`--top-level`を指定できません。親は必要な場合だけ`--parent <Issue番号>`で指定してください"
+        IssueKind::Intake if parent.is_some() => bail!(
+            "type/intakeは整理・分解の入口なので親Issueを持てません。Work/Businessを子として作成してください"
         ),
         _ => Ok(()),
     }
@@ -3740,6 +3696,15 @@ fn prompt_required_issue_number(prompt: &str, help: &str) -> Result<u64> {
         .trim()
         .parse()
         .context("Issue番号は1以上の整数で指定してください")
+}
+
+fn prompt_required_issue_reference(prompt: &str, help: &str) -> Result<String> {
+    let value = Text::new(prompt)
+        .with_help_message(help)
+        .with_validator(non_blank_validator)
+        .prompt()?;
+    delivery::normalize_issue_reference(value.trim())?;
+    Ok(value.trim().to_owned())
 }
 
 fn prompt_optional_issue_number(prompt: &str, help: &str) -> Result<Option<u64>> {
@@ -3943,7 +3908,7 @@ mod tests {
     fn issue_body_has_stable_sections() {
         let draft = IssueDraft {
             kind: IssueKind::Work,
-            merge: Some(MergeMode::Review),
+            merge: None,
             title: "title".into(),
             content: IssueContent::Work {
                 background: "background".into(),
@@ -3955,15 +3920,14 @@ mod tests {
                 verification: "verification".into(),
                 acceptance: None,
             },
-            parent: None,
-            top_level: true,
+            parent: Some("86".into()),
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
         };
         assert_eq!(
             draft.body(),
-            "## 背景\n\nbackground\n\n## 完成するとどうなるか\n\noutcome\n\n## 完了条件\n\n- [ ] done\n\n## 対象・影響・触らない範囲\n\nscope\n\n## 確認方法\n\nverification\n\n## マージ方針\n\n`merge/review`\n"
+            "## 背景\n\nbackground\n\n## 完成するとどうなるか\n\noutcome\n\n## 完了条件\n\n- [ ] done\n\n## 対象・影響・触らない範囲\n\nscope\n\n## 確認方法\n\nverification\n\n## 親Issue\n\n#86\n"
         );
     }
 
@@ -3978,7 +3942,6 @@ mod tests {
                 urgency: IntakeUrgency::Unknown,
             },
             parent: None,
-            top_level: false,
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
@@ -3988,25 +3951,25 @@ mod tests {
 
         let task = IssueDraft {
             kind: IssueKind::Task,
-            merge: None,
+            merge: Some(MergeMode::Review),
             title: "小タスク".into(),
             content: IssueContent::Task {
                 action: "validatorを追加する".into(),
                 done: "テストが通る".into(),
                 boundaries: Some("srcだけ".into()),
             },
-            parent: Some(86),
-            top_level: false,
+            parent: Some("86".into()),
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
         };
         assert!(task.body().contains("## やること"));
         assert!(task.body().contains("## 親Issue\n\n#86"));
+        assert!(task.body().contains("## マージ方針\n\n`merge/review`"));
 
         let business = IssueDraft {
             kind: IssueKind::Business,
-            merge: Some(MergeMode::Review),
+            merge: None,
             title: "運用変更".into(),
             content: IssueContent::Business {
                 current: "現行運用".into(),
@@ -4017,8 +3980,7 @@ mod tests {
                 known_constraints: None,
                 verification: "責任者が確認".into(),
             },
-            parent: Some(86),
-            top_level: false,
+            parent: Some("art-tra2021/intake#7".into()),
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
@@ -4030,21 +3992,17 @@ mod tests {
 
     #[test]
     fn hierarchy_rules_are_deterministic_for_every_issue_kind() {
-        assert!(validate_issue_hierarchy(IssueKind::Task, None, false).is_err());
-        assert!(validate_issue_hierarchy(IssueKind::Task, Some(86), false).is_ok());
-        assert!(validate_issue_hierarchy(IssueKind::Task, Some(86), true).is_err());
+        assert!(validate_issue_hierarchy(IssueKind::Task, None).is_err());
+        assert!(validate_issue_hierarchy(IssueKind::Task, Some("86")).is_ok());
 
-        assert!(validate_issue_hierarchy(IssueKind::Work, None, false).is_err());
-        assert!(validate_issue_hierarchy(IssueKind::Work, Some(86), false).is_ok());
-        assert!(validate_issue_hierarchy(IssueKind::Work, None, true).is_ok());
+        assert!(validate_issue_hierarchy(IssueKind::Work, None).is_err());
+        assert!(validate_issue_hierarchy(IssueKind::Work, Some("owner/repo#7")).is_ok());
 
-        assert!(validate_issue_hierarchy(IssueKind::Business, None, false).is_err());
-        assert!(validate_issue_hierarchy(IssueKind::Business, Some(86), false).is_ok());
-        assert!(validate_issue_hierarchy(IssueKind::Business, None, true).is_ok());
+        assert!(validate_issue_hierarchy(IssueKind::Business, None).is_err());
+        assert!(validate_issue_hierarchy(IssueKind::Business, Some("owner/repo#7")).is_ok());
 
-        assert!(validate_issue_hierarchy(IssueKind::Intake, None, false).is_ok());
-        assert!(validate_issue_hierarchy(IssueKind::Intake, Some(86), false).is_ok());
-        assert!(validate_issue_hierarchy(IssueKind::Intake, None, true).is_err());
+        assert!(validate_issue_hierarchy(IssueKind::Intake, None).is_ok());
+        assert!(validate_issue_hierarchy(IssueKind::Intake, Some("86")).is_err());
     }
 
     #[test]

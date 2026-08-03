@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { parseIssueRequester } from "./issue-requester.ts";
 import type { GitHubWebhookJob } from "./job-queue.ts";
 import { type NotificationIntentMetadata, notificationIntentId } from "./notification-outbox.ts";
 import type {
@@ -27,8 +28,11 @@ export type LifecycleNotificationKind =
   | "review-commented"
   | "review-dismissed"
   | "revision-pushed"
+  | "ci-failed"
   | "self-merge-scheduled"
   | "self-merge-ready";
+
+export type IssueNotificationType = "intake" | "work" | "task" | "business" | null;
 
 export interface LifecycleResource {
   kind: "issue" | "pull-request";
@@ -49,7 +53,9 @@ export interface LifecycleNotification {
   resource: LifecycleResource;
   pullRequest: LifecyclePullRequest | null;
   actorLogin: string;
+  actorSlackUserId: string | null;
   slackUserIds: string[];
+  issueType: IssueNotificationType;
   summary: string;
   detail: string;
   nextAction: string;
@@ -136,15 +142,16 @@ export class LifecycleNotificationService {
     const actor = nestedString(payload, "sender", "login");
     const issue = await this.github.loadIssueContext(repository, issueNumber);
     if (action === "opened") {
+      const copy = issueOpenedCopy(issue);
       const opened = await this.send(
-        issueResource(issue),
+        issue,
         null,
         "issue-opened",
-        actor,
-        issue.assigneeLogins,
-        "Issueが作成されました。",
+        issueRootActorLogin(issue),
+        issueRootMentionLogins(issue),
+        copy.summary,
         issueOverview(issue),
-        "担当・完了条件・親子関係を確認し、着手または調整する",
+        copy.nextAction,
         issue.url,
         fingerprint({ action, url: issue.url }),
         job.deliveryId,
@@ -153,7 +160,7 @@ export class LifecycleNotificationService {
     }
     if (action === "reopened") {
       return this.send(
-        issueResource(issue),
+        issue,
         null,
         "issue-reopened",
         actor,
@@ -168,7 +175,7 @@ export class LifecycleNotificationService {
     }
     if (action === "assigned" || action === "unassigned") {
       return this.send(
-        issueResource(issue),
+        issue,
         null,
         "issue-assignment-changed",
         actor,
@@ -186,7 +193,7 @@ export class LifecycleNotificationService {
     }
     if (action !== "closed") return 0;
     return this.send(
-      issueResource(issue),
+      issue,
       null,
       "issue-completed",
       actor,
@@ -227,7 +234,7 @@ export class LifecycleNotificationService {
     }
     const issue = await this.github.loadIssueContext(repository, issueNumber);
     return this.send(
-      issueResource(issue),
+      issue,
       null,
       "comment-created",
       actor,
@@ -270,7 +277,7 @@ export class LifecycleNotificationService {
       context,
       "pr-merged",
       actor,
-      [context.authorLogin, ...context.linkedIssues.flatMap((issue) => issue.assigneeLogins)],
+      [context.authorLogin, ...(context.primaryIssue?.assigneeLogins ?? [])],
       "PRがマージされました。",
       `PR #${context.number} ${context.title}`,
       "Issueの完了条件と残作業を確認する",
@@ -285,7 +292,15 @@ export class LifecycleNotificationService {
     if (stringValue(payload.action) !== "completed") return 0;
     const checkKey = job.event === "check_run" ? "check_run" : "check_suite";
     const check = nestedObject(payload, checkKey);
-    if (stringValue(check.conclusion).toLowerCase() !== "success") return 0;
+    const conclusion = stringValue(check.conclusion).toLowerCase();
+    const failedConclusions = new Set([
+      "failure",
+      "timed_out",
+      "cancelled",
+      "action_required",
+      "stale",
+    ]);
+    if (conclusion !== "success" && !failedConclusions.has(conclusion)) return 0;
     const pullRequests = check.pull_requests;
     if (!Array.isArray(pullRequests) || pullRequests.length === 0) return 0;
     const repository = repositoryName(payload);
@@ -296,25 +311,48 @@ export class LifecycleNotificationService {
       const number = numberValue((value as Record<string, unknown>).number);
       if (number < 1) continue;
       const context = await this.github.loadPullRequestReviewContext(repository, number);
-      if (context.draft || context.state !== "open" || context.mergeableState !== "clean") continue;
-      for (const issue of context.linkedIssues.filter((candidate) =>
-        candidate.labels.includes("merge/self"),
-      )) {
+      const issue = primaryIssue(context);
+      if (!issue || context.draft || context.state !== "open") continue;
+      if (conclusion !== "success") {
+        const checkName =
+          optionalString(check.name) ?? (job.event === "check_run" ? "check" : "CI");
+        const actionUrl = optionalString(check.html_url) ?? context.url;
         notified += await this.send(
-          issueResource(issue),
+          issue,
           { number: context.number, title: context.title, url: context.url },
-          "self-merge-ready",
+          "ci-failed",
           actor,
-          issue.assigneeLogins,
-          "セルフマージ予定のPRがCIを通過しました。",
-          "第三者承認を待たず、PR作成者本人が必須CI通過後にマージします。",
-          "問題がある場合は、マージ前にセルフマージを停止してください",
-          context.url,
-          fingerprint({ headSha: context.headSha, conclusion: "success" }),
+          [context.authorLogin, ...issue.assigneeLogins],
+          "PRのCIに対応が必要です。",
+          `${checkName}: ${conclusion} / head: ${context.headSha.slice(0, 12)}`,
+          "CIの失敗内容を確認し、修正または再実行する",
+          actionUrl,
+          fingerprint({ headSha: context.headSha, conclusion }),
           job.deliveryId,
-          { repository, issueNumber: issue.number },
         );
+        continue;
       }
+      if (
+        context.mergeableState !== "clean" ||
+        issueNotificationType(issue) !== "task" ||
+        !issue.labels.includes("merge/self")
+      ) {
+        continue;
+      }
+      notified += await this.send(
+        issue,
+        { number: context.number, title: context.title, url: context.url },
+        "self-merge-ready",
+        actor,
+        issue.assigneeLogins,
+        "セルフマージ予定のPRがCIを通過しました。",
+        "第三者承認を待たず、PR作成者本人が必須CI通過後にマージします。",
+        "問題がある場合は、マージ前にセルフマージを停止してください",
+        context.url,
+        fingerprint({ headSha: context.headSha, conclusion: "success" }),
+        job.deliveryId,
+        { repository, issueNumber: issue.number },
+      );
     }
     return notified;
   }
@@ -325,9 +363,9 @@ export class LifecycleNotificationService {
     actor: string,
     job: GitHubWebhookJob,
   ): Promise<number> {
-    if (!issue.labels.includes("merge/self")) return 0;
+    if (issueNotificationType(issue) !== "task" || !issue.labels.includes("merge/self")) return 0;
     return this.send(
-      issueResource(issue),
+      issue,
       null,
       "self-merge-scheduled",
       actor,
@@ -336,7 +374,7 @@ export class LifecycleNotificationService {
       "第三者承認を待たず、PR作成者本人が必須CI通過後にマージします。",
       "問題がある場合は、マージ前にセルフマージを停止してください",
       issue.url,
-      fingerprint({ labels: issue.labels, action: stringValue(objectPayload(job).action) }),
+      fingerprint({ url: issue.url, merge: "self" }),
       job.deliveryId,
       { repository, issueNumber: issue.number },
     );
@@ -451,43 +489,30 @@ export class LifecycleNotificationService {
     eventFingerprint: string,
     sourceDeliveryId: string,
   ): Promise<number> {
+    const issue = primaryIssue(context);
+    if (!issue) return 0;
     const pullRequest = {
       number: context.number,
       title: context.title,
       url: context.url,
     };
-    const targets =
-      context.linkedIssues.length > 0
-        ? context.linkedIssues.map(issueResource)
-        : [
-            {
-              kind: "pull-request" as const,
-              number: context.number,
-              title: context.title,
-              url: context.url,
-            },
-          ];
-    let notified = 0;
-    for (const target of targets) {
-      notified += await this.send(
-        target,
-        pullRequest,
-        kind,
-        actor,
-        mentionLogins,
-        summary,
-        detail,
-        nextAction,
-        actionUrl,
-        eventFingerprint,
-        sourceDeliveryId,
-      );
-    }
-    return notified;
+    return this.send(
+      issue,
+      pullRequest,
+      kind,
+      actor,
+      mentionLogins,
+      summary,
+      detail,
+      nextAction,
+      actionUrl,
+      eventFingerprint,
+      sourceDeliveryId,
+    );
   }
 
   private async send(
-    resource: LifecycleResource,
+    issue: GitHubIssueContext,
     pullRequest: LifecyclePullRequest | null,
     kind: LifecycleNotificationKind,
     actorLogin: string,
@@ -500,40 +525,52 @@ export class LifecycleNotificationService {
     sourceDeliveryId: string,
     selfMergeControl: { repository: string; issueNumber: number } | null = null,
   ): Promise<number> {
+    const resource = issueResource(issue);
     const stateKey = `${resource.url}:${kind}`;
     const previous = await this.store.get<LifecycleNotificationState>(
       NOTIFICATION_NAMESPACE,
       stateKey,
     );
     if (previous?.fingerprint === eventFingerprint) return 0;
-    const slackUserIds = await this.resolveMentions(mentionLogins, actorLogin);
-    await this.threads.publish(resource.url, (threadTs) =>
-      this.notifier.notify(
-        {
-          schemaVersion: 1,
-          kind,
-          resource,
-          pullRequest,
-          actorLogin,
-          slackUserIds,
-          summary,
-          detail,
-          nextAction,
-          actionUrl,
-          selfMergeControl,
-        },
-        threadTs,
-        {
-          intentId: notificationIntentId({
-            kind: "lifecycle",
-            resourceUrl: resource.url,
-            notificationKind: kind,
-            eventFingerprint,
-          }),
-          sourceDeliveryId,
-        },
-      ),
-    );
+    const [slackUserIds, actorSlackUserId] = await Promise.all([
+      this.resolveMentions(mentionLogins),
+      this.resolveSlackUserId(actorLogin),
+    ]);
+    const notification: LifecycleNotification = {
+      schemaVersion: 1,
+      kind,
+      resource,
+      pullRequest,
+      actorLogin,
+      actorSlackUserId,
+      slackUserIds,
+      issueType: issueNotificationType(issue),
+      summary,
+      detail,
+      nextAction,
+      actionUrl,
+      selfMergeControl,
+    };
+    const metadata = {
+      intentId: notificationIntentId({
+        kind: "lifecycle",
+        resourceUrl: resource.url,
+        notificationKind: kind,
+        eventFingerprint,
+      }),
+      sourceDeliveryId,
+    };
+    if (kind === "issue-opened") {
+      await this.threads.ensureRoot(resource.url, () =>
+        this.notifier.notify(notification, null, metadata),
+      );
+    } else {
+      await this.threads.publishReply(
+        resource.url,
+        () => this.createIssueRoot(issue, sourceDeliveryId),
+        (threadTs) => this.notifier.notify(notification, threadTs, metadata),
+      );
+    }
     await this.store.set<LifecycleNotificationState>(NOTIFICATION_NAMESPACE, stateKey, {
       schemaVersion: 1,
       resourceUrl: resource.url,
@@ -544,18 +581,40 @@ export class LifecycleNotificationService {
     return 1;
   }
 
-  private async resolveMentions(logins: string[], actorLogin: string): Promise<string[]> {
-    const normalizedActor = actorLogin.toLowerCase();
-    const uniqueLogins = [
-      ...new Map(
-        logins
-          .filter((login) => login.toLowerCase() !== normalizedActor)
-          .map((login) => [login.toLowerCase(), login]),
-      ).values(),
-    ];
+  private async createIssueRoot(
+    issue: GitHubIssueContext,
+    sourceDeliveryId: string,
+  ): Promise<ThreadMessageResult> {
+    const [slackUserIds, actorSlackUserId] = await Promise.all([
+      this.resolveMentions(issueRootMentionLogins(issue)),
+      this.resolveSlackUserId(issueRootActorLogin(issue)),
+    ]);
+    return this.notifier.notify(
+      issueRootNotification(issue, slackUserIds, actorSlackUserId),
+      null,
+      {
+        intentId: notificationIntentId({
+          kind: "lifecycle",
+          resourceUrl: issue.url,
+          notificationKind: "issue-opened",
+          eventFingerprint: "issue-root-v1",
+        }),
+        sourceDeliveryId,
+      },
+    );
+  }
+
+  private async resolveMentions(logins: string[]): Promise<string[]> {
+    const uniqueLogins = [...new Map(logins.map((login) => [login.toLowerCase(), login])).values()];
     const resolved = await Promise.all(uniqueLogins.map(this.resolveSlackUserId));
     return [...new Set(resolved.filter((value): value is string => value !== null))];
   }
+}
+
+function primaryIssue(context: PullRequestReviewContext): GitHubIssueContext | null {
+  return context.closingIssueCount === 1 && context.primaryIssue?.labels.includes("type/task")
+    ? context.primaryIssue
+    : null;
 }
 
 function issueResource(issue: GitHubIssueContext): LifecycleResource {
@@ -564,23 +623,95 @@ function issueResource(issue: GitHubIssueContext): LifecycleResource {
 
 function issueOverview(issue: GitHubIssueContext): string {
   const type = issue.labels.find((label) => label.startsWith("type/")) ?? "種別未設定";
-  const merge = issue.labels.find((label) => label.startsWith("merge/")) ?? "merge方針未設定";
   const owners = issue.assigneeLogins.map((login) => `@${login}`).join("、") || "未担当";
   const parent = issue.parentIssueUrl ? issueReferenceFromUrl(issue.parentIssueUrl) : "なし";
   const done = issueSectionSummary(issue.body, "完了条件") ?? "未記載";
   const targetDate = issueSectionSummary(issue.body, "目標日") ?? "未設定";
-  return [
+  const overview = [
     `種別: ${type}`,
     `親Issue: ${parent}`,
     `担当: ${owners}`,
     `完了条件: ${done}`,
     `目標日: ${targetDate}`,
-    `マージ方針: ${merge}`,
-  ].join("\n");
+  ];
+  if (issueNotificationType(issue) === "task") {
+    overview.push(
+      `マージ方針: ${issue.labels.find((label) => label.startsWith("merge/")) ?? "未設定"}`,
+    );
+  }
+  return overview.join("\n");
+}
+
+export function issueRootNotification(
+  issue: GitHubIssueContext,
+  slackUserIds: string[],
+  actorSlackUserId: string | null,
+): LifecycleNotification {
+  const copy = issueOpenedCopy(issue);
+  return {
+    schemaVersion: 1,
+    kind: "issue-opened",
+    resource: issueResource(issue),
+    pullRequest: null,
+    actorLogin: issueRootActorLogin(issue),
+    actorSlackUserId,
+    slackUserIds,
+    issueType: issueNotificationType(issue),
+    summary: copy.summary,
+    detail: issueOverview(issue),
+    nextAction: copy.nextAction,
+    actionUrl: issue.url,
+    selfMergeControl: null,
+  };
+}
+
+export function issueRootMentionLogins(issue: GitHubIssueContext): string[] {
+  return [issueRootActorLogin(issue), issue.authorLogin, ...issue.assigneeLogins];
+}
+
+export function issueRootActorLogin(issue: GitHubIssueContext): string {
+  return parseIssueRequester(issue.body)?.login ?? issue.authorLogin;
+}
+
+function issueNotificationType(issue: GitHubIssueContext): IssueNotificationType {
+  for (const type of ["intake", "work", "task", "business"] as const) {
+    if (issue.labels.includes(`type/${type}`)) return type;
+  }
+  return null;
+}
+
+function issueOpenedCopy(issue: GitHubIssueContext): { summary: string; nextAction: string } {
+  switch (issueNotificationType(issue)) {
+    case "intake":
+      return {
+        summary: "Intakeに新しい相談・要望が届きました。",
+        nextAction: "背景と期待結果を整理し、WorkまたはBusinessへ分解する",
+      };
+    case "work":
+      return {
+        summary: "開発Workが作成されました。",
+        nextAction: "目的・完了条件・親Issueを確認し、実装に着手する",
+      };
+    case "task":
+      return {
+        summary: "親Issue配下のTaskが作成されました。",
+        nextAction: "親Issueと作業範囲を確認し、担当作業を進める",
+      };
+    case "business":
+      return {
+        summary: "Business項目が作成されました。",
+        nextAction: "期待する事業上の変化・確認者・検証方法を確認する",
+      };
+    default:
+      return {
+        summary: "Issueが作成されました。",
+        nextAction: "種別・担当・完了条件・親子関係を確認する",
+      };
+  }
 }
 
 function issueReferenceFromUrl(url: string): string {
-  const match = url.match(/\/repos\/([^/]+\/[^/]+)\/issues\/([1-9][0-9]*)$/u);
+  const match = url.match(/(?:\/repos)?\/([^/]+\/[^/]+)\/issues\/([1-9][0-9]*)$/u);
   return match?.[1] && match[2] ? `${match[1]}#${match[2]}` : url;
 }
 
@@ -675,6 +806,10 @@ function nestedValue(value: Record<string, unknown>, keys: string[]): unknown {
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === "string" && value ? value : null;
 }
 
 function numberValue(value: unknown): number {

@@ -6,9 +6,10 @@ set -euo pipefail
 
 pr_json="$(
 	gh pr view "$PR_NUMBER" --repo "$GH_REPO" \
-		--json author,closingIssuesReferences,headRefName,reviews
+		--json author,body,closingIssuesReferences,headRefName,reviews
 )"
 author="$(jq -r '.author.login' <<<"$pr_json")"
+body="$(jq -r '.body // ""' <<<"$pr_json")"
 head_ref="$(jq -r '.headRefName' <<<"$pr_json")"
 closing_issue_count="$(jq -r '(.closingIssuesReferences // []) | length' <<<"$pr_json")"
 
@@ -26,19 +27,61 @@ if [[ "$closing_issue_count" -eq 0 ]]; then
 fi
 
 if [[ "$closing_issue_count" -ne 1 ]]; then
-	echo "AR-PR-005: primary closing Issueはちょうど1件にしてください（現在${closing_issue_count}件）。本文の \`Closes #123\` は1件だけにし、追加の関連Issueは \`Relates to #456\` などで記載してください。" >&2
+	echo "AR-PR-005: primary closing Taskはちょうど1件にしてください（現在${closing_issue_count}件）。本文の \`Closes #123\` はTask 1件だけにし、親Work / Businessはnative parentの完全なIssue URLを \`Relates to https://github.com/owner/repo/issues/456\` で記載してください。" >&2
 	exit 1
 fi
 
 issue_number="$(jq -r '.closingIssuesReferences[0].number' <<<"$pr_json")"
-labels="$(gh api "repos/${GH_REPO}/issues/${issue_number}" --jq '.labels[].name')"
-mode_count="$(grep -Ec '^merge/(review|self|emergency)$' <<<"$labels" || true)"
-if [[ "$mode_count" -ne 1 ]]; then
+branch_issue="${head_ref#*/}"
+branch_issue="${branch_issue%%-*}"
+if [[ ! "$branch_issue" =~ ^[1-9][0-9]*$ || "$branch_issue" != "$issue_number" ]]; then
+	echo "AR-PR-007: branch \`${head_ref}\` とprimary closing Task #${issue_number}が一致しません。Task #${issue_number}から\`git ar branch\`でbranchを作り直すか、PRの\`Closes\`をbranchのTaskに揃えてください。" >&2
+	exit 1
+fi
+
+issue_json="$(gh issue view "$issue_number" --repo "$GH_REPO" --json labels,parent)"
+labels="$(jq -r '.labels[].name' <<<"$issue_json")"
+issue_types="$(grep -E '^type/' <<<"$labels" || true)"
+issue_type_count="$(grep -Ec '^type/' <<<"$labels" || true)"
+if [[ "$issue_type_count" -ne 1 || "$issue_types" != "type/task" ]]; then
+	display_type="${issue_types//$'\n'/, }"
+	display_type="${display_type:-typeラベルなし}"
+	echo "AR-PR-006: primary closing Task #${issue_number} は type/task である必要があります（現在: ${display_type}）。Work / Business / Intakeを直接Closesせず、その配下にPR 1件で完了できるTaskを作成し、PR本文を \`Closes #<Task番号>\` に変更してください。" >&2
+	exit 1
+fi
+
+mode_count="$(grep -Ec '^merge/' <<<"$labels" || true)"
+mode="$(grep -E '^merge/' <<<"$labels" || true)"
+if [[ "$mode_count" -ne 1 || ! "$mode" =~ ^merge/(review|self|emergency)$ ]]; then
 	echo "AR-PR-002: Issue #${issue_number} に merge/review, merge/self, merge/emergency のどれか一つを付けてください。" >&2
 	exit 1
 fi
 
-mode="$(grep -E '^merge/(review|self|emergency)$' <<<"$labels")"
+parent_url="$(jq -r '.parent.url // empty' <<<"$issue_json")"
+if [[ -z "$parent_url" ]]; then
+	echo "AR-PR-008: Task #${issue_number}にnative parentがありません。親WorkまたはBusinessを設定してください。" >&2
+	exit 1
+fi
+parent_json="$(gh issue view "$parent_url" --json labels,url)"
+parent_labels="$(jq -r '.labels[].name' <<<"$parent_json")"
+parent_types="$(grep -E '^type/' <<<"$parent_labels" || true)"
+parent_type_count="$(wc -l <<<"$parent_types" | tr -d ' ')"
+if [[ -z "$parent_types" ]]; then
+	parent_type_count=0
+fi
+if [[ "$parent_type_count" -ne 1 || ! "$parent_types" =~ ^type/(work|business)$ ]]; then
+	echo "AR-PR-009: Task #${issue_number}の親はtype/workまたはtype/businessである必要があります（現在: ${parent_types:-typeラベルなし}）。" >&2
+	exit 1
+fi
+if grep -Eq '^merge/' <<<"$parent_labels"; then
+	echo "AR-PR-011: Task #${issue_number}の親にmergeラベルがあります。merge方針はtype/taskだけに設定し、親Work / Businessからmergeラベルを外してください。" >&2
+	exit 1
+fi
+if ! grep -Fxq "Relates to ${parent_url}" <<<"$body"; then
+	echo "AR-PR-010: PR本文へTaskの実際の親を \`Relates to ${parent_url}\` と記載してください。" >&2
+	exit 1
+fi
+
 case "$mode" in
 merge/self)
 	echo "✓ Issue #${issue_number}: 本人マージ可"

@@ -85,6 +85,9 @@ export class PullRequestReviewService {
     if (context.draft || context.state !== "open") {
       return null;
     }
+    if (context.closingIssueCount !== 1 || !context.primaryIssue?.labels.includes("type/task")) {
+      return null;
+    }
     const { users, teams } = collectReviewerCandidates(context);
     const approved = new Set(context.approvedReviewerLogins.map(normalizeLogin));
     const changesRequested = new Set(context.changesRequestedReviewerLogins.map(normalizeLogin));
@@ -151,6 +154,8 @@ export class PullRequestReviewService {
         headSha: context.headSha,
       },
       authorLogin: context.authorLogin,
+      primaryIssue: context.primaryIssue,
+      closingIssueCount: context.closingIssueCount,
       linkedIssues: context.linkedIssues,
       requiredApprovals: context.requiredApprovals,
       reviewers: reviewerModels,
@@ -158,7 +163,7 @@ export class PullRequestReviewService {
         slug,
         reasons: [...reasons].sort(),
       })),
-      dueDate: extractDueDate(context.linkedIssues.map((issue) => issue.body)),
+      dueDate: extractDueDate(context.primaryIssue ? [context.primaryIssue.body] : []),
       nextAction: "GitHubで変更内容を確認し、Approveまたは修正依頼を行う",
       updatedAt: new Date(this.now()).toISOString(),
     };
@@ -225,7 +230,10 @@ export function collectReviewerCandidates(context: PullRequestReviewContext): {
   for (const slug of context.requestedTeamSlugs) {
     addReason(teams, slug, "GitHubで指定されたreviewer team");
   }
-  for (const issue of context.linkedIssues) {
+  for (const issue of context.closingIssueCount === 1 &&
+  context.primaryIssue?.labels.includes("type/task")
+    ? [context.primaryIssue]
+    : []) {
     for (const reviewer of parsePlannedReviewers(issue.body)) {
       addUser(users, reviewer.login, `Issue #${issue.number}の予定レビュワー`, reviewer.id);
     }

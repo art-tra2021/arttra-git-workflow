@@ -217,8 +217,7 @@ export class IssueApprovalService {
 
 export function requiresIssueApproval(command: CreateIssueCommand): boolean {
   return (
-    (command.template === "work" || command.template === "business") &&
-    APPROVAL_REQUIRED_MERGE_MODES.has(command.fields.merge ?? "")
+    command.template === "task" && APPROVAL_REQUIRED_MERGE_MODES.has(command.fields.merge ?? "")
   );
 }
 

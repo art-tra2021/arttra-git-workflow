@@ -36,20 +36,33 @@ GitHub App本体へ復帰した後もrepository webhookを無断で削除せず�
 
 ## スレッド規則
 
-関連IssueがあるPRはIssue URLをthread keyとする。
-関連IssueがないPRだけはPR URLをthread keyとする。
+PRはGitHubが`Closes`から解決したprimary closing Taskをちょうど1件持つことを必須とし、そのTask URLだけをthread keyとする。
+`Closes`はPRが直接完了させるTaskを示す完了リンクであり、Issue同士の親子関係や依存関係ではない。
+`Relates to`や本文中の単なる`#123`は通知先にしない。
+primary closing Taskが0件、複数件、または`type/task`でないPRは、PR単位のchannel直下投稿へfallbackせず、policy違反として修正する。
+親WorkまたはBusinessとTaskはそれぞれ独立したSlack親投稿を持ち、PRの会話を親Work側へ混ぜない。
+
+Issue作成eventより先にコメントやPR eventが届いた場合も、Issue種別に応じた概要を親投稿として作成してから続報を返信する。
+複数workerが同時に最初のeventを処理しても親投稿は一つだけ作り、root作成中の処理は平投稿せず再試行する。
 同じIssueに対する次の通知は、同一の親投稿への返信に集約する。
 
 | GitHub上の出来事 | 通知対象 |
 | --- | --- |
-| PR作成・レビュー依頼 | reviewerとPR作成者以外のIssue担当者 |
+| Issueの最初の親投稿 | Issue作成者とIssue担当者 |
+| PR作成・レビュー依頼 | 指定reviewerとIssue担当者 |
 | Issueコメント | Issue担当者と本文で明示されたGitHubユーザー |
 | PR会話コメント・コードコメント | PR作成者と本文で明示されたGitHubユーザー |
 | 差し戻し | PR作成者 |
 | 差し戻し後の修正push | 差し戻したreviewer |
 | 承認 | PR作成者 |
+| CI失敗・timeout・cancel・要操作 | PR作成者とIssue担当者 |
 | マージ | Issue担当者 |
 | Issue完了 | Issue担当者 |
+
+実行者に検証済みSlack identityがある場合、`@github-login`という文字列ではなくnative mentionで表示する。
+Issueの親投稿はIntake、Work、Task、Businessごとに見出し、説明、次の操作を変える。
+セルフマージ対象になった最初の警告だけはIssue threadへの返信をchannelにも展開し、停止機会を作る。
+CI通過後のセルフマージ実行可能通知は同じthread内だけに置き、channelを二度通知しない。
 
 GitHubログインとSlack user IDの対応は、本人が完了したGitHub OAuthだけを正とする。
 表示名やメールアドレスから対応を推測してはならない。
@@ -78,14 +91,16 @@ fallback textにも同じ絵文字と見出しを含めるが、本文中の装�
 
 ## E2E確認
 
-1. `merge/self`を付けた検証用Issueを作り、担当者と予定reviewerを設定する。
-2. `Closes #<Issue番号>`を含むPRを作る。
-3. Slackの親投稿で予定reviewerがnative mentionされていることを確認する。
+1. 検証用Workと、その子に`merge/self`を付けたTaskを作り、Taskへ担当者と予定reviewerを設定する。
+2. Taskだけを`Closes #<Task番号>`で閉じ、親Workはnative parentの完全なIssue URLを`Relates to https://github.com/owner/repo/issues/<Work番号>`で参照するPRを作る。
+3. SlackのIssue親投稿でIssue作成者と担当者がnative mentionされ、レビュー依頼の返信で予定reviewerがnative mentionされていることを確認する。
 4. Issueコメント、PR会話コメント、レビューコメントを一つずつ追加する。
 5. 差し戻し、修正push、承認の順に実施する。
 6. PRをsquash mergeし、Issueを完了させる。
-7. すべての通知が同じIssueスレッドにあり、同じイベントの重複通知がないことを確認する。
-8. GitHub Webhook delivery、Cloud Run log、Cloud Tasksの失敗件数を確認する。
+7. CI失敗を一度発生させ、primary Issue threadへ通知されることを確認する。
+8. セルフマージ予定の初回だけchannelへ展開され、CI通過通知はthread内だけであることを確認する。
+9. すべての通知が同じIssueスレッドにあり、同じイベントの重複通知がないことを確認する。
+10. GitHub Webhook delivery、Cloud Run log、Cloud Tasksの失敗件数を確認する。
 
 検証用Issue、PR、Slackメッセージは監査証跡として残す。
 失敗時も削除せず、原因と再試験結果をIssueへ追記する。

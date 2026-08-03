@@ -100,11 +100,15 @@ describe("PullRequestReviewService", () => {
   });
 
   test("GitHubで手動指定されたreviewerをSlack identityへ通知し、再処理で重複通知しない", async () => {
+    const base = context();
+    if (!base.primaryIssue) throw new Error("test fixtureにprimary Taskが必要です");
+    const primaryIssue = { ...base.primaryIssue, body: "" };
     const github = new FakeReviewClient({
-      ...context(),
+      ...base,
       files: [],
-      linkedIssues: [],
       codeowners: "",
+      primaryIssue,
+      linkedIssues: [primaryIssue],
       requestedReviewerLogins: ["carol"],
       requestedTeamSlugs: ["backend"],
     });
@@ -154,6 +158,37 @@ describe("PullRequestReviewService", () => {
       github.requests.every(({ reviewers, teams }) => reviewers.length === 0 && teams.length === 0),
     ).toBe(true);
   });
+
+  test("closing Taskが無効なPRでは副作用を作らず、修正後は即時通知する", async () => {
+    const valid = context();
+    const github = new FakeReviewClient({
+      ...valid,
+      primaryIssue: null,
+      closingIssueCount: 0,
+      linkedIssues: [],
+    });
+    const notifications: ReviewRequestReadModel[] = [];
+    const service = new PullRequestReviewService(
+      github,
+      { findByGitHubUserId: async () => null },
+      new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-review-invalid-task-"))),
+      {
+        notify: async (model) => {
+          notifications.push(structuredClone(model));
+        },
+      },
+      { slackTeamId: "T123" },
+    );
+
+    expect(await service.process("example/repo", 28)).toBeNull();
+    expect(github.requests).toHaveLength(0);
+    expect(notifications).toHaveLength(0);
+
+    github.value = valid;
+    expect(await service.process("example/repo", 28)).not.toBeNull();
+    expect(github.requests).toHaveLength(1);
+    expect(notifications).toHaveLength(1);
+  });
 });
 
 describe("reviewer構造", () => {
@@ -176,7 +211,7 @@ describe("reviewer構造", () => {
 
 class FakeReviewClient implements GitHubReviewClient {
   readonly requests: Array<{ reviewers: string[]; teams: string[] }> = [];
-  private readonly value: PullRequestReviewContext;
+  value: PullRequestReviewContext;
 
   constructor(value: PullRequestReviewContext) {
     this.value = value;
@@ -202,6 +237,22 @@ class FakeReviewClient implements GitHubReviewClient {
 }
 
 function context(): PullRequestReviewContext {
+  const issue = {
+    number: 29,
+    title: "通知を統合する",
+    url: "https://github.example/example/repo/issues/29",
+    state: "open" as const,
+    authorLogin: "requester",
+    assigneeLogins: ["owner"],
+    labels: ["type/task", "merge/review"],
+    body: [
+      "## 目標日",
+      "",
+      "2026-08-15",
+      "",
+      '<!-- ar:reviewers:v1 [{"id":101,"login":"alice"}] -->',
+    ].join("\n"),
+  };
   return {
     schemaVersion: 1,
     repository: "example/repo",
@@ -214,24 +265,9 @@ function context(): PullRequestReviewContext {
     state: "open",
     body: "Closes #29",
     files: ["src/app.ts", "docs/guide.md"],
-    linkedIssues: [
-      {
-        number: 29,
-        title: "通知を統合する",
-        url: "https://github.example/example/repo/issues/29",
-        state: "open",
-        authorLogin: "requester",
-        assigneeLogins: ["owner"],
-        labels: ["type/work", "merge/review"],
-        body: [
-          "## 目標日",
-          "",
-          "2026-08-15",
-          "",
-          '<!-- ar:reviewers:v1 [{"id":101,"login":"alice"}] -->',
-        ].join("\n"),
-      },
-    ],
+    primaryIssue: issue,
+    closingIssueCount: 1,
+    linkedIssues: [issue],
     codeowners: ["*.md @bob", "src/* @alice", "/src/** @example/frontend"].join("\n"),
     requiredApprovals: 1,
     requestedReviewerLogins: [],

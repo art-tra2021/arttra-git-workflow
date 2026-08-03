@@ -225,11 +225,13 @@ export class GitHubWebhookProcessor {
     ) {
       return;
     }
+    const retryable = error instanceof RetryableWorkError;
     await this.store.compareAndSet(DELIVERY_NAMESPACE, job.deliveryId, current.revision, {
       ...current,
       revision: current.revision + 1,
-      status: "failed",
-      failedAt: new Date().toISOString(),
+      status: retryable ? "retryable" : "failed",
+      expiresAt: retryable ? new Date(0).toISOString() : current.expiresAt,
+      ...(retryable ? {} : { failedAt: new Date().toISOString() }),
       failure: failureCode(error),
     });
   }
@@ -243,7 +245,8 @@ function failureCode(error: unknown): string {
 
 function shouldRefreshWorkNotifications(job: GitHubWebhookJob): boolean {
   if (job.event === "check_run" || job.event === "check_suite") {
-    return Boolean(actionFrom(job));
+    // CI通知はprimary closing Task、PR作成者、check URLを持つlifecycle通知へ一本化する。
+    return false;
   }
   return shouldSyncProjectList(job);
 }

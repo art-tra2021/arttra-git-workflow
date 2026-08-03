@@ -15,23 +15,37 @@ Issueは次の単位に分けます。
 | 種類 | 用途 | 単独PR |
 | --- | --- | --- |
 | Intake | 未整理の相談、営業情報、思いつき | 作らない |
-| Work | 完了条件を持つ変更成果 | 原則1件 |
-| Task | Workを分解した短い行動 | 原則作らない |
-| Business | 文書・条件・業務フローの変更 | 1件 |
+| Work | 開発成果と複数Taskの完了を管理する | 作らない |
+| Task | 1件のPRで完了できる実装・変更単位 | 1件 |
+| Business | 業務成果と複数Taskの完了を管理する | 作らない |
+
+親Issueは、単に全項目を集める箱ではなく、完了を判定できる成果単位にします。
+Intakeは解析・整理してWorkまたはBusinessへ分解した時点で役目を終え、実装Issueを永続的に抱える親にはしません。
+階層は`Intake → Work / Business → Task → PR`へ固定します。Intakeは親を持たず、Work / Businessは親Intake、Taskは親Work / Businessを必須とし、Work / Businessを最上位にはしません。
+repositoryをまたぐ親は`owner/repo#番号`またはGitHub Issue URLで指定します。
+Workの直下は10件程度を目安とし、20件を超えそうならIntake配下の複数Workなど、成果別の単位へ再編するかを確認します。
+件数はvalidatorで拒否する条件ではなく、分割を見直す運用上のシグナルです。
+TaskはWorkまたはBusinessの子となる末端作業で、さらに子Issueを持たせません。
+
+PRは本文の`Closes #<Issue番号>`で、1件のPRで完了できるTaskをちょうど1件だけ閉じます。
+Intake、Work、Businessや複数Issueをprimary closing Taskにせず、Taskのnative parentは`Relates to https://github.com/owner/repo/issues/<番号>`で参照します。
+branch名のTask番号、`git ar pr --issue`、`Closes`のTask番号はすべて同じにします。
+これにより、100件規模の活動を一つの親IssueやSlackスレッドへ集中させません。
+`Closes`はPRとIssueの完了リンクであり、Issue同士の`parent / sub-issue`や`blocked-by / blocking`には変換しません。
 
 ## マージ
 
 Merge commitとrebase mergeは使わず、squash mergeへ統一します。
 意味的に別々に残す必要がある変更は、commitを保存するためではなく、レビューと取り消しの境界を明確にするため別PRにします。
 
-マージ方式はIssueのラベル一つで決めます。
+マージ方式はPRが`Closes`するTaskのラベル一つで決めます。
 
 - `merge/review`: 既定。PR作成者以外の承認が1件必要。
 - `merge/self`: 小さな変更、PL判断、十分に自動検証できる変更。承認なしで本人がマージ可能。
 - `merge/emergency`: `hotfix/` branch限定。即時マージ後に事後レビューIssueを自動作成し、翌営業日までに確認。
 
 GitHub Ruleset側の承認数は0にし、`policy` checkがこの差を機械判定します。
-これにより、Rulesetを毎回バイパスせずIssue時点の明示的な判断を監査できます。
+これにより、Rulesetを毎回バイパスせずTask作成時点の明示的な判断を監査できます。
 
 ## 競合と滞留
 
@@ -59,7 +73,7 @@ branch命名違反とツールチェーン違反は、安定したerror code、�
 
 Issueの親子、blocked-by、blockingはGitHub CLI 2.94以降のnative relationshipを使います。
 本文の自由記述から依存を推測せず、`git ar issue --blocked-by`またはcore `gh issue create/edit`で登録します。
-TUIでは任意の詳細設定、AIでは`--parent`、`--blocked-by`、`--blocking`を使います。
+TUIと非対話CLIは同じ階層validatorを使います。AIでは`--parent <番号|owner/repo#番号|Issue URL>`、`--blocked-by`、`--blocking`を使います。
 
 ## Slackから見るProject
 

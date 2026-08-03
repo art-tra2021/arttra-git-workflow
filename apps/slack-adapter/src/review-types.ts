@@ -23,6 +23,15 @@ export interface PullRequestReviewContext {
   mergeableState?: string;
   body: string;
   files: string[];
+  /** GitHubがclosing referenceとして解決したIssueがちょうど1件のときだけ設定する。 */
+  primaryIssue: GitHubIssueContext | null;
+  /** GitHubのclosingIssuesReferences.totalCount。0件と複数件を区別する。 */
+  closingIssueCount: number;
+  /**
+   * GitHubが解決したclosing Issue一覧。
+   *
+   * @deprecated 通知routeにはprimaryIssueを使う。互換性のため一時的に保持する。
+   */
   linkedIssues: GitHubIssueContext[];
   codeowners: string;
   requiredApprovals: number;
@@ -73,6 +82,8 @@ export interface ReviewRequestReadModel {
     headSha: string;
   };
   authorLogin: string;
+  primaryIssue: GitHubIssueContext | null;
+  closingIssueCount: number;
   linkedIssues: GitHubIssueContext[];
   requiredApprovals: number;
   reviewers: Array<{

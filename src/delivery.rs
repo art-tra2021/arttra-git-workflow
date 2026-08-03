@@ -2,7 +2,7 @@ use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::branch;
 use crate::policy::BranchPolicy;
@@ -23,13 +23,48 @@ pub struct PullRequestDraft {
     pub schema_version: u32,
     pub branch: String,
     pub base: String,
-    pub issue: Option<u64>,
+    /// The single type/task Issue closed by this Pull Request.
+    pub issue: u64,
+    pub issue_kind: &'static str,
+    pub merge_mode: String,
+    pub parent_issue_url: String,
     pub title: String,
     pub body: String,
     pub draft: bool,
     pub reviewers: Vec<String>,
     pub commits_ahead_of_base: Option<u64>,
     pub uncommitted_files: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GitHubIssueMetadata {
+    pub number: u64,
+    pub title: String,
+    pub kind: String,
+    pub url: String,
+    pub merge_mode: Option<String>,
+    pub parent: Option<GitHubIssueParent>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GitHubIssueParent {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawGitHubIssueMetadata {
+    number: u64,
+    title: String,
+    url: String,
+    labels: Vec<RawGitHubLabel>,
+    parent: Option<GitHubIssueParent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawGitHubLabel {
+    name: String,
 }
 
 pub fn build_push_plan(policy: &BranchPolicy, remote: Option<&str>) -> Result<PushPlan> {
@@ -112,18 +147,44 @@ pub fn build_pull_request_draft(
 ) -> Result<PullRequestDraft> {
     let branch = branch::current_branch()?;
     ensure_work_branch(&branch, policy)?;
-    let issue = issue.or_else(|| issue_number_from_branch(&branch));
+    let issue = issue
+        .or_else(|| issue_number_from_branch(&branch))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Pull Requestが閉じるTaskが必要です。`--issue <type/taskのIssue番号>`を指定してください"
+            )
+        })?;
+    require_matching_branch_issue(&branch, issue)?;
+    let issue_metadata = github_issue_metadata(&issue.to_string())?;
+    require_issue_kind(&issue_metadata, &["task"], "Pull Requestの対象")?;
+    let merge_mode = issue_metadata.merge_mode.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Task #{issue}にはmerge/review, merge/self, merge/emergencyのどれか一つが必要です"
+        )
+    })?;
+    let parent = issue_metadata.parent.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Task #{issue}には親WorkまたはBusinessが必要です。GitHubのnative parentを設定してください"
+        )
+    })?;
+    let parent_metadata = github_issue_metadata(&parent.url)?;
+    require_issue_kind(&parent_metadata, &["work", "business"], "Taskの親")?;
+    require_no_merge_mode(&parent_metadata, "Taskの親")?;
     let base = non_blank(
         base.unwrap_or_else(|| default_base(policy)),
         "PRの作成先branch",
     )?;
     let title = match title {
         Some(title) => non_blank(title, "PRタイトル")?,
-        None => suggested_pull_request_title(issue)?,
+        None => non_blank(issue_metadata.title.clone(), "Taskタイトル")?,
     };
     let body = match body {
-        Some(body) => non_blank(body, "PR本文")?,
-        None => default_pull_request_body(&title, issue),
+        Some(body) => {
+            let body = non_blank(body, "PR本文")?;
+            validate_pull_request_closing_task(&body, issue, &parent.url)?;
+            body
+        }
+        None => default_pull_request_body(&title, issue, &parent.url),
     };
     let reviewers = reviewers
         .into_iter()
@@ -139,6 +200,9 @@ pub fn build_pull_request_draft(
         branch,
         base,
         issue,
+        issue_kind: "task",
+        merge_mode,
+        parent_issue_url: parent.url.clone(),
         title,
         body,
         draft,
@@ -201,6 +265,18 @@ pub fn issue_number_from_branch(branch: &str) -> Option<u64> {
     suffix.split('-').next()?.parse().ok()
 }
 
+fn require_matching_branch_issue(branch: &str, issue: u64) -> Result<()> {
+    let branch_issue = issue_number_from_branch(branch).ok_or_else(|| {
+        anyhow::anyhow!("branch名からTask番号を判定できません。`git ar branch`でTaskに紐づくbranchを作成してください")
+    })?;
+    if issue != branch_issue {
+        bail!(
+            "branchはTask #{branch_issue}に紐づいていますが、PRはTask #{issue}を指定しています。`--issue {branch_issue}`を指定してください"
+        );
+    }
+    Ok(())
+}
+
 pub fn suggested_pull_request_title(issue: Option<u64>) -> Result<String> {
     if let Some(issue) = issue
         && let Some(title) = gh_optional(&[
@@ -255,13 +331,157 @@ fn default_base(policy: &BranchPolicy) -> String {
         .unwrap_or_else(|| "main".into())
 }
 
-fn default_pull_request_body(title: &str, issue: Option<u64>) -> String {
-    let relation = issue
-        .map(|number| format!("Closes #{number}"))
-        .unwrap_or_else(|| "関連Issueなし".into());
+fn default_pull_request_body(title: &str, issue: u64, parent_url: &str) -> String {
     format!(
-        "## 変更内容\n\n{title}\n\n## 関連Issue\n\n{relation}\n\n## 確認方法\n\n- `mise run verify`\n"
+        "## 変更内容\n\n{title}\n\n## Closing Task\n\nCloses #{issue}\n\n## 親Issue\n\nRelates to {parent_url}\n\n## 確認方法\n\n- `mise run verify`\n"
     )
+}
+
+pub fn normalize_issue_reference(reference: &str) -> Result<String> {
+    let reference = reference.trim();
+    if reference.parse::<u64>().is_ok_and(|number| number > 0) {
+        return Ok(reference.to_owned());
+    }
+    let shorthand = Regex::new(r"^([^/\s]+/[^/#\s]+)#([1-9][0-9]*)$")
+        .expect("Issue shorthand pattern is valid");
+    if let Some(captures) = shorthand.captures(reference) {
+        return Ok(format!(
+            "https://github.com/{}/issues/{}",
+            &captures[1], &captures[2]
+        ));
+    }
+    let url = Regex::new(r"^https://github\.com/[^/\s]+/[^/\s]+/issues/[1-9][0-9]*/?$")
+        .expect("GitHub Issue URL pattern is valid");
+    if url.is_match(reference) {
+        return Ok(reference.trim_end_matches('/').to_owned());
+    }
+    bail!(
+        "Issue参照は番号、owner/repo#番号、またはGitHub Issue URLで指定してください（現在: `{reference}`）"
+    )
+}
+
+pub fn github_issue_metadata(reference: &str) -> Result<GitHubIssueMetadata> {
+    let issue = normalize_issue_reference(reference)?;
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "view",
+            &issue,
+            "--json",
+            "number,title,url,labels,parent",
+        ])
+        .output()
+        .with_context(|| format!("Issue `{reference}`を確認できませんでした"))?;
+    ensure_success(&output, &format!("Issue `{reference}`の確認"))?;
+    let raw: RawGitHubIssueMetadata = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("Issue `{reference}`の情報を解釈できませんでした"))?;
+    let kinds = raw
+        .labels
+        .iter()
+        .filter_map(|label| label.name.strip_prefix("type/"))
+        .collect::<Vec<_>>();
+    if kinds.len() != 1 {
+        bail!(
+            "Issue #{}にはtypeラベルがちょうど1件必要です（現在: {}）",
+            raw.number,
+            if kinds.is_empty() {
+                "なし".into()
+            } else {
+                kinds.join(", ")
+            }
+        );
+    }
+    let merge_modes = raw
+        .labels
+        .iter()
+        .filter_map(|label| label.name.strip_prefix("merge/"))
+        .collect::<Vec<_>>();
+    let merge_mode = match merge_modes.as_slice() {
+        [] => None,
+        [mode] if matches!(*mode, "review" | "self" | "emergency") => Some(format!("merge/{mode}")),
+        _ => bail!(
+            "Issue #{}にはmerge/review, merge/self, merge/emergencyのどれか一つだけが必要です（現在: {}）",
+            raw.number,
+            if merge_modes.is_empty() {
+                "なし".into()
+            } else {
+                merge_modes
+                    .iter()
+                    .map(|mode| format!("merge/{mode}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ),
+    };
+    Ok(GitHubIssueMetadata {
+        number: raw.number,
+        title: raw.title,
+        kind: kinds[0].to_owned(),
+        url: raw.url,
+        merge_mode,
+        parent: raw.parent,
+    })
+}
+
+pub fn require_issue_kind(issue: &GitHubIssueMetadata, allowed: &[&str], role: &str) -> Result<()> {
+    if allowed.iter().any(|kind| *kind == issue.kind) {
+        return Ok(());
+    }
+    bail!(
+        "{role}のIssue #{}はtype/{}です。type/{}を指定してください",
+        issue.number,
+        issue.kind,
+        allowed.join("またはtype/")
+    )
+}
+
+pub fn require_no_merge_mode(issue: &GitHubIssueMetadata, role: &str) -> Result<()> {
+    if let Some(mode) = &issue.merge_mode {
+        bail!(
+            "{role}のIssue #{}はtype/{}なので{mode}を持てません。merge方針はtype/taskだけに設定してください",
+            issue.number,
+            issue.kind
+        );
+    }
+    Ok(())
+}
+
+fn validate_pull_request_closing_task(
+    body: &str,
+    expected_issue: u64,
+    parent_url: &str,
+) -> Result<()> {
+    let closing_pattern =
+        Regex::new(r"(?im)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#([1-9][0-9]*)\b")
+            .expect("closing Issue pattern is valid");
+    let closing_issues = closing_pattern
+        .captures_iter(body)
+        .filter_map(|captures| captures[1].parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    if closing_issues != [expected_issue] {
+        bail!(
+            "PR本文は対応するTaskだけを`Closes #{expected_issue}`で閉じる必要があります（検出: {}）",
+            if closing_issues.is_empty() {
+                "なし".into()
+            } else {
+                closing_issues
+                    .iter()
+                    .map(|number| format!("#{number}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
+    }
+    let exact_closes = Regex::new(&format!(r"(?im)\bCloses\s+#{expected_issue}\b"))
+        .expect("exact Closes pattern is valid");
+    if !exact_closes.is_match(body) {
+        bail!("PR本文では`Closes #{expected_issue}`を使用してください");
+    }
+    let expected_relation = format!("Relates to {parent_url}");
+    if !body.lines().any(|line| line.trim() == expected_relation) {
+        bail!("PR本文にはTaskの実際の親を`{expected_relation}`として1件記載してください");
+    }
+    Ok(())
 }
 
 fn existing_pull_request_url() -> Result<Option<String>> {
@@ -335,7 +555,11 @@ fn ensure_success(output: &Output, action: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_pull_request_body, issue_number_from_branch};
+    use super::{
+        GitHubIssueMetadata, default_pull_request_body, issue_number_from_branch,
+        normalize_issue_reference, require_issue_kind, require_matching_branch_issue,
+        require_no_merge_mode, validate_pull_request_closing_task,
+    };
 
     #[test]
     fn reads_issue_number_from_compliant_branch() {
@@ -348,9 +572,77 @@ mod tests {
     }
 
     #[test]
+    fn pull_request_task_matches_branch_task() {
+        assert!(require_matching_branch_issue("fix/89-task-roz", 89).is_ok());
+        assert!(require_matching_branch_issue("fix/89-task-roz", 90).is_err());
+        assert!(require_matching_branch_issue("main", 89).is_err());
+    }
+
+    #[test]
     fn pull_request_body_closes_related_issue() {
-        let body = default_pull_request_body("TUIを改善する", Some(71));
+        let body = default_pull_request_body(
+            "TUIを改善する",
+            71,
+            "https://github.com/art-tra2021/example/issues/70",
+        );
         assert!(body.contains("Closes #71"));
+        assert!(body.contains("Relates to https://github.com/art-tra2021/example/issues/70"));
         assert!(body.contains("mise run verify"));
+    }
+
+    #[test]
+    fn pull_request_body_closes_exactly_one_expected_task() {
+        let parent = "https://github.com/art-tra2021/example/issues/70";
+        let valid = format!("Closes #71\nRelates to {parent}");
+        assert!(validate_pull_request_closing_task(&valid, 71, parent).is_ok());
+        assert!(validate_pull_request_closing_task("Closes #71", 71, parent).is_err());
+        assert!(validate_pull_request_closing_task("Fixes #71", 71, parent).is_err());
+        assert!(validate_pull_request_closing_task("Closes #72", 71, parent).is_err());
+        assert!(validate_pull_request_closing_task("Closes #71\nCloses #72", 71, parent).is_err());
+        assert!(validate_pull_request_closing_task("Relates to #71", 71, parent).is_err());
+    }
+
+    #[test]
+    fn normalizes_cross_repository_issue_references() {
+        assert_eq!(normalize_issue_reference("71").unwrap(), "71");
+        assert_eq!(
+            normalize_issue_reference("art-tra2021/project#7").unwrap(),
+            "https://github.com/art-tra2021/project/issues/7"
+        );
+        assert_eq!(
+            normalize_issue_reference("https://github.com/art-tra2021/project/issues/7/").unwrap(),
+            "https://github.com/art-tra2021/project/issues/7"
+        );
+        assert!(normalize_issue_reference("project#7").is_err());
+    }
+
+    #[test]
+    fn branch_and_pr_issue_kind_is_deterministic_after_github_lookup() {
+        let task = GitHubIssueMetadata {
+            number: 71,
+            title: "Task".into(),
+            kind: "task".into(),
+            url: "https://github.com/example/repo/issues/71".into(),
+            merge_mode: Some("merge/review".into()),
+            parent: None,
+        };
+        let work = GitHubIssueMetadata {
+            number: 72,
+            title: "Work".into(),
+            kind: "work".into(),
+            url: "https://github.com/example/repo/issues/72".into(),
+            merge_mode: None,
+            parent: None,
+        };
+        assert!(require_issue_kind(&task, &["task"], "PRの対象").is_ok());
+        assert!(require_issue_kind(&work, &["task"], "PRの対象").is_err());
+        assert!(require_issue_kind(&work, &["work", "business"], "親").is_ok());
+        assert!(require_no_merge_mode(&work, "親").is_ok());
+
+        let stale_work = GitHubIssueMetadata {
+            merge_mode: Some("merge/self".into()),
+            ..work
+        };
+        assert!(require_no_merge_mode(&stale_work, "親").is_err());
     }
 }

@@ -1,7 +1,82 @@
 import { describe, expect, test } from "bun:test";
+import type { LifecycleNotificationKind } from "../src/lifecycle-notification-service.ts";
 import { SlackLifecycleNotifier } from "../src/slack-lifecycle-notifier.ts";
 
 describe("SlackLifecycleNotifier", () => {
+  test("Issue作成通知だけはchannel rootへ送信できる", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const notifier = notifierWithCalls(calls, "970.1");
+
+    expect(await notifier.notify(notification("issue-opened"), null)).toEqual({
+      messageTs: "970.1",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).not.toHaveProperty("thread_ts");
+  });
+
+  test.each([
+    ["intake", "🚧 新しいIntake"],
+    ["work", "🚧 新しいWork"],
+    ["task", "🚧 新しいTask"],
+    ["business", "🚧 新しいBusiness"],
+  ] as const)("%sのIssue rootは種別固有の見出しにする", async (issueType, header) => {
+    const calls: Array<Record<string, unknown>> = [];
+    const notifier = notifierWithCalls(calls, "970.1");
+
+    await notifier.notify({ ...notification("issue-opened"), issueType }, null);
+
+    expect(JSON.stringify(calls[0]?.blocks)).toContain(header);
+  });
+
+  test.each([
+    "issue-reopened",
+    "issue-assignment-changed",
+    "comment-created",
+    "issue-completed",
+    "pr-merged",
+    "review-requested",
+    "review-approved",
+    "review-changes-requested",
+    "review-commented",
+    "review-dismissed",
+    "revision-pushed",
+    "ci-failed",
+    "self-merge-scheduled",
+    "self-merge-ready",
+  ] as const)("%sはIssue threadなしでchannel直下へfallbackしない", async (kind) => {
+    const calls: Array<Record<string, unknown>> = [];
+    const notifier = notifierWithCalls(calls, "970.2");
+
+    expect(notifier.notify(notification(kind), null)).rejects.toThrow(
+      `Issue threadが見つからないため、${kind}通知のchannel直下への送信を停止しました。`,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("セルフマージ予定の初回だけIssue threadからchannelにも展開する", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const notifier = notifierWithCalls(calls, "970.3");
+
+    await notifier.notify(notification("self-merge-scheduled"), "970.1");
+    await notifier.notify(notification("self-merge-ready"), "970.1");
+
+    expect(calls[0]).toMatchObject({ thread_ts: "970.1", reply_broadcast: true });
+    expect(calls[1]).toMatchObject({ thread_ts: "970.1", reply_broadcast: false });
+  });
+
+  test("actorSlackUserIdがあれば実行者をnative mentionで表示する", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const notifier = notifierWithCalls(calls, "970.4");
+    const withActorSlackUserId = {
+      ...notification("comment-created"),
+      actorSlackUserId: "UACTOR",
+    };
+
+    await notifier.notify(withActorSlackUserId, "970.1");
+
+    expect(JSON.stringify(calls[0]?.blocks)).toContain("*実行者:* <@UACTOR>");
+  });
+
   test("native mention付きでIssue threadへ日本語通知する", async () => {
     const calls: Array<Record<string, unknown>> = [];
     const notifier = new SlackLifecycleNotifier(
@@ -33,7 +108,9 @@ describe("SlackLifecycleNotifier", () => {
             url: "https://github.example/pull/45",
           },
           actorLogin: "reviewer",
+          actorSlackUserId: null,
           slackUserIds: ["UAUTHOR"],
+          issueType: "work",
           summary: "PRが差し戻されました。",
           detail: "A < Bを直す",
           nextAction: "修正する",
@@ -89,14 +166,16 @@ describe("SlackLifecycleNotifier", () => {
         },
         pullRequest: null,
         actorLogin: "owner",
+        actorSlackUserId: null,
         slackUserIds: [],
+        issueType: "work",
         summary: "このIssueはセルフマージ予定です。",
         detail: "第三者承認を待たず、本人がCI後にマージします。",
         nextAction: "問題なら停止してください",
         actionUrl: "https://github.example/issues/44",
         selfMergeControl: { repository: "example/repo", issueNumber: 44 },
       },
-      null,
+      "960.0",
     );
 
     const encoded = JSON.stringify(calls[0]?.blocks);
@@ -105,3 +184,46 @@ describe("SlackLifecycleNotifier", () => {
     expect(encoded).toContain("ar.self-merge.stop");
   });
 });
+
+function notifierWithCalls(calls: Array<Record<string, unknown>>, ts: string) {
+  return new SlackLifecycleNotifier(
+    {
+      chat: {
+        postMessage: async (arguments_: Record<string, unknown>) => {
+          calls.push(arguments_);
+          return { ok: true, ts };
+        },
+      },
+    } as unknown as ConstructorParameters<typeof SlackLifecycleNotifier>[0],
+    "CWORK",
+  );
+}
+
+function notification(kind: LifecycleNotificationKind) {
+  return {
+    schemaVersion: 1 as const,
+    kind,
+    resource: {
+      kind: "issue" as const,
+      number: 44,
+      title: "通知",
+      url: "https://github.example/issues/44",
+    },
+    pullRequest:
+      kind === "issue-opened"
+        ? null
+        : {
+            number: 45,
+            title: "通知を追加",
+            url: "https://github.example/pull/45",
+          },
+    actorLogin: "owner",
+    actorSlackUserId: null,
+    slackUserIds: [],
+    issueType: "work" as const,
+    summary: "ライフサイクル通知です。",
+    detail: "通知内容",
+    nextAction: "GitHubで確認する",
+    actionUrl: "https://github.example/issues/44",
+  };
+}
