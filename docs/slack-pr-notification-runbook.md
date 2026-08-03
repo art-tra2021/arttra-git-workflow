@@ -102,8 +102,32 @@ fallback textにも同じ絵文字と見出しを含めるが、本文中の装�
 9. すべての通知が同じIssueスレッドにあり、同じイベントの重複通知がないことを確認する。
 10. GitHub Webhook delivery、Cloud Run log、Cloud Tasksの失敗件数を確認する。
 
+Slack APIでも、新しいTaskの親投稿は`ts == thread_ts`、PR作成・レビュー依頼は`thread_ts == Task親投稿のts`かつ`ts != thread_ts`であることを確認する。
+PR作成・レビュー依頼が`ts == thread_ts`ならPR専用の平投稿が再発しているため、合格にしてはならない。
+
 検証用Issue、PR、Slackメッセージは監査証跡として残す。
 失敗時も削除せず、原因と再試験結果をIssueへ追記する。
+
+## 本番deploy
+
+必須CIが成功してmainへmergeされたcommitだけを本番へdeployする。
+Apple SiliconなどARM環境からbuildする場合も、Cloud Run用imageは`linux/amd64`を明示する。
+
+```sh
+docker buildx build --platform linux/amd64 \
+  --file apps/slack-adapter/Dockerfile \
+  --tag asia-northeast1-docker.pkg.dev/bmarumado/arttra-work/slack-adapter:<merge-commit>-amd64 \
+  --push .
+
+gcloud run deploy arttra-work-slack \
+  --image asia-northeast1-docker.pkg.dev/bmarumado/arttra-work/slack-adapter:<merge-commit>-amd64 \
+  --region asia-northeast1 \
+  --project bmarumado \
+  --platform managed
+```
+
+deploy後は`latestReadyRevisionName`、image、traffic 100%を確認し、`/health`が`{"ok":true,"schemaVersion":1}`を返すことを確認する。
+旧revisionのeventで作られたPR専用threadは履歴として残るため、deploy後に新しいTaskとPRでE2E確認する。
 
 ## 障害時の切り分け
 
