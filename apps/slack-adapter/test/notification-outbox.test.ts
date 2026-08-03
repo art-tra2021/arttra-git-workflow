@@ -1,0 +1,439 @@
+import { describe, expect, test } from "bun:test";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  type NotificationIntent,
+  NotificationOutboxService,
+  type NotificationOutboxState,
+  type NotificationPayloadSender,
+  notificationIntentId,
+} from "../src/notification-outbox.ts";
+import {
+  type SlackConversationClient,
+  SlackNotificationReconciler,
+} from "../src/slack-notification-reconciler.ts";
+import { LocalStateStore } from "../src/state-store.ts";
+
+describe("NotificationOutboxService", () => {
+  test("同じintentの並列workerはSlack送信を一度だけ実行する", async () => {
+    const store = await localStore("parallel");
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let sends = 0;
+    const service = outbox(store, {
+      send: async () => {
+        sends += 1;
+        entered();
+        await gate;
+        return { messageTs: "100.1" };
+      },
+    });
+    const value = intent("parallel");
+
+    const first = service.deliver(value);
+    await started;
+    await expect(service.deliver(value)).rejects.toMatchObject({
+      code: "notification_intent_in_progress",
+    });
+    release();
+    await expect(first).resolves.toEqual({ messageTs: "100.1" });
+    await expect(service.deliver(value)).resolves.toEqual({ messageTs: "100.1" });
+
+    expect(sends).toBe(1);
+    expect(await service.get(value.metadata.intentId)).toMatchObject({
+      status: "sent",
+      revision: 3,
+      attemptCount: 1,
+      messageTs: "100.1",
+    });
+  });
+
+  test("不確実な失敗を要確認、送信前と判断できるSlack拒否を失敗として残す", async () => {
+    const uncertainStore = await localStore("uncertain");
+    const uncertain = outbox(uncertainStore, {
+      send: async () => {
+        throw new Error("network timeout");
+      },
+    });
+    const uncertainIntent = intent("uncertain");
+    await expect(uncertain.deliver(uncertainIntent)).rejects.toThrow("network timeout");
+    expect(await uncertain.get(uncertainIntent.metadata.intentId)).toMatchObject({
+      status: "needs_review",
+      failure: "Error",
+    });
+
+    const failedStore = await localStore("failed");
+    const failed = outbox(failedStore, {
+      send: async () => {
+        throw { data: { error: "channel_not_found" } };
+      },
+    });
+    const failedIntent = intent("failed");
+    await expect(failed.deliver(failedIntent)).rejects.toEqual({
+      data: { error: "channel_not_found" },
+    });
+    expect(await failed.get(failedIntent.metadata.intentId)).toMatchObject({
+      status: "failed",
+      failure: "channel_not_found",
+    });
+  });
+
+  test("dry-runは照合だけを行い、確認付きreplayだけが再送と監査記録を行う", async () => {
+    const store = await localStore("replay");
+    let sends = 0;
+    let reconciliations = 0;
+    const service = outbox(
+      store,
+      {
+        send: async () => {
+          sends += 1;
+          if (sends === 1) throw new Error("timeout");
+          return { messageTs: "200.2" };
+        },
+      },
+      {
+        reconcile: async (state) => {
+          reconciliations += 1;
+          return {
+            schemaVersion: 1,
+            method: "slack-conversations-api",
+            outcome: "message_not_found",
+            checkedAt: "2026-08-03T00:05:00.000Z",
+            channelId: state.channelId,
+            scannedMessages: 12,
+            complete: true,
+            reason: "該当メッセージなし",
+          };
+        },
+      },
+    );
+    const value = intent("replay");
+    await expect(service.deliver(value)).rejects.toThrow("timeout");
+    const failed = await requireState(service, value.metadata.intentId);
+
+    const dryRun = await service.replay({
+      schemaVersion: 1,
+      intentId: value.metadata.intentId,
+      expectedRevision: failed.revision,
+      operatorId: "UADMIN",
+      dryRun: true,
+      confirmed: false,
+    });
+    expect(dryRun).toMatchObject({
+      action: "replay",
+      executed: false,
+      beforeRevision: failed.revision,
+      afterRevision: failed.revision,
+    });
+    expect(sends).toBe(1);
+    expect((await requireState(service, value.metadata.intentId)).revision).toBe(failed.revision);
+
+    const replayed = await service.replay({
+      schemaVersion: 1,
+      intentId: value.metadata.intentId,
+      expectedRevision: failed.revision,
+      operatorId: "UADMIN",
+      dryRun: false,
+      confirmed: true,
+    });
+    expect(replayed).toMatchObject({
+      action: "replay",
+      executed: true,
+      status: "sent",
+      messageTs: "200.2",
+    });
+    expect(sends).toBe(2);
+    expect(reconciliations).toBe(2);
+    expect(await store.list("notification-outbox-audit")).toHaveLength(3);
+  });
+
+  test("既存Slackメッセージを照合した場合は再送せず送信済みに直す", async () => {
+    const store = await localStore("existing");
+    let sends = 0;
+    const service = outbox(
+      store,
+      {
+        send: async () => {
+          sends += 1;
+          throw new Error("timeout");
+        },
+      },
+      {
+        reconcile: async (state) => ({
+          schemaVersion: 1,
+          method: "slack-conversations-api",
+          outcome: "message_found",
+          checkedAt: "2026-08-03T00:05:00.000Z",
+          channelId: state.channelId,
+          scannedMessages: 3,
+          complete: true,
+          messageTs: "300.3",
+          reason: "既存メッセージあり",
+        }),
+      },
+    );
+    const value = intent("existing");
+    await expect(service.deliver(value)).rejects.toThrow("timeout");
+    const failed = await requireState(service, value.metadata.intentId);
+
+    const result = await service.replay({
+      schemaVersion: 1,
+      intentId: value.metadata.intentId,
+      expectedRevision: failed.revision,
+      operatorId: "UADMIN",
+      dryRun: false,
+      confirmed: true,
+    });
+
+    expect(result).toMatchObject({
+      action: "record_existing",
+      executed: true,
+      status: "sent",
+      messageTs: "300.3",
+    });
+    expect(sends).toBe(1);
+  });
+
+  test("未許可operatorと不完全なSlack照合ではreplayしない", async () => {
+    const store = await localStore("blocked");
+    let reconciliations = 0;
+    const service = outbox(
+      store,
+      {
+        send: async () => {
+          throw new Error("timeout");
+        },
+      },
+      {
+        reconcile: async (state) => {
+          reconciliations += 1;
+          return {
+            schemaVersion: 1,
+            method: "slack-conversations-api",
+            outcome: "inconclusive",
+            checkedAt: "2026-08-03T00:05:00.000Z",
+            channelId: state.channelId,
+            scannedMessages: 2_000,
+            complete: false,
+            reason: "全ページを確認できない",
+          };
+        },
+      },
+    );
+    const value = intent("blocked");
+    await expect(service.deliver(value)).rejects.toThrow("timeout");
+    const failed = await requireState(service, value.metadata.intentId);
+
+    await expect(
+      service.replay({
+        schemaVersion: 1,
+        intentId: value.metadata.intentId,
+        expectedRevision: failed.revision,
+        operatorId: "UNAUTHORIZED",
+        dryRun: true,
+        confirmed: false,
+      }),
+    ).rejects.toMatchObject({ code: "notification_replay_forbidden" });
+    expect(reconciliations).toBe(0);
+
+    await expect(
+      service.replay({
+        schemaVersion: 1,
+        intentId: value.metadata.intentId,
+        expectedRevision: failed.revision,
+        operatorId: "UADMIN",
+        dryRun: true,
+        confirmed: false,
+      }),
+    ).resolves.toMatchObject({ action: "blocked", executed: false });
+    expect(reconciliations).toBe(1);
+  });
+
+  test("AI向け監査JSONに要確認intentと旧effects_started deliveryを分けて返す", async () => {
+    const store = await localStore("audit");
+    const service = outbox(store, {
+      send: async () => {
+        throw new Error("timeout");
+      },
+    });
+    const value = intent("audit");
+    await expect(service.deliver(value)).rejects.toThrow("timeout");
+    await store.set("github-delivery", "legacy-delivery", {
+      schemaVersion: 2,
+      revision: 7,
+      status: "effects_started",
+      effectsStartedAt: "2026-08-02T00:00:00.000Z",
+    });
+
+    expect(await service.audit()).toMatchObject({
+      schemaVersion: 1,
+      summary: { actionable: 1, notificationIntents: 1, legacyDeliveries: 1 },
+      items: [
+        expect.objectContaining({
+          kind: "legacy-github-delivery",
+          id: "legacy-delivery",
+          replayEligible: false,
+        }),
+        expect.objectContaining({
+          kind: "notification-intent",
+          id: value.metadata.intentId,
+          replayEligible: true,
+          replayCommand: {
+            schemaVersion: 1,
+            intentId: value.metadata.intentId,
+            expectedRevision: 3,
+            operatorId: null,
+            dryRun: true,
+            confirmed: false,
+          },
+        }),
+      ],
+    });
+  });
+});
+
+describe("SlackNotificationReconciler", () => {
+  test("Slack message metadataのintent IDを照合する", async () => {
+    const store = await localStore("reconcile-found");
+    const value = intent("reconcile-found");
+    const state = sendingState(value, "2026-08-03T00:00:00.000Z");
+    const client: SlackConversationClient = {
+      conversations: {
+        history: async () => ({
+          messages: [
+            {
+              ts: "400.4",
+              metadata: {
+                event_type: "arttra_notification",
+                event_payload: { intent_id: value.metadata.intentId },
+              },
+            },
+          ],
+        }),
+        replies: async () => ({ messages: [] }),
+      },
+    };
+
+    await expect(
+      new SlackNotificationReconciler(client, store, () =>
+        Date.parse("2026-08-03T01:00:00.000Z"),
+      ).reconcile(state),
+    ).resolves.toMatchObject({
+      outcome: "message_found",
+      complete: true,
+      messageTs: "400.4",
+      scannedMessages: 1,
+    });
+  });
+
+  test("Slack APIを上限まで読み切れない場合は不在と断定しない", async () => {
+    const store = await localStore("reconcile-incomplete");
+    const state = sendingState(intent("reconcile-incomplete"), "2026-08-03T00:00:00.000Z");
+    let calls = 0;
+    const client: SlackConversationClient = {
+      conversations: {
+        history: async () => {
+          calls += 1;
+          return {
+            messages: [],
+            has_more: true,
+            response_metadata: { next_cursor: `page-${calls}` },
+          };
+        },
+        replies: async () => ({ messages: [] }),
+      },
+    };
+
+    await expect(
+      new SlackNotificationReconciler(client, store).reconcile(state),
+    ).resolves.toMatchObject({ outcome: "inconclusive", complete: false });
+    expect(calls).toBe(10);
+  });
+});
+
+async function localStore(name: string): Promise<LocalStateStore> {
+  return new LocalStateStore(await mkdtemp(join(tmpdir(), `arttra-outbox-${name}-`)));
+}
+
+function outbox(
+  store: LocalStateStore,
+  sender: NotificationPayloadSender,
+  reconciler?: ConstructorParameters<typeof NotificationOutboxService>[2]["reconciler"],
+): NotificationOutboxService {
+  return new NotificationOutboxService(store, sender, {
+    channelId: "CWORK",
+    replayOperatorIds: ["UADMIN"],
+    ...(reconciler ? { reconciler } : {}),
+    now: () => Date.parse("2026-08-03T00:05:00.000Z"),
+    owner: () => "worker-1",
+    staleMilliseconds: 60_000,
+  });
+}
+
+function intent(name: string): NotificationIntent {
+  const metadata = {
+    intentId: notificationIntentId({ test: name }),
+    sourceDeliveryId: `delivery-${name}`,
+  };
+  return {
+    metadata,
+    payload: {
+      schemaVersion: 1,
+      kind: "lifecycle",
+      notification: {
+        schemaVersion: 1,
+        kind: "comment-created",
+        resource: {
+          kind: "issue",
+          number: 54,
+          title: "通知outbox",
+          url: "https://github.example/example/repo/issues/54",
+        },
+        pullRequest: null,
+        actorLogin: "alice",
+        slackUserIds: ["UALICE"],
+        summary: "コメントが追加されました。",
+        detail: name,
+        nextAction: "内容を確認する",
+        actionUrl: "https://github.example/example/repo/issues/54#issuecomment-1",
+      },
+      threadTs: null,
+      metadata,
+    },
+  };
+}
+
+function sendingState(value: NotificationIntent, updatedAt: string): NotificationOutboxState {
+  return {
+    schemaVersion: 1,
+    revision: 2,
+    intentId: value.metadata.intentId,
+    status: "sending",
+    channelId: "CWORK",
+    sourceDeliveryId: value.metadata.sourceDeliveryId ?? null,
+    payloadHash: "hash",
+    payload: value.payload,
+    owner: "worker-1",
+    attemptCount: 1,
+    replayCount: 0,
+    createdAt: updatedAt,
+    updatedAt,
+    sendingStartedAt: updatedAt,
+  };
+}
+
+async function requireState(
+  service: NotificationOutboxService,
+  intentId: string,
+): Promise<NotificationOutboxState> {
+  const state = await service.get(intentId);
+  if (!state) throw new Error("通知outbox stateがありません。");
+  return state;
+}

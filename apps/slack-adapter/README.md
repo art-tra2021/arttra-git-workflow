@@ -110,6 +110,56 @@ Slackでは`/ar approval <approval-id>`、AIや運用scriptでは次のcommand�
 mise run slack:approval -- <approval-id>
 ```
 
+## 通知outboxを監査・復旧する
+
+Slackへ送るライフサイクル通知、レビュー依頼、作業通知、期限通知、日次digestは、送信前にFirestoreまたはlocal stateへversion付きintentとして保存する。
+状態は`intent`、`sending`、`sent`、`needs_review`、`failed`の5種類である。
+同じintentを複数workerが同時に処理しても、revisionの原子的更新に成功した1workerだけがSlack APIを呼ぶ。
+Slack APIの応答が不明な場合は`needs_review`、送信前の拒否と判断できる場合は`failed`にし、自動再送しない。
+
+通常の監査では、要確認intentと、旧実装の`effects_started`／`failed` GitHub deliveryだけを表示する。
+
+```sh
+mise run slack:outbox:audit
+```
+
+AIや運用scriptは同じ監査結果をversion付きJSONで取得する。
+
+```sh
+mise run slack:outbox:audit:json
+```
+
+再送前には必ずdry-runを行う。
+コマンドはSlack Conversations APIで対象channelの時間帯またはIssue threadを最後まで読み、メッセージmetadataに埋め込んだintent IDを照合する。
+
+```sh
+mise run slack:outbox:replay -- \
+  --intent notification-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --expected-revision 3 \
+  --operator U0123456789 \
+  --dry-run \
+  --json
+```
+
+全候補を確認できなかった場合は`inconclusive`として停止する。
+同じメッセージが見つかった場合、確認付き実行は再送せず既存message tsを`sent`として記録する。
+見つからなかった場合だけ、`--dry-run`を`--yes`へ置き換えた確認付き実行で再送する。
+dry-runと`--yes`は同時指定できず、どちらもない実行も拒否する。
+監査JSONの各要対応intentには、`operatorId`だけを補うdry-run用`replayCommand`が含まれる。
+AIは個別引数と同じvalidatorを通るversion付きJSONを`--command-json`へ渡せる。
+
+```sh
+mise run slack:outbox:replay -- \
+  --command-json '{"schemaVersion":1,"intentId":"notification-...","expectedRevision":3,"operatorId":"U0123456789","dryRun":true,"confirmed":false}' \
+  --json
+```
+
+`AR_NOTIFICATION_REPLAY_OPERATOR_IDS`にはreplayを許可するSlack user IDを明示する。
+未設定者は監査だけ利用でき、replayは拒否される。
+Slack Appには照合用の`channels:history`と`groups:history`を追加し、scope変更後にワークスペースへ再インストールする。
+照合結果、operator、実行前後のrevision、失敗codeは追記型監査logへ保存する。
+旧GitHub deliveryは再送payloadを持たないため監査だけを行い、自動変換や自動再送はしない。
+
 ## Google Calendarへ自分の仕事を同期する
 
 各利用者はGitHub連携後に、Slackで`/ar connect google`を一度実行する。

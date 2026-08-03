@@ -20,6 +20,12 @@ import {
   verifyJobSignature,
 } from "./job-queue.ts";
 import { LifecycleNotificationService } from "./lifecycle-notification-service.ts";
+import {
+  DelegatingNotificationPayloadSender,
+  NotificationOutboxService,
+  OutboxLifecycleNotifier,
+  OutboxWorkNotifier,
+} from "./notification-outbox.ts";
 import { NotificationThreadService } from "./notification-thread-service.ts";
 import type { ProjectListClient } from "./project-list.ts";
 import { ProjectListSyncService, parseProjectListSyncCommand } from "./project-list-service.ts";
@@ -27,6 +33,10 @@ import { filterItemsByAccessibleRepositories, normalizeRepositoryScope } from ".
 import { isRetryableWorkError } from "./retryable-error.ts";
 import { PullRequestReviewService } from "./review-service.ts";
 import { SlackLifecycleNotifier } from "./slack-lifecycle-notifier.ts";
+import {
+  type SlackConversationClient,
+  SlackNotificationReconciler,
+} from "./slack-notification-reconciler.ts";
 import { SlackRequirementNotifier } from "./slack-requirement-notifier.ts";
 import { SlackReviewNotifier } from "./slack-review-notifier.ts";
 import { SlackWorkNotifier } from "./slack-work-notifier.ts";
@@ -48,6 +58,7 @@ const owners = (process.env.AR_GITHUB_OWNERS ?? repository.split("/")[0] ?? gith
 const project = projectConfig();
 const approverUserIds = csv("AR_SLACK_APPROVER_IDS");
 const selfApproverUserIds = csv("AR_SLACK_SELF_APPROVER_IDS");
+const notificationReplayOperatorIds = csv("AR_NOTIFICATION_REPLAY_OPERATOR_IDS");
 const githubBackend = (process.env.AR_GITHUB_BACKEND ?? "cli").trim().toLowerCase();
 if (githubBackend !== "cli" && githubBackend !== "app") {
   throw new Error("AR_GITHUB_BACKENDはcliまたはappを指定してください。");
@@ -160,14 +171,36 @@ const sharedProjectListService = new ProjectListSyncService(
   resolveSlackUserId,
 );
 const notificationThreads = new NotificationThreadService(store);
-const slackLifecycleNotifier = workNotificationChannelId
+const rawSlackLifecycleNotifier = workNotificationChannelId
   ? new SlackLifecycleNotifier(slackClient, workNotificationChannelId)
   : null;
+const rawSlackWorkNotifier = workNotificationChannelId
+  ? new SlackWorkNotifier(slackClient, workNotificationChannelId)
+  : null;
+const notificationOutbox =
+  workNotificationChannelId && rawSlackLifecycleNotifier && rawSlackWorkNotifier
+    ? new NotificationOutboxService(
+        store,
+        new DelegatingNotificationPayloadSender(rawSlackLifecycleNotifier, rawSlackWorkNotifier),
+        {
+          channelId: workNotificationChannelId,
+          replayOperatorIds: notificationReplayOperatorIds,
+          reconciler: new SlackNotificationReconciler(
+            slackClient as unknown as SlackConversationClient,
+            store,
+          ),
+        },
+      )
+    : null;
+const slackLifecycleNotifier = notificationOutbox
+  ? new OutboxLifecycleNotifier(notificationOutbox)
+  : null;
+const workNotifier = notificationOutbox ? new OutboxWorkNotifier(notificationOutbox) : null;
 const workNotificationService = workNotificationChannelId
   ? new WorkNotificationService(
       sharedWorkSource,
       store,
-      new SlackWorkNotifier(slackClient, workNotificationChannelId),
+      defined(workNotifier ?? undefined, "通知outbox work notifier"),
       Date.now,
       resolveSlackUserId,
       positiveInteger(process.env.AR_DEADLINE_REMINDER_DAYS ?? "3", "AR_DEADLINE_REMINDER_DAYS"),

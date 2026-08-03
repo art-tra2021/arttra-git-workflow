@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { type NotificationIntentMetadata, notificationIntentId } from "./notification-outbox.ts";
 import { NotificationThreadService } from "./notification-thread-service.ts";
 import type { StateStore } from "./state-store.ts";
 import type { HumanWorkItem } from "./types.ts";
@@ -12,8 +13,12 @@ export interface WorkItemSource {
 }
 
 export interface WorkNotifier {
-  notify(item: HumanWorkItem, context: WorkNotificationContext): Promise<WorkNotificationResult>;
-  digest(items: HumanWorkItem[]): Promise<void>;
+  notify(
+    item: HumanWorkItem,
+    context: WorkNotificationContext,
+    metadata?: NotificationIntentMetadata,
+  ): Promise<WorkNotificationResult>;
+  digest(items: HumanWorkItem[], metadata?: NotificationIntentMetadata): Promise<void>;
 }
 
 export interface WorkNotificationContext {
@@ -75,7 +80,7 @@ export class WorkNotificationService {
     this.threads = threads;
   }
 
-  async notifyImmediate(): Promise<number> {
+  async notifyImmediate(sourceDeliveryId?: string): Promise<number> {
     const items = await this.source.loadProjectItems();
     let notified = 0;
     for (const item of items) {
@@ -91,7 +96,10 @@ export class WorkNotificationService {
       if (previous?.fingerprint === fingerprint) {
         continue;
       }
-      await this.notifyThreaded(item, "state");
+      await this.notifyThreaded(item, "state", {
+        intentId: notificationIntentId({ kind: "work-state", issueUrl: item.url, fingerprint }),
+        ...(sourceDeliveryId ? { sourceDeliveryId } : {}),
+      });
       await this.store.set<WorkNotificationState>(NOTIFICATION_NAMESPACE, item.url, {
         schemaVersion: 1,
         issueUrl: item.url,
@@ -120,7 +128,14 @@ export class WorkNotificationService {
       if (previous?.targetDate === item.targetDate && previous.stage === stage) {
         continue;
       }
-      await this.notifyThreaded(deadlineWorkItem(item, stage, today), "deadline");
+      await this.notifyThreaded(deadlineWorkItem(item, stage, today), "deadline", {
+        intentId: notificationIntentId({
+          kind: "work-deadline",
+          issueUrl: item.url,
+          targetDate: item.targetDate,
+          stage,
+        }),
+      });
       await this.store.set<WorkDeadlineNotificationState>(DEADLINE_NAMESPACE, item.url, {
         schemaVersion: 1,
         issueUrl: item.url,
@@ -138,7 +153,17 @@ export class WorkNotificationService {
       .filter((item) => item.delivery !== "silent")
       .sort(compareWorkItems);
     if (items.length > 0) {
-      await this.notifier.digest(items);
+      await this.notifier.digest(items, {
+        intentId: notificationIntentId({
+          kind: "work-digest",
+          date: dateInTokyo(this.now()),
+          items: items.map((item) => ({
+            url: item.url,
+            reasonCode: item.reasonCode,
+            nextAction: item.nextAction,
+          })),
+        }),
+      });
     }
     return items.length;
   }
@@ -146,10 +171,11 @@ export class WorkNotificationService {
   private async notifyThreaded(
     item: HumanWorkItem,
     kind: WorkNotificationContext["kind"],
+    metadata: NotificationIntentMetadata,
   ): Promise<void> {
     const slackUserId = item.owner ? await this.resolveSlackUserId(item.owner) : null;
     await this.threads.publish(item.url, (threadTs) =>
-      this.notifier.notify(item, { kind, threadTs, slackUserId }),
+      this.notifier.notify(item, { kind, threadTs, slackUserId }, metadata),
     );
   }
 }

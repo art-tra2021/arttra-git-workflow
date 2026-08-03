@@ -123,6 +123,21 @@ description = "PR review依頼の人間向けread modelをJSONで取得する"
 depends = ["slack:install"]
 run = "bun run --cwd apps/slack-adapter review:status --"
 
+[tasks."slack:outbox:audit"]
+description = "送信結果が不明なSlack通知と旧GitHub deliveryを監査する"
+depends = ["slack:install"]
+run = "bun run --cwd apps/slack-adapter outbox:audit --"
+
+[tasks."slack:outbox:audit:json"]
+description = "通知outboxの監査結果をAI向けJSONで取得する"
+depends = ["slack:install"]
+run = "bun run --cwd apps/slack-adapter outbox:audit -- --json"
+
+[tasks."slack:outbox:replay"]
+description = "Slack API照合後に通知outboxをdry-runまたは確認付きで復旧する"
+depends = ["slack:install"]
+run = "bun run --cwd apps/slack-adapter outbox:replay --"
+
 [tasks."slack:container"]
 description = "Cloud Run用Slack adapter imageをbuildする"
 run = """

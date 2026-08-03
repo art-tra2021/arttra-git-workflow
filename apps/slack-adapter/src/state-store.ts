@@ -6,6 +6,7 @@ import { Firestore } from "@google-cloud/firestore";
 export interface StateStore {
   get<T>(namespace: string, key: string): Promise<T | null>;
   list<T>(namespace: string): Promise<T[]>;
+  listEntries<T>(namespace: string): Promise<Array<StateEntry<T>>>;
   set<T>(namespace: string, key: string, value: T): Promise<void>;
   create<T>(namespace: string, key: string, value: T): Promise<boolean>;
   compareAndSet<T extends RevisionedState>(
@@ -16,6 +17,11 @@ export interface StateStore {
   ): Promise<boolean>;
   remove(namespace: string, key: string): Promise<void>;
   append<T>(namespace: string, value: T): Promise<string>;
+}
+
+export interface StateEntry<T> {
+  key: string;
+  value: T;
 }
 
 export interface RevisionedState {
@@ -55,6 +61,10 @@ export class LocalStateStore implements StateStore {
   }
 
   async list<T>(namespace: string): Promise<T[]> {
+    return (await this.listEntries<T>(namespace)).map((entry) => entry.value);
+  }
+
+  async listEntries<T>(namespace: string): Promise<Array<StateEntry<T>>> {
     const directory = join(this.rootDirectory, safeSegment(namespace));
     let files: string[];
     try {
@@ -72,7 +82,10 @@ export class LocalStateStore implements StateStore {
           const stored = JSON.parse(
             await readFile(join(directory, file), "utf8"),
           ) as StoredValue<T>;
-          return stored.value;
+          return {
+            key: unsafeSegment(file.slice(0, -".json".length)),
+            value: stored.value,
+          };
         }),
     );
   }
@@ -177,6 +190,14 @@ export class FirestoreStateStore implements StateStore {
     return snapshot.docs.map((document) => (document.data() as StoredValue<T>).value);
   }
 
+  async listEntries<T>(namespace: string): Promise<Array<StateEntry<T>>> {
+    const snapshot = await this.collection(namespace).get();
+    return snapshot.docs.map((document) => ({
+      key: unsafeFirestoreSegment(document.id),
+      value: (document.data() as StoredValue<T>).value,
+    }));
+  }
+
   async create<T>(namespace: string, key: string, value: T): Promise<boolean> {
     try {
       await this.document(namespace, key).create(envelope(value));
@@ -216,8 +237,9 @@ export class FirestoreStateStore implements StateStore {
   }
 
   async append<T>(namespace: string, value: T): Promise<string> {
-    const reference = await this.collection(namespace).add(envelope(value));
-    return reference.id;
+    const key = randomUUID();
+    await this.document(namespace, key).set(envelope(value));
+    return key;
   }
 
   private collection(namespace: string) {
@@ -249,6 +271,30 @@ function safeSegment(value: string): string {
     throw new Error("state keyが不正です。");
   }
   return Buffer.from(value).toString("base64url");
+}
+
+function unsafeSegment(value: string): string {
+  try {
+    const decoded = Buffer.from(value, "base64url").toString("utf8");
+    if (!decoded || safeSegment(decoded) !== value) {
+      throw new Error("state keyの符号化が不正です。");
+    }
+    return decoded;
+  } catch (error) {
+    if (error instanceof Error && error.message === "state keyの符号化が不正です。") {
+      throw error;
+    }
+    throw new Error("state keyの符号化が不正です。", { cause: error });
+  }
+}
+
+function unsafeFirestoreSegment(value: string): string {
+  try {
+    return unsafeSegment(value);
+  } catch {
+    // Firestore appendは旧版で自動IDを使用した。既存監査logのkeyはそのまま返す。
+    return value;
+  }
 }
 
 async function writeAtomic(path: string, value: string): Promise<void> {

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { GitHubWebhookJob } from "./job-queue.ts";
+import { type NotificationIntentMetadata, notificationIntentId } from "./notification-outbox.ts";
 import type {
   NotificationThreadService,
   ThreadMessageResult,
@@ -54,6 +55,7 @@ export interface LifecycleNotifier {
   notify(
     notification: LifecycleNotification,
     threadTs: string | null,
+    metadata?: NotificationIntentMetadata,
   ): Promise<ThreadMessageResult>;
 }
 
@@ -135,6 +137,7 @@ export class LifecycleNotificationService {
       "残作業がなければ、このスレッドを完了記録として残す",
       issue.url,
       fingerprint({ state: issue.state, url: issue.url }),
+      job.deliveryId,
     );
   }
 
@@ -160,6 +163,7 @@ export class LifecycleNotificationService {
         "コメントを確認し、必要なら返信または修正する",
         commentUrl,
         fingerprint({ commentId, commentUrl }),
+        job.deliveryId,
       );
     }
     const issue = await this.github.loadIssueContext(repository, issueNumber);
@@ -174,6 +178,7 @@ export class LifecycleNotificationService {
       "コメントを確認し、必要なら返信または作業へ反映する",
       commentUrl,
       fingerprint({ commentId, commentUrl }),
+      job.deliveryId,
     );
   }
 
@@ -197,6 +202,7 @@ export class LifecycleNotificationService {
         "修正内容を確認し、再レビューする",
         context.url,
         fingerprint({ headSha: context.headSha }),
+        job.deliveryId,
       );
     }
     if (!nestedBoolean(payload, "pull_request", "merged")) return 0;
@@ -211,6 +217,7 @@ export class LifecycleNotificationService {
       "Issueの完了条件と残作業を確認する",
       context.url,
       fingerprint({ mergeCommitSha, headSha: context.headSha }),
+      job.deliveryId,
     );
   }
 
@@ -239,6 +246,7 @@ export class LifecycleNotificationService {
         "必要なレビュー状態を確認する",
         reviewUrl,
         fingerprint({ reviewId, action }),
+        job.deliveryId,
       );
     }
     if (state === "CHANGES_REQUESTED") {
@@ -252,6 +260,7 @@ export class LifecycleNotificationService {
         "指摘を反映して修正をpushする",
         reviewUrl,
         fingerprint({ reviewId, state }),
+        job.deliveryId,
       );
     }
     if (state === "APPROVED") {
@@ -265,6 +274,7 @@ export class LifecycleNotificationService {
         "必要なcheckと承認が揃っていればマージする",
         reviewUrl,
         fingerprint({ reviewId, state }),
+        job.deliveryId,
       );
     }
     if (state === "COMMENTED" && body.trim()) {
@@ -278,6 +288,7 @@ export class LifecycleNotificationService {
         "レビューコメントを確認し、必要なら返信または修正する",
         reviewUrl,
         fingerprint({ reviewId, state }),
+        job.deliveryId,
       );
     }
     return 0;
@@ -303,6 +314,7 @@ export class LifecycleNotificationService {
       "コードコメントを確認し、必要なら返信または修正する",
       commentUrl,
       fingerprint({ commentId, commentUrl }),
+      job.deliveryId,
     );
   }
 
@@ -316,6 +328,7 @@ export class LifecycleNotificationService {
     nextAction: string,
     actionUrl: string,
     eventFingerprint: string,
+    sourceDeliveryId: string,
   ): Promise<number> {
     const pullRequest = {
       number: context.number,
@@ -346,6 +359,7 @@ export class LifecycleNotificationService {
         nextAction,
         actionUrl,
         eventFingerprint,
+        sourceDeliveryId,
       );
     }
     return notified;
@@ -362,6 +376,7 @@ export class LifecycleNotificationService {
     nextAction: string,
     actionUrl: string,
     eventFingerprint: string,
+    sourceDeliveryId: string,
   ): Promise<number> {
     const stateKey = `${resource.url}:${kind}`;
     const previous = await this.store.get<LifecycleNotificationState>(
@@ -385,6 +400,15 @@ export class LifecycleNotificationService {
           actionUrl,
         },
         threadTs,
+        {
+          intentId: notificationIntentId({
+            kind: "lifecycle",
+            resourceUrl: resource.url,
+            notificationKind: kind,
+            eventFingerprint,
+          }),
+          sourceDeliveryId,
+        },
       ),
     );
     await this.store.set<LifecycleNotificationState>(NOTIFICATION_NAMESPACE, stateKey, {

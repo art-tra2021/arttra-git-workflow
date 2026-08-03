@@ -65,13 +65,14 @@ export class GitHubWebhookProcessor {
       if (target && this.reviews) {
         await this.reviews.process(target.repository, target.pullRequestNumber, {
           reRequestChanges: target.reRequestChanges,
+          sourceDeliveryId: job.deliveryId,
         });
       }
       if (this.lifecycle) {
         await this.lifecycle.process(job);
       }
       if (this.notifications && shouldRefreshWorkNotifications(job)) {
-        await this.notifications.notifyImmediate();
+        await this.notifications.notifyImmediate(job.deliveryId);
       }
       await this.completeDelivery(job, lease);
     } catch (error) {

@@ -40,6 +40,7 @@ describe("SlackLifecycleNotifier", () => {
           actionUrl: "https://github.example/pull/45#review",
         },
         "950.1",
+        { intentId: "notification-test" },
       ),
     ).toEqual({ messageTs: "950.2" });
 
@@ -47,6 +48,10 @@ describe("SlackLifecycleNotifier", () => {
       channel: "CWORK",
       thread_ts: "950.1",
       reply_broadcast: false,
+      metadata: {
+        event_type: "arttra_notification",
+        event_payload: { intent_id: "notification-test" },
+      },
     });
     expect(calls[0]?.text).toContain("<@UAUTHOR>");
     expect(calls[0]?.text).toContain("⚠️");

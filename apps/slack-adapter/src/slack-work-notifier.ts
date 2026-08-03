@@ -1,4 +1,5 @@
 import type { WebClient } from "@slack/web-api";
+import type { NotificationIntentMetadata } from "./notification-outbox.ts";
 import { workItemBlocks } from "./presentation.ts";
 import { slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
 import type { HumanWorkItem } from "./types.ts";
@@ -20,6 +21,7 @@ export class SlackWorkNotifier implements WorkNotifier {
   async notify(
     item: HumanWorkItem,
     context: WorkNotificationContext,
+    metadata?: NotificationIntentMetadata,
   ): Promise<WorkNotificationResult> {
     const mention = context.slackUserId ? `<@${context.slackUserId}> ` : "";
     const tone = context.kind === "deadline" ? "deadline" : "work";
@@ -41,6 +43,7 @@ export class SlackWorkNotifier implements WorkNotifier {
         ...workItemBlocks(item),
       ],
       ...(context.threadTs ? { thread_ts: context.threadTs, reply_broadcast: false } : {}),
+      ...(metadata ? { metadata: slackMetadata(metadata.intentId) } : {}),
       unfurl_links: false,
       unfurl_media: false,
     });
@@ -50,7 +53,7 @@ export class SlackWorkNotifier implements WorkNotifier {
     return { messageTs: response.ts };
   }
 
-  async digest(items: HumanWorkItem[]): Promise<void> {
+  async digest(items: HumanWorkItem[], metadata?: NotificationIntentMetadata): Promise<void> {
     const visible = items.slice(0, 20);
     const lines = visible.map(
       (item) =>
@@ -73,8 +76,16 @@ export class SlackWorkNotifier implements WorkNotifier {
           },
         },
       ],
+      ...(metadata ? { metadata: slackMetadata(metadata.intentId) } : {}),
       unfurl_links: false,
       unfurl_media: false,
     });
   }
+}
+
+function slackMetadata(intentId: string) {
+  return {
+    event_type: "arttra_notification",
+    event_payload: { intent_id: intentId },
+  };
 }

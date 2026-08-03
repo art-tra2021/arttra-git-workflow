@@ -10,6 +10,8 @@
     "project-list:sync": "node --env-file-if-exists=.env src/sync-project-list.ts",
     "project-canvas:sync": "node --env-file-if-exists=.env src/sync-project-canvas.ts",
     "calendar:sync": "node --env-file-if-exists=.env src/sync-google-calendar.ts",
+    "outbox:audit": "node --env-file-if-exists=.env src/notification-outbox-cli.ts audit",
+    "outbox:replay": "node --env-file-if-exists=.env src/notification-outbox-cli.ts replay",
     "lint": "biome check .",
     "start": "node --env-file-if-exists=.env src/start.ts",
     "test": "bun test",
