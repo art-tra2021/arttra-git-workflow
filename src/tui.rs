@@ -36,8 +36,11 @@ const SPLIT_PANE_BREAKPOINT: u16 = 86;
 const MIN_DETAIL_HEIGHT: u16 = 18;
 const LOGO_METADATA_PADDING: u16 = 20;
 
-const LOGO_WIDTH: u16 = 7;
-const LOGO_HEIGHT: u16 = 4;
+const LOGO_GRID_SIZE: u16 = 3;
+const LOGO_CELL_WIDTH: u16 = 2;
+const LOGO_WIDTH: u16 = LOGO_GRID_SIZE * LOGO_CELL_WIDTH;
+const LOGO_HEIGHT: u16 = LOGO_GRID_SIZE;
+const COMPACT_HEADER_HEIGHT: u16 = LOGO_HEIGHT + 4;
 
 // Sampled from the supplied marumado brand mark.
 const BRAND_GREEN: Color = Color::Rgb(144, 227, 166);
@@ -365,7 +368,7 @@ fn render(frame: &mut Frame<'_>, app: &mut HomeApp, status: &HomeStatus) {
     }
 
     let compact = area.width < NARROW_TERMINAL_BREAKPOINT || area.height < MIN_DETAIL_HEIGHT;
-    let header_height = if compact { 8 } else { 5 };
+    let header_height = if compact { COMPACT_HEADER_HEIGHT } else { 5 };
     let [header_area, content_area, footer_area] = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Min(3),
@@ -391,7 +394,7 @@ fn render_action_shell(frame: &mut Frame<'_>, action: Action, status: &HomeStatu
     }
 
     let compact = area.width < NARROW_TERMINAL_BREAKPOINT || area.height < MIN_DETAIL_HEIGHT;
-    let header_height = if compact { 8 } else { 5 };
+    let header_height = if compact { COMPACT_HEADER_HEIGHT } else { 5 };
     let [header_area, workflow_area, _output_area] = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Length(5),
@@ -747,9 +750,9 @@ fn marumado_logo() -> Text<'static> {
 fn logo_color(row: usize, column: usize) -> Option<Color> {
     match (row, column) {
         (0, 0..=3) => Some(BRAND_GREEN),
-        (0..=1, 5..=6) => Some(BRAND_YELLOW),
-        (2..=3, 0..=1) => Some(BRAND_CORAL),
-        (3, 3..=6) => Some(BRAND_BLUE),
+        (0..=1, 4..=5) => Some(BRAND_YELLOW),
+        (1..=2, 0..=1) => Some(BRAND_CORAL),
+        (2, 2..=5) => Some(BRAND_BLUE),
         _ => None,
     }
 }
@@ -908,17 +911,17 @@ mod tests {
     #[test]
     fn header_keeps_gemini_breakpoint_and_uses_sampled_marumado_brand_colors() {
         assert_eq!(NARROW_TERMINAL_BREAKPOINT, 60);
-        assert_eq!((LOGO_WIDTH, LOGO_HEIGHT), (7, 4));
+        assert_eq!((LOGO_WIDTH, LOGO_HEIGHT), (6, 3));
         assert_eq!(BRAND_GREEN, Color::Rgb(144, 227, 166));
         assert_eq!(BRAND_YELLOW, Color::Rgb(241, 202, 90));
         assert_eq!(BRAND_CORAL, Color::Rgb(255, 146, 137));
         assert_eq!(BRAND_BLUE, Color::Rgb(129, 165, 225));
         assert_eq!(logo_color(0, 3), Some(BRAND_GREEN));
-        assert_eq!(logo_color(1, 6), Some(BRAND_YELLOW));
+        assert_eq!(logo_color(1, 5), Some(BRAND_YELLOW));
         assert_eq!(logo_color(2, 1), Some(BRAND_CORAL));
-        assert_eq!(logo_color(3, 6), Some(BRAND_BLUE));
+        assert_eq!(logo_color(2, 5), Some(BRAND_BLUE));
+        assert_eq!(logo_color(1, 2), None);
         assert_eq!(logo_color(1, 3), None);
-        assert_eq!(logo_color(2, 3), None);
         assert_eq!(
             (0..LOGO_HEIGHT as usize)
                 .flat_map(|row| (0..LOGO_WIDTH as usize).map(move |column| (row, column)))
@@ -936,7 +939,7 @@ mod tests {
             .draw(|frame| render_logo(frame, frame.area()))
             .expect("logo render");
         let buffer = terminal.backend().buffer();
-        let expected = ["████ ██", "     ██", "██     ", "██ ████"];
+        let expected = ["██████", "██  ██", "██████"];
         for (row, line) in expected.iter().enumerate() {
             for (column, symbol) in line.chars().enumerate() {
                 let cell = buffer.cell((column as u16, row as u16)).expect("logo cell");
