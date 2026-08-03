@@ -36,6 +36,27 @@ jobs:
       - name: Build Cloud Run container
         run: mise run slack:container
 
+  setup-ui-smoke:
+    name: Setup UI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify failure logs and clipboard backends
+        shell: bash
+        run: bash scripts/setup-ui-test.sh
+
   windows-smoke:
     runs-on: windows-latest
     timeout-minutes: 20

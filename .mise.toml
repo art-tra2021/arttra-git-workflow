@@ -72,7 +72,17 @@ run = "typos"
 
 [tasks.verify]
 description = "Run every local and CI quality gate"
-depends = ["fmt:check", "check", "test", "clippy", "lint", "security:actions", "slack:check", "templates:check"]
+depends = [
+  "fmt:check",
+  "check",
+  "test",
+  "clippy",
+  "lint",
+  "security:actions",
+  "slack:check",
+  "setup-ui:test",
+  "templates:check",
+]
 
 [tasks."templates:check"]
 description = "Validate repository template profiles and local-only paths"
@@ -155,19 +165,43 @@ depends = ["fmt:check", "check"]
 
 [tasks.setup]
 description = "Backward-compatible alias for setup-ar"
+quiet = true
+raw = true
 run = "mise run setup-ar"
 
 [tasks.setup-ar]
 description = "Install the shared toolchain, git-ar, hooks, and AI integration"
-run = """
-mise install
-cargo install --path . --locked --force
-git ar setup
-if ! git ar presence install --yes; then
-  echo "presenceのOS定期共有を導入できませんでした。表示された代替コマンドを利用してください。" >&2
-fi
-mise run ready
-"""
+quiet = true
+raw = true
+run = "bash scripts/setup-ui.sh"
+
+[tasks.setup-demo]
+description = "Run only the responsive setup screen demo without changing the environment"
+quiet = true
+raw = true
+run = "bash scripts/setup-ui.sh --preview"
+
+[tasks.setup-demo-failure]
+description = "Preview the setup failure screen without changing the environment"
+quiet = true
+raw = true
+run = "bash scripts/setup-ui.sh --preview --fail-at integrations"
+
+[tasks."setup-log:copy"]
+description = "Copy the latest redacted setup failure log to the clipboard"
+quiet = true
+raw = true
+run = "bash scripts/setup-ui.sh --copy-latest-log"
+
+[tasks."setup-log:show"]
+description = "Print the latest redacted setup failure log"
+quiet = true
+raw = true
+run = "bash scripts/setup-ui.sh --show-latest-log"
+
+[tasks."setup-ui:test"]
+description = "Test setup failure logs and cross-platform clipboard backends"
+run = "bash scripts/setup-ui-test.sh"
 
 [tasks.ar]
 description = "Run git-ar from source"
