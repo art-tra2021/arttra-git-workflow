@@ -383,7 +383,7 @@ export function createSlackApp(
 
   app.view("ar.issue.repository", async ({ ack, body, client, view }) => {
     const metadata = parseMetadata(view.private_metadata);
-    const repository = selectedValue(view.state.values, "repository", ISSUE_REPOSITORY_ACTION_ID);
+    const repository = selectedRepositoryValue(view.state.values);
     await transitionIssueModal({
       ack: ack as unknown as IssueModalAck,
       views: client.views as unknown as IssueModalViews,
@@ -1099,6 +1099,17 @@ export function selectedValue(
     throw new Error(`${blockId}が選択されていません。もう一度選択してください。`);
   }
   return value;
+}
+
+export function selectedRepositoryValue(
+  values: Record<string, Record<string, { selected_option?: { value: string } | null }>>,
+): string {
+  const repositoryActions = values.repository ?? {};
+  for (const actionId of ["value", ISSUE_REPOSITORY_ACTION_ID]) {
+    const value = repositoryActions[actionId]?.selected_option?.value?.trim();
+    if (value) return value;
+  }
+  throw new Error("repositoryが選択されていません。もう一度選択してください。");
 }
 
 function selectedUsers(

@@ -6,6 +6,7 @@ import {
   openIssueRepositoryFlow,
   parseProjectProjectionCommand,
   repositoryOptions,
+  selectedRepositoryValue,
   selectedValue,
   transitionIssueModal,
 } from "../src/app.ts";
@@ -72,6 +73,26 @@ describe("Slack Issue modal flow", () => {
     expect(() => selectedValue({}, "repository", "ar.issue.repository.options")).toThrow(
       "repositoryが選択されていません",
     );
+  });
+
+  test("新旧どちらのrepository選択payloadも読み取る", () => {
+    expect(
+      selectedRepositoryValue({
+        repository: {
+          value: { selected_option: { value: "art-tra2021/sales-ops" } },
+        },
+      }),
+    ).toBe("art-tra2021/sales-ops");
+    expect(
+      selectedRepositoryValue({
+        repository: {
+          "ar.issue.repository.options": {
+            selected_option: { value: "art-tra2021/arttra-git-workflow" },
+          },
+        },
+      }),
+    ).toBe("art-tra2021/arttra-git-workflow");
+    expect(() => selectedRepositoryValue({})).toThrow("repositoryが選択されていません");
   });
 
   test("work templateの内容に依存せずPR確認方法を明示する", () => {
