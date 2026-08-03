@@ -8,6 +8,13 @@ import type { GoogleCalendarService } from "./google-calendar-service.ts";
 import { type GitHubIdentityService, MissingGitHubIdentityError } from "./identity-service.ts";
 import { buildCreateIssueCommand, MERGE_MODES } from "./issue-command.ts";
 import type { IssueMetadataSource } from "./issue-metadata-cache.ts";
+import {
+  hasIssueRelationships,
+  ISSUE_RELATIONSHIP_FIELD_IDS,
+  type IssueRelationshipInput,
+  type IssueRelationships,
+  issueReferenceLabel,
+} from "./issue-relationships.ts";
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
 import { workItemBlocks } from "./presentation.ts";
 import { allAccessibleScope, type RepositoryScope, repositoryScope } from "./project-scope.ts";
@@ -435,6 +442,7 @@ export function createSlackApp(
         template: metadata.template,
         title: inputValue(view.state.values, "title", "value"),
         fields: issueFieldValues(view.state.values, schema),
+        relationships: issueRelationshipValues(view.state.values),
         actor: body.user.id,
         slackTeamId: metadata.slackTeamId,
         assigneeSlackUserIds: selectedUsers(view.state.values, "assignees", "value"),
@@ -485,10 +493,12 @@ export function createSlackApp(
         return;
       }
       const issue = await dependencies.createIssue(resolved);
-      await respondToCommand(
-        metadata.responseUrl,
-        slackPlain("success", `Issue #${issue.number}を作成しました: ${issue.url}`),
+      const result = issueCreateNotification(
+        issue,
+        `Issue #${issue.number}を作成しました: ${issue.url}`,
+        "success",
       );
+      await respondToCommand(metadata.responseUrl, slackPlain(result.tone, result.text));
     } catch (error) {
       if (error instanceof MissingGitHubIdentityError && options.requirementNotifier) {
         try {
@@ -557,13 +567,15 @@ export function createSlackApp(
       if (!issue) {
         throw new Error("承認済みIssueの作成結果を読み取れませんでした。");
       }
+      const result = issueCreateNotification(
+        issue,
+        `<@${body.user.id}> が承認し、Issue #${issue.number}を作成しました: ${issue.url}`,
+        "approved",
+      );
       await respond({
         response_type: "in_channel",
         replace_original: true,
-        text: slackPlain(
-          "approved",
-          `<@${body.user.id}> が承認し、Issue #${issue.number}を作成しました: ${issue.url}`,
-        ),
+        text: slackPlain(result.tone, result.text),
       });
     } catch (error) {
       await respond({
@@ -948,7 +960,7 @@ export function issueDetailModal(metadata: IssueModalMetadata, schema: IssueTemp
       },
       issueInput("title", "タイトル", false),
       ...schema.fields
-        .filter((field) => field.id !== "merge")
+        .filter((field) => field.id !== "merge" && !ISSUE_RELATIONSHIP_FIELD_IDS.has(field.id))
         .map((field) =>
           field.kind === "select"
             ? issueSelect(field.id, field.label, field.options ?? [], field.required)
@@ -960,10 +972,54 @@ export function issueDetailModal(metadata: IssueModalMetadata, schema: IssueTemp
                 field.initialValue,
               ),
         ),
+      ...issueRelationshipInputs(schema),
       ...(schema.id === "work" ? [issueMergePolicy()] : []),
       issueMembers("assignees", "担当者"),
       issueMembers("reviewers", "予定レビュワー"),
     ],
+  };
+}
+
+function issueRelationshipInputs(schema: IssueTemplateSchema) {
+  const parentField = schema.fields.find((field) => field.id === "parent");
+  return [
+    issueRelationshipInput(
+      "relationship-parent",
+      "親Issue",
+      parentField?.required ?? false,
+      "123、owner/repo#123、またはGitHub Issue URL（1件）",
+    ),
+    issueRelationshipInput(
+      "relationship-blocked-by",
+      "ブロック元（このIssueが待つもの）",
+      false,
+      "複数はカンマまたは改行区切り。123、owner/repo#123、またはGitHub Issue URL",
+    ),
+    issueRelationshipInput(
+      "relationship-blocking",
+      "ブロック対象（このIssueが止めるもの）",
+      false,
+      "複数はカンマまたは改行区切り。123、owner/repo#123、またはGitHub Issue URL",
+    ),
+  ];
+}
+
+function issueRelationshipInput(blockId: string, label: string, required: boolean, hint: string) {
+  return {
+    type: "input" as const,
+    block_id: blockId,
+    optional: !required,
+    label: { type: "plain_text" as const, text: label },
+    hint: { type: "plain_text" as const, text: hint },
+    element: {
+      type: "plain_text_input" as const,
+      action_id: "value",
+      multiline: true,
+      placeholder: {
+        type: "plain_text" as const,
+        text: "例: 123 または https://github.com/.../issues/123",
+      },
+    },
   };
 }
 
@@ -1089,6 +1145,29 @@ export function issueFieldValues(
   );
 }
 
+/** 共通関係blocksの入力を、CreateIssueCommandの関係parserへ渡す。 */
+export function issueRelationshipValues(
+  values: Record<string, Record<string, { value?: string | null }>>,
+): IssueRelationshipInput {
+  const input: IssueRelationshipInput = {};
+  const parent = inputValueOrUndefined(values, "relationship-parent", "value");
+  const blockedBy = inputValueOrUndefined(values, "relationship-blocked-by", "value");
+  const blocking = inputValueOrUndefined(values, "relationship-blocking", "value");
+  if (parent !== undefined) input.parent = parent;
+  if (blockedBy !== undefined) input.blockedBy = blockedBy;
+  if (blocking !== undefined) input.blocking = blocking;
+  return input;
+}
+
+function inputValueOrUndefined(
+  values: Record<string, Record<string, { value?: string | null }>>,
+  blockId: string,
+  actionId: string,
+): string | undefined {
+  const value = values[blockId]?.[actionId]?.value;
+  return value === undefined || value === null ? undefined : value;
+}
+
 export function selectedValue(
   values: Record<string, Record<string, { selected_option?: { value: string } | null }>>,
   blockId: string,
@@ -1142,6 +1221,40 @@ async function respondToCommand(responseUrl: string, text: string): Promise<void
   }
 }
 
+function issueCreateNotification(
+  issue: CreatedIssue,
+  text: string,
+  successTone: "success" | "approved",
+): { tone: "success" | "approved" | "warning"; text: string } {
+  const status = issue.relationshipStatus;
+  if (!status) {
+    return { tone: successTone, text };
+  }
+  const failed = status.failed
+    .map((item) => `${item.relation} ${item.reference}: ${item.message}`)
+    .join("\n");
+  return {
+    tone: "warning",
+    text: `${text}\n⚠️ Issueは作成済みですが、親Issue・依存関係の一部を反映できませんでした。\n未反映:\n${failed}`,
+  };
+}
+
+function issueRelationshipSummary(relationships: IssueRelationships | undefined): string {
+  if (!relationships || !hasIssueRelationships(relationships)) {
+    return "";
+  }
+  const lines = [
+    relationships.parent ? `*親Issue:* ${issueReferenceLabel(relationships.parent)}` : "",
+    relationships.blockedBy.length > 0
+      ? `*ブロック元:* ${relationships.blockedBy.map(issueReferenceLabel).join(", ")}`
+      : "",
+    relationships.blocking.length > 0
+      ? `*ブロック対象:* ${relationships.blocking.map(issueReferenceLabel).join(", ")}`
+      : "",
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
 async function requestIssueApproval(
   responseUrl: string,
   approvalId: string,
@@ -1151,6 +1264,7 @@ async function requestIssueApproval(
 ): Promise<void> {
   const mentions = [...approvers].map((id) => `<@${id}>`).join(" ");
   const mergeMode = command.fields.merge ?? "権限昇格";
+  const relationshipSummary = issueRelationshipSummary(command.relationships);
   const response = await fetch(responseUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1164,7 +1278,7 @@ async function requestIssueApproval(
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `${mentions}\n<@${command.actor}> からIssue作成の承認申請です。\n*作成先:* ${command.repository}\n*タイトル:* ${command.title}\n*マージ方式:* ${mergeMode}\n*承認が必要な理由:* ${reason}`,
+            text: `${mentions}\n<@${command.actor}> からIssue作成の承認申請です。\n*作成先:* ${command.repository}\n*タイトル:* ${command.title}\n*マージ方式:* ${mergeMode}${relationshipSummary ? `\n${relationshipSummary}` : ""}\n*承認が必要な理由:* ${reason}`,
           },
         },
         slackDivider(),

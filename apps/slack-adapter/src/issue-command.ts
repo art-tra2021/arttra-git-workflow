@@ -1,3 +1,9 @@
+import {
+  hasIssueRelationships,
+  ISSUE_RELATIONSHIP_FIELD_IDS,
+  type IssueRelationshipInput,
+  parseIssueRelationships,
+} from "./issue-relationships.ts";
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
 import type { CreateIssueCommand } from "./types.ts";
 
@@ -19,6 +25,7 @@ export interface CreateIssueInput {
   assigneeSlackUserIds?: string[];
   reviewerSlackUserIds?: string[];
   mergeMode?: string;
+  relationships?: IssueRelationshipInput;
   schema: IssueTemplateSchema;
 }
 
@@ -45,7 +52,11 @@ export function buildCreateIssueCommand(input: CreateIssueInput): CreateIssueCom
     }
     fields.merge = mergeMode;
   }
+  const relationships = parseIssueRelationships(input.relationships, fields, repository);
   for (const field of schema.fields) {
+    if (ISSUE_RELATIONSHIP_FIELD_IDS.has(field.id)) {
+      continue;
+    }
     const value = fields[field.id] ?? "";
     if (field.required && value.length === 0) {
       throw new Error(`${field.label}を入力してください`);
@@ -54,8 +65,12 @@ export function buildCreateIssueCommand(input: CreateIssueInput): CreateIssueCom
       throw new Error(`${field.label}を選択してください`);
     }
   }
+  const requiredParent = schema.fields.find((field) => field.id === "parent" && field.required);
+  if (requiredParent && !relationships.parent) {
+    throw new Error(`${requiredParent.label}を入力してください`);
+  }
 
-  return {
+  const command: CreateIssueCommand = {
     schemaVersion: 1,
     kind: "issue.create",
     repository,
@@ -67,6 +82,10 @@ export function buildCreateIssueCommand(input: CreateIssueInput): CreateIssueCom
     assigneeSlackUserIds: uniqueSlackUserIds(input.assigneeSlackUserIds ?? []),
     reviewerSlackUserIds: uniqueSlackUserIds(input.reviewerSlackUserIds ?? []),
   };
+  if (hasIssueRelationships(relationships)) {
+    command.relationships = relationships;
+  }
+  return command;
 }
 
 function uniqueSlackUserIds(values: string[]): string[] {

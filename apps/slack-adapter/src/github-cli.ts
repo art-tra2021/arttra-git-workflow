@@ -2,6 +2,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { SlackAdapterDependencies } from "./app.ts";
 import { buildIssueCreateInput, parseIssueForm } from "./github-shared.ts";
+import {
+  type IssueRelationships,
+  issueReferenceArgument,
+  normalizeIssueRelationships,
+  parseIssueRelationships,
+} from "./issue-relationships.ts";
 import type { IssueTemplateSchema } from "./issue-schema.ts";
 import {
   ORGANIZATION_PROJECT_ITEMS_QUERY,
@@ -211,6 +217,10 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
       throw new Error(`Issue templateが見つかりません: ${command.template}`);
     }
     const input = buildIssueCreateInput(command, schema);
+    const relationships = command.relationships
+      ? normalizeIssueRelationships(command.relationships, command.repository)
+      : parseIssueRelationships(undefined, command.fields, command.repository);
+    const relationshipArgs = nativeIssueRelationshipArgs(relationships, command.repository);
     const url = (
       await gh([
         "issue",
@@ -223,6 +233,7 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
         input.body,
         ...input.labels.flatMap((label) => ["--label", label]),
         ...input.assignees.flatMap((assignee) => ["--assignee", assignee]),
+        ...relationshipArgs,
       ])
     ).trim();
     return ghJson<CreatedIssue>([
@@ -325,6 +336,33 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
     } while (cursor);
     return issues;
   }
+}
+
+export function nativeIssueRelationshipArgs(
+  relationships: IssueRelationships,
+  repository: string,
+): string[] {
+  const args: string[] = [];
+  if (relationships.parent) {
+    args.push("--parent", issueReferenceArgument(relationships.parent, repository));
+  }
+  if (relationships.blockedBy.length > 0) {
+    args.push(
+      "--blocked-by",
+      relationships.blockedBy
+        .map((reference) => issueReferenceArgument(reference, repository))
+        .join(","),
+    );
+  }
+  if (relationships.blocking.length > 0) {
+    args.push(
+      "--blocking",
+      relationships.blocking
+        .map((reference) => issueReferenceArgument(reference, repository))
+        .join(","),
+    );
+  }
+  return args;
 }
 
 function toSnapshot(issue: GhIssue): WorkItemSnapshot {

@@ -1,3 +1,5 @@
+import type { IssueRelationships } from "./issue-relationships.ts";
+
 export type WorkStatus =
   | "triage"
   | "todo"
@@ -84,10 +86,18 @@ export interface CreateIssueCommand {
   assigneeGitHubLogins?: string[];
   reviewerGitHubLogins?: string[];
   reviewerGitHubUsers?: Array<{ id: number; login: string }>;
+  /** GitHub native parent/blocked-by/blocking relations. Omitted in legacy commands. */
+  relationships?: IssueRelationships;
 }
 
 export interface CreatedIssue {
   number: number;
   title: string;
   url: string;
+  /** Issue creation succeeded, but one or more native relations could not be attached. */
+  relationshipStatus?: {
+    status: "partial";
+    attached: string[];
+    failed: Array<{ relation: string; reference: string; message: string }>;
+  };
 }

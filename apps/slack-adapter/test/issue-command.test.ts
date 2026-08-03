@@ -71,6 +71,48 @@ describe("Issue作成command", () => {
     });
     expect(command.fields.merge).toBe("緊急マージ（事後レビュー必須）");
   });
+
+  test("親Issueとブロック関係を構造化してcommandへ保持する", () => {
+    const command = buildCreateIssueCommand({
+      repository: "art-tra2021/arttra-git-workflow",
+      template: "task",
+      title: "関係を付ける",
+      fields: {
+        parent: "",
+        action: "依存関係を設定する",
+        done: "- [ ] native relationが付く",
+      },
+      relationships: {
+        parent: "42",
+        blockedBy: "art-tra2021/other#8",
+        blocking: "43,44",
+      },
+      actor: "U123",
+      schema: issueTemplate("task"),
+    });
+    expect(command.relationships).toEqual({
+      parent: { repository: "art-tra2021/arttra-git-workflow", number: 42 },
+      blockedBy: [{ repository: "art-tra2021/other", number: 8 }],
+      blocking: [
+        { repository: "art-tra2021/arttra-git-workflow", number: 43 },
+        { repository: "art-tra2021/arttra-git-workflow", number: 44 },
+      ],
+    });
+    expect(command.fields.parent).toBe("");
+  });
+
+  test("taskは専用親Issue入力がなければ作成できない", () => {
+    expect(() =>
+      buildCreateIssueCommand({
+        repository: "art-tra2021/arttra-git-workflow",
+        template: "task",
+        title: "親なし",
+        fields: { parent: "", action: "作業", done: "- [ ] 完了" },
+        actor: "U123",
+        schema: issueTemplate("task"),
+      }),
+    ).toThrow("親の作業チケットを入力してください");
+  });
 });
 
 describe("Issue URL", () => {

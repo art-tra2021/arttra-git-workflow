@@ -1,4 +1,5 @@
 import { parse } from "yaml";
+import { ISSUE_RELATIONSHIP_FIELD_IDS } from "./issue-relationships.ts";
 import type { IssueFieldSchema, IssueTemplateSchema } from "./issue-schema.ts";
 import type { CreateIssueCommand } from "./types.ts";
 
@@ -66,12 +67,9 @@ export function buildIssueCreateInput(
   schema: IssueTemplateSchema,
 ): IssueCreateInput {
   const body = [
-    ...schema.fields.flatMap((field) => [
-      `## ${field.label}`,
-      "",
-      command.fields[field.id] || "未設定",
-      "",
-    ]),
+    ...schema.fields
+      .filter((field) => !ISSUE_RELATIONSHIP_FIELD_IDS.has(field.id))
+      .flatMap((field) => [`## ${field.label}`, "", command.fields[field.id] || "未設定", ""]),
     "## 作成元",
     "",
     "Slack `/ar new`",

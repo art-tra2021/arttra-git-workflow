@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   issueDetailModal,
   issueFieldValues,
+  issueRelationshipValues,
   issueRepositoryPickerModal,
   openIssueRepositoryFlow,
   parseProjectProjectionCommand,
@@ -140,6 +141,35 @@ describe("Slack Issue modal flow", () => {
       blocked_by: "",
       target_date: "2026-08-04",
     });
+  });
+
+  test("全templateへ親Issue・blocked-by・blockingの共通入力を表示する", () => {
+    const modal = issueDetailModal(
+      {
+        channelId: "C123",
+        responseUrl: "https://hooks.slack.test/response",
+        slackTeamId: "T123",
+        repository: "art-tra2021/work",
+        template: "work",
+      },
+      issueTemplate("work"),
+    );
+    const blockIds = modal.blocks.flatMap((block) => ("block_id" in block ? [block.block_id] : []));
+    expect(blockIds).toContain("relationship-parent");
+    expect(blockIds).toContain("relationship-blocked-by");
+    expect(blockIds).toContain("relationship-blocking");
+    expect(JSON.stringify(modal)).toContain("owner/repo#123");
+  });
+
+  test("共通関係blocksをCreateIssueCommand用の入力へ変換する", () => {
+    expect(
+      issueRelationshipValues({
+        "relationship-parent": { value: { value: "42" } },
+        "relationship-blocked-by": { value: { value: "7,8" } },
+        "relationship-blocking": { value: { value: "9" } },
+      }),
+    ).toEqual({ parent: "42", blockedBy: "7,8", blocking: "9" });
+    expect(issueRelationshipValues({})).toEqual({});
   });
 
   test("短寿命のtrigger_idをrepository取得より先に使用する", async () => {

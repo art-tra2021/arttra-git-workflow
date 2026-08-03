@@ -274,6 +274,192 @@ describe("GitHub App adapter", () => {
     );
   });
 
+  test("GitHub AppはIssue作成後にnative parent・依存関係を付与する", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    const client = dependencies(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      const body = init?.body === undefined ? undefined : JSON.parse(String(init.body));
+      calls.push({ url, method, body });
+      if (url.endsWith("/app/installations/99/access_tokens")) {
+        return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
+      }
+      if (url.endsWith("/contents/.github/ISSUE_TEMPLATE")) {
+        return json([{ name: "work.yml", path: ".github/ISSUE_TEMPLATE/work.yml", type: "file" }]);
+      }
+      if (url.endsWith("/contents/.github/ISSUE_TEMPLATE/work.yml")) {
+        return new Response(issueForm(), { status: 200 });
+      }
+      if (url.includes("/installation/repositories")) {
+        return json({
+          total_count: 3,
+          repositories: [
+            { full_name: "art-tra2021/arttra-git-workflow", archived: false, private: false },
+            { full_name: "art-tra2021/other", archived: false, private: false },
+            { full_name: "outside/nope", archived: false, private: false },
+          ],
+        });
+      }
+      const target = url.match(/\/repos\/([^/]+\/[^/]+)\/issues\/(4|5|6)$/)?.[2] ?? null;
+      if (target) {
+        const number = Number(target);
+        return json({
+          id: 100 + number,
+          number,
+          title: `target ${number}`,
+          html_url: `https://github.example/issues/${number}`,
+          body: "",
+          state: "open",
+          user: { login: "author" },
+          labels: [],
+          assignees: [],
+        });
+      }
+      if (url.endsWith("/repos/art-tra2021/arttra-git-workflow/issues")) {
+        return json({
+          id: 222,
+          number: 42,
+          title: "created",
+          html_url: "https://github.example/issues/42",
+          body: "",
+          state: "open",
+          user: { login: "author" },
+          labels: [],
+          assignees: [],
+        });
+      }
+      if (url.endsWith("/repos/art-tra2021/arttra-git-workflow/issues/4/sub_issues")) {
+        return json({});
+      }
+      if (
+        url.endsWith("/repos/art-tra2021/arttra-git-workflow/issues/42/dependencies/blocked_by")
+      ) {
+        return json({});
+      }
+      if (url.endsWith("/repos/art-tra2021/other/issues/6/dependencies/blocked_by")) {
+        return json({});
+      }
+      throw new Error(`予期しないrequest: ${url} ${String(init?.body ?? "")}`);
+    });
+    const command: CreateIssueCommand = {
+      schemaVersion: 1,
+      kind: "issue.create",
+      repository: "art-tra2021/arttra-git-workflow",
+      template: "work",
+      title: "関係を付ける",
+      fields: { outcome: "native relation" },
+      actor: "U123",
+      relationships: {
+        parent: { repository: "art-tra2021/arttra-git-workflow", number: 4 },
+        blockedBy: [{ repository: "art-tra2021/arttra-git-workflow", number: 5 }],
+        blocking: [{ repository: "art-tra2021/other", number: 6 }],
+      },
+    };
+
+    expect(await client.createIssue(command)).toEqual({
+      number: 42,
+      title: "created",
+      url: "https://github.example/issues/42",
+    });
+    expect(
+      calls
+        .filter((call) => call.method === "POST" && !call.url.includes("/access_tokens"))
+        .map((call) => [call.url, call.body]),
+    ).toEqual([
+      [
+        "https://github.example/api/v3/repos/art-tra2021/arttra-git-workflow/issues",
+        expect.objectContaining({ title: "[作業] 関係を付ける" }),
+      ],
+      [
+        "https://github.example/api/v3/repos/art-tra2021/arttra-git-workflow/issues/4/sub_issues",
+        { sub_issue_id: 222 },
+      ],
+      [
+        "https://github.example/api/v3/repos/art-tra2021/arttra-git-workflow/issues/42/dependencies/blocked_by",
+        { issue_id: 105 },
+      ],
+      [
+        "https://github.example/api/v3/repos/art-tra2021/other/issues/6/dependencies/blocked_by",
+        { issue_id: 222 },
+      ],
+    ]);
+  });
+
+  test("native関係の一部失敗でも作成済みIssue URLと構造化失敗を返す", async () => {
+    const client = dependencies(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app/installations/99/access_tokens")) {
+        return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
+      }
+      if (url.endsWith("/contents/.github/ISSUE_TEMPLATE")) {
+        return json([{ name: "work.yml", path: ".github/ISSUE_TEMPLATE/work.yml", type: "file" }]);
+      }
+      if (url.endsWith("/contents/.github/ISSUE_TEMPLATE/work.yml")) {
+        return new Response(issueForm(), { status: 200 });
+      }
+      if (url.includes("/installation/repositories")) {
+        return json({
+          total_count: 1,
+          repositories: [
+            { full_name: "art-tra2021/arttra-git-workflow", archived: false, private: false },
+          ],
+        });
+      }
+      if (url.endsWith("/repos/art-tra2021/arttra-git-workflow/issues/4")) {
+        return json({
+          id: 104,
+          number: 4,
+          title: "parent",
+          html_url: "https://github.example/issues/4",
+          body: "",
+          state: "open",
+          user: { login: "author" },
+          labels: [],
+          assignees: [],
+        });
+      }
+      if (url.endsWith("/repos/art-tra2021/arttra-git-workflow/issues")) {
+        return json({
+          id: 222,
+          number: 42,
+          title: "created",
+          html_url: "https://github.example/issues/42",
+          body: "",
+          state: "open",
+          user: { login: "author" },
+          labels: [],
+          assignees: [],
+        });
+      }
+      if (url.endsWith("/sub_issues")) {
+        return new Response(JSON.stringify({ message: "forbidden" }), { status: 403 });
+      }
+      throw new Error(`予期しないrequest: ${url} ${String(init?.body ?? "")}`);
+    });
+
+    const issue = await client.createIssue({
+      schemaVersion: 1,
+      kind: "issue.create",
+      repository: "art-tra2021/arttra-git-workflow",
+      template: "work",
+      title: "部分失敗",
+      fields: { outcome: "URLを失わない" },
+      actor: "U123",
+      relationships: {
+        parent: { repository: "art-tra2021/arttra-git-workflow", number: 4 },
+        blockedBy: [],
+        blocking: [],
+      },
+    });
+    expect(issue.number).toBe(42);
+    expect(issue.url).toBe("https://github.example/issues/42");
+    expect(issue.relationshipStatus).toMatchObject({
+      status: "partial",
+      attached: [],
+      failed: [{ relation: "parent", reference: "art-tra2021/arttra-git-workflow#4" }],
+    });
+  });
+
   test("検証済みGitHub loginでProjectsの自分の仕事を絞り込む", async () => {
     const graphqlBodies: unknown[] = [];
     const client = new GitHubAppDependencies({
