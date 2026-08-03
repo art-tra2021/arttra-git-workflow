@@ -25,6 +25,62 @@ pub struct StatusReport {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct HomeStatus {
+    pub repository: String,
+    pub branch: String,
+    pub head: String,
+    pub issue: Option<HomeIssue>,
+    pub pull_request: Option<HomePullRequest>,
+    pub changes: HomeChanges,
+    pub upstream: HomeUpstream,
+    pub next_action: Option<HomeAction>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HomeIssue {
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct HomePullRequest {
+    pub number: u64,
+    pub title: String,
+    pub is_draft: bool,
+    pub checks_success: usize,
+    pub checks_total: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HomeChanges {
+    pub staged: usize,
+    pub unstaged: usize,
+    pub untracked: usize,
+    pub conflicted: usize,
+}
+
+impl HomeChanges {
+    pub fn total(self) -> usize {
+        self.staged + self.unstaged + self.untracked + self.conflicted
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HomeUpstream {
+    pub ahead: u64,
+    pub behind: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct HomeAction {
+    pub title: String,
+    pub reason: String,
+    pub command: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct IssueStatus {
     number: u64,
@@ -192,6 +248,54 @@ struct RecommendationFacts<'a> {
 }
 
 pub fn show(issue_override: Option<u64>, json: bool, policy: &BranchPolicy) -> Result<()> {
+    let report = collect(issue_override, policy)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_human(&report);
+    }
+    Ok(())
+}
+
+pub fn home(issue_override: Option<u64>, policy: &BranchPolicy) -> Result<HomeStatus> {
+    let report = collect(issue_override, policy)?;
+    Ok(HomeStatus {
+        repository: report.repository,
+        branch: report.branch,
+        head: report.head,
+        issue: report.issue.map(|issue| HomeIssue {
+            number: issue.number,
+            title: issue.title,
+            state: issue.state,
+        }),
+        pull_request: report.pull_request.map(|pull_request| HomePullRequest {
+            number: pull_request.number,
+            title: pull_request.title,
+            is_draft: pull_request.is_draft,
+            checks_success: pull_request.checks.success,
+            checks_total: pull_request.checks.total,
+        }),
+        changes: HomeChanges {
+            staged: report.worktree.staged,
+            unstaged: report.worktree.unstaged,
+            untracked: report.worktree.untracked,
+            conflicted: report.worktree.conflicted,
+        },
+        upstream: HomeUpstream {
+            ahead: report.upstream.ahead,
+            behind: report.upstream.behind,
+        },
+        next_action: report.next_actions.first().map(|action| HomeAction {
+            title: action.title.clone(),
+            reason: action.reason.clone(),
+            command: action.command.clone(),
+        }),
+        warnings: report.warnings,
+    })
+}
+
+fn collect(issue_override: Option<u64>, policy: &BranchPolicy) -> Result<StatusReport> {
     let branch = git(&["branch", "--show-current"])?;
     if branch.is_empty() {
         bail!("detached HEADでは現在の作業を判定できません");
@@ -232,7 +336,7 @@ pub fn show(issue_override: Option<u64>, json: bool, policy: &BranchPolicy) -> R
         worktree: &worktree,
         upstream: &upstream,
     });
-    let report = StatusReport {
+    Ok(StatusReport {
         schema_version: 1,
         repository,
         branch,
@@ -243,14 +347,7 @@ pub fn show(issue_override: Option<u64>, json: bool, policy: &BranchPolicy) -> R
         upstream,
         next_actions,
         warnings,
-    };
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_human(&report);
-    }
-    Ok(())
+    })
 }
 
 fn fetch_issue(number: u64) -> Result<IssueStatus> {

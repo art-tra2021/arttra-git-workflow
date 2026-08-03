@@ -9,6 +9,7 @@ mod setup;
 mod status;
 mod tasks;
 mod telemetry;
+mod tui;
 
 use std::fmt;
 use std::io::{self, IsTerminal, Read};
@@ -481,43 +482,6 @@ impl<T> fmt::Display for ExplainedChoice<T> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum TuiAction {
-    Status,
-    Tasks,
-    Issue,
-    Branch,
-    Commit,
-    Push,
-    PullRequest,
-    Presence,
-    Check,
-    Rules,
-    Doctor,
-    Context,
-    Exit,
-}
-
-impl fmt::Display for TuiAction {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Status => "🧭 今やることを見る — Issue・PR・作業状態から次の一手を確認",
-            Self::Tasks => "📋 自分のタスクを見る — GitHub Projectsの担当作業を一覧表示",
-            Self::Issue => "📝 Issueを作る — 相談・仕事・小タスク・営業活動を登録",
-            Self::Branch => "🌿 branchを作る — Issueに紐づく作業場所を作成",
-            Self::Commit => "💾 commitを作る — 変更の種類と内容を選んで記録",
-            Self::Push => "🚀 pushする — commitをGitHubへ送信",
-            Self::PullRequest => "🔀 Pull Requestを作る — 変更内容を共有してマージへ進む",
-            Self::Presence => "👥 作業ファイルの重複を確認 — 他branchとの衝突を早めに発見",
-            Self::Check => "✅ 一括チェックする — format・test・lintなどをまとめて確認",
-            Self::Rules => "🛡 Rules Insightsを見る — GitHub規則の適用結果を確認",
-            Self::Doctor => "🩺 環境を診断する — mise・hooks・ghなどの不足を確認",
-            Self::Context => "🤖 AI向けコンテキストを見る — 安全な作業情報をJSON化",
-            Self::Exit => "👋 終了する",
-        })
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct CommitDraft {
     subject: String,
@@ -718,47 +682,29 @@ fn run() -> Result<()> {
 
 fn tui() -> Result<()> {
     ensure_interactive()?;
-    let action = Select::new(
-        "何をしますか？（↑↓で選択、Enterで決定）",
-        vec![
-            TuiAction::Status,
-            TuiAction::Tasks,
-            TuiAction::Issue,
-            TuiAction::Branch,
-            TuiAction::Commit,
-            TuiAction::Push,
-            TuiAction::PullRequest,
-            TuiAction::Presence,
-            TuiAction::Check,
-            TuiAction::Rules,
-            TuiAction::Doctor,
-            TuiAction::Context,
-            TuiAction::Exit,
-        ],
-    )
-    .with_help_message("文字を入力すると候補を検索できます。Escで戻ります")
-    .prompt()?;
+    let policy = Policy::load()?;
+    let home = status::home(None, &policy.branch)?;
+    let Some(action) = tui::run(&home)? else {
+        return Ok(());
+    };
 
     match action {
-        TuiAction::Status => status::show(None, false, &Policy::load()?.branch),
-        TuiAction::Tasks => tasks::show(false, false, true, &Policy::load()?.tasks),
-        TuiAction::Issue => issue(IssueArgs::default()),
-        TuiAction::Branch => branch_command(BranchArgs::default()),
-        TuiAction::Commit => commit(CommitArgs::default()),
-        TuiAction::Push => push(PushArgs::default()),
-        TuiAction::PullRequest => pull_request(PullRequestArgs {
+        tui::Action::Status => status::show(None, false, &policy.branch),
+        tui::Action::Tasks => tasks::show(false, false, true, &policy.tasks),
+        tui::Action::Issue => issue(IssueArgs::default()),
+        tui::Action::Branch => branch_command(BranchArgs::default()),
+        tui::Action::Commit => commit(CommitArgs::default()),
+        tui::Action::Push => push(PushArgs::default()),
+        tui::Action::PullRequest => pull_request(PullRequestArgs {
             create: true,
             ..PullRequestArgs::default()
         }),
-        TuiAction::Presence => {
-            let policy = Policy::load()?;
-            presence::check(&policy.presence, false)
-        }
-        TuiAction::Check => check(false, false),
-        TuiAction::Rules => governance::rules(10, None, false),
-        TuiAction::Doctor => doctor(false),
-        TuiAction::Context => context(false),
-        TuiAction::Exit => Ok(()),
+        tui::Action::Presence => presence::check(&policy.presence, false),
+        tui::Action::Check => check(false, false),
+        tui::Action::Rules => governance::rules(10, None, false),
+        tui::Action::Doctor => doctor(false),
+        tui::Action::Context => context(false),
+        tui::Action::Exit => Ok(()),
     }
 }
 
@@ -882,7 +828,7 @@ fn push(args: PushArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!("🚀 Pushの準備");
+    println!("[PUSH] GitHubへの送信準備");
     println!("  branch: {}", plan.branch);
     println!("  送信先: {}", plan.remote);
     match plan.commits_to_push {
@@ -891,7 +837,7 @@ fn push(args: PushArgs) -> Result<()> {
     }
     if plan.uncommitted_files > 0 {
         println!(
-            "  ⚠ 未commit: {}ファイル（このpushには含まれません）",
+            "  WARN  未commit: {}ファイル（このpushには含まれません）",
             plan.uncommitted_files
         );
     }
@@ -963,7 +909,7 @@ fn pull_request(mut args: PullRequestArgs) -> Result<()> {
         return Ok(());
     }
     if !args.json {
-        println!("🔀 Pull Requestの準備");
+        println!("[PULL REQUEST] 作成準備");
         println!("  branch: {} → {}", draft.branch, draft.base);
         match draft.issue {
             Some(issue) => println!("  関連Issue: #{issue}"),
@@ -983,7 +929,7 @@ fn pull_request(mut args: PullRequestArgs) -> Result<()> {
         }
         if draft.uncommitted_files > 0 {
             println!(
-                "  ⚠ 未commit: {}ファイル（PRにはまだ含まれません）",
+                "  WARN  未commit: {}ファイル（PRにはまだ含まれません）",
                 draft.uncommitted_files
             );
         }
