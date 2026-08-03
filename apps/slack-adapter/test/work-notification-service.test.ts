@@ -216,7 +216,14 @@ function memoryStore(values: Map<string, unknown>): StateStore {
   return {
     get: async <T>(namespace: string, key: string) =>
       (values.get(storageKey(namespace, key)) as T | undefined) ?? null,
-    list: async <T>() => [...values.values()] as T[],
+    list: async <T>(namespace: string) =>
+      [...values.entries()]
+        .filter(([key]) => key.startsWith(`${namespace}:`))
+        .map(([, value]) => value as T),
+    listEntries: async <T>(namespace: string) =>
+      [...values.entries()]
+        .filter(([key]) => key.startsWith(`${namespace}:`))
+        .map(([key, value]) => ({ key: key.slice(namespace.length + 1), value: value as T })),
     set: async (namespace: string, key: string, value: unknown) => {
       values.set(storageKey(namespace, key), value);
     },

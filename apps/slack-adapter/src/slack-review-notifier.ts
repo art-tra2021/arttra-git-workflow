@@ -3,6 +3,7 @@ import type {
   LifecycleResource,
   ResolveLifecycleSlackUserId,
 } from "./lifecycle-notification-service.ts";
+import { notificationIntentId } from "./notification-outbox.ts";
 import type { NotificationThreadService } from "./notification-thread-service.ts";
 import type { ReviewRequestReadModel } from "./review-types.ts";
 
@@ -21,7 +22,10 @@ export class SlackReviewNotifier {
     this.resolveSlackUserId = resolveSlackUserId;
   }
 
-  async notify(model: ReviewRequestReadModel): Promise<void> {
+  async notify(
+    model: ReviewRequestReadModel,
+    context: { sourceDeliveryId?: string } = {},
+  ): Promise<void> {
     const assigneeLogins = model.linkedIssues.flatMap((issue) => issue.assigneeLogins);
     const assigneeSlackIds = await Promise.all(
       assigneeLogins
@@ -78,6 +82,16 @@ export class SlackReviewNotifier {
             actionUrl: model.pullRequest.url,
           },
           threadTs,
+          {
+            intentId: notificationIntentId({
+              kind: "review-request",
+              repository: model.repository,
+              pullRequestNumber: model.pullRequest.number,
+              resourceUrl: resource.url,
+              updatedAt: model.updatedAt,
+            }),
+            ...(context.sourceDeliveryId ? { sourceDeliveryId: context.sourceDeliveryId } : {}),
+          },
         ),
       );
     }

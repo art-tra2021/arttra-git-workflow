@@ -12,7 +12,11 @@ const READ_MODEL_NAMESPACE = "review-read-model";
 const NOTIFICATION_NAMESPACE = "review-notification";
 
 interface ReviewNotifier {
-  notify(model: ReviewRequestReadModel): Promise<void>;
+  notify(model: ReviewRequestReadModel, context?: ReviewNotificationContext): Promise<void>;
+}
+
+interface ReviewNotificationContext {
+  sourceDeliveryId?: string;
 }
 
 interface ReviewNotificationState {
@@ -37,6 +41,7 @@ interface ReviewerCandidate {
 
 interface ReviewProcessOptions {
   reRequestChanges?: boolean;
+  sourceDeliveryId?: string;
 }
 
 export class PullRequestReviewService {
@@ -159,7 +164,9 @@ export class PullRequestReviewService {
     };
     const shouldNotify = await this.shouldNotify(model);
     if (shouldNotify) {
-      await this.notifier.notify(model);
+      await this.notifier.notify(model, {
+        ...(options.sourceDeliveryId ? { sourceDeliveryId: options.sourceDeliveryId } : {}),
+      });
       for (const reviewer of model.reviewers) {
         reviewer.notified = reviewer.slackUserId !== null;
       }

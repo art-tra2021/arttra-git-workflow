@@ -7,11 +7,15 @@ describe("SlackWorkNotifier", () => {
     const calls: Array<Record<string, unknown>> = [];
     const notifier = new SlackWorkNotifier(slackClient(calls, ["700.1"]), "CWORK");
 
-    const result = await notifier.notify(item(), {
-      kind: "deadline",
-      threadTs: null,
-      slackUserId: "UALICE",
-    });
+    const result = await notifier.notify(
+      item(),
+      {
+        kind: "deadline",
+        threadTs: null,
+        slackUserId: "UALICE",
+      },
+      { intentId: "notification-test" },
+    );
 
     expect(result).toEqual({ messageTs: "700.1" });
     expect(calls).toHaveLength(1);
@@ -24,6 +28,10 @@ describe("SlackWorkNotifier", () => {
       text: { text: "⏰ 期限のお知らせ" },
     });
     expect(calls[0]).not.toHaveProperty("thread_ts");
+    expect(calls[0]?.metadata).toEqual({
+      event_type: "arttra_notification",
+      event_payload: { intent_id: "notification-test" },
+    });
   });
 
   test("同じIssueの続報は親投稿のスレッドへ返信する", async () => {

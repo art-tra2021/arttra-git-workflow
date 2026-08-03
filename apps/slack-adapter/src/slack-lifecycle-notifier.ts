@@ -4,6 +4,7 @@ import type {
   LifecycleNotificationKind,
   LifecycleNotifier,
 } from "./lifecycle-notification-service.ts";
+import type { NotificationIntentMetadata } from "./notification-outbox.ts";
 import type { ThreadMessageResult } from "./notification-thread-service.ts";
 import { lifecycleTone, slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
 
@@ -19,6 +20,7 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
   async notify(
     notification: LifecycleNotification,
     threadTs: string | null,
+    metadata?: NotificationIntentMetadata,
   ): Promise<ThreadMessageResult> {
     const mentions = notification.slackUserIds.map((userId) => `<@${userId}>`).join(" ");
     const target = notification.pullRequest ?? notification.resource;
@@ -67,6 +69,14 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
         },
       ],
       ...(threadTs ? { thread_ts: threadTs, reply_broadcast: false } : {}),
+      ...(metadata
+        ? {
+            metadata: {
+              event_type: "arttra_notification",
+              event_payload: { intent_id: metadata.intentId },
+            },
+          }
+        : {}),
       unfurl_links: false,
       unfurl_media: false,
     });

@@ -14,11 +14,13 @@ features:
 oauth_config:
   scopes:
     bot:
+      - channels:history
       - channels:read
       - canvases:write
       - chat:write
       - commands
       - groups:read
+      - groups:history
       - lists:read
       - lists:write
       - users:read

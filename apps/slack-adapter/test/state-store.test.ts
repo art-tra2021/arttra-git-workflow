@@ -23,6 +23,9 @@ describe("LocalStateStore", () => {
       result: "first",
     });
     expect(await store.list("dedupe")).toEqual([{ result: "first" }]);
+    expect(await store.listEntries("dedupe")).toEqual([
+      { key: "event-1", value: { result: "first" } },
+    ]);
   });
 
   test("compareAndSetは同じrevisionを一度だけ更新する", async () => {

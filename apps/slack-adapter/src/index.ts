@@ -2,6 +2,13 @@ export { createSlackApp } from "./app.ts";
 export { CanvasProjectionService, syncCanvasProjection } from "./canvas-service.ts";
 export { GitHubCliDependencies } from "./github-cli.ts";
 export { buildCreateIssueCommand } from "./issue-command.ts";
+export {
+  DelegatingNotificationPayloadSender,
+  NotificationOutboxService,
+  notificationIntentId,
+  OutboxLifecycleNotifier,
+  OutboxWorkNotifier,
+} from "./notification-outbox.ts";
 export { workItemBlocks } from "./presentation.ts";
 export { createProjectList, syncProjectList } from "./project-list.ts";
 export {
