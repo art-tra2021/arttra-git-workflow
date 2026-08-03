@@ -57,6 +57,46 @@ describe("Slack Issue modal flow", () => {
     ]);
   });
 
+  test("既定repositoryが候補にあれば初期選択と候補先頭へ優先する", async () => {
+    const updates: unknown[] = [];
+    await openIssueRepositoryFlow({
+      views: {
+        open: async () => ({ view: { id: "V-default" } }),
+        update: async (input) => updates.push(input),
+      },
+      listRepositories: async () => [".2B-tyodai", "art-tra2021/arttra-git-workflow", "zeta/repo"],
+      defaultRepository: "art-tra2021/arttra-git-workflow",
+      triggerId: "trigger-default",
+      channelId: "C123",
+      responseUrl: "https://hooks.slack.test/response",
+      slackTeamId: "T123",
+    });
+
+    const element = (
+      updates[0] as {
+        view: {
+          blocks: Array<{
+            element: {
+              initial_option: { value: string };
+              options: Array<{ value: string }>;
+            };
+          }>;
+        };
+      }
+    ).view.blocks[0]?.element;
+    if (!element) throw new Error("Repository pickerのelementがありません");
+    expect(element.initial_option.value).toBe("art-tra2021/arttra-git-workflow");
+    expect(element.options[0]?.value).toBe("art-tra2021/arttra-git-workflow");
+  });
+
+  test("アクセスできない既定repositoryを候補へ追加しない", () => {
+    expect(
+      repositoryOptions([".2B-tyodai", "zeta/repo"], "", "art-tra2021/arttra-git-workflow").map(
+        (candidate) => candidate.value,
+      ),
+    ).toEqual([".2B-tyodai", "zeta/repo"]);
+  });
+
   test("外部選択のaction IDからrepositoryを読み取り欠落を拒否する", () => {
     expect(
       selectedValue(

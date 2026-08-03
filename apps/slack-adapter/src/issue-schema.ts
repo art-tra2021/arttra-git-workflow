@@ -9,6 +9,29 @@ export interface IssueFieldSchema {
   initialValue?: string;
 }
 
+/**
+ * Repository側にIssue Formがまだ導入されていない場合に使う最小の共通schema。
+ *
+ * これはrepositoryのtemplate一覧に混ぜず、adapterが「未導入」を検知したときだけ
+ * pickerへ提示する。したがって既存templateの表示や権限判定を置き換えない。
+ */
+export const GENERIC_ISSUE_TEMPLATE: IssueTemplateSchema = {
+  id: "generic",
+  name: "標準Issue（テンプレート未導入）",
+  titlePrefix: "[Issue] ",
+  labels: ["type/intake", "status/triage"],
+  fields: [
+    { id: "summary", label: "内容", kind: "textarea", required: true },
+    {
+      id: "done",
+      label: "完了条件（任意）",
+      kind: "textarea",
+      required: false,
+      initialValue: "- [ ] 内容を確認する",
+    },
+  ],
+};
+
 export interface IssueTemplateSchema {
   id: IssueTemplateId;
   name: string;
@@ -90,6 +113,20 @@ export const ISSUE_TEMPLATES: IssueTemplateSchema[] = [
     ],
   },
 ];
+
+/**
+ * Remote templateが空のrepositoryでだけ共通fallbackを解決する。
+ * remote templateが存在するのに未知のidを受け取った場合は、誤ったschemaでの作成を防ぐためnullを返す。
+ */
+export function resolveIssueTemplate(
+  templates: IssueTemplateSchema[],
+  id: IssueTemplateId,
+): IssueTemplateSchema | null {
+  return (
+    templates.find((candidate) => candidate.id === id) ??
+    (templates.length === 0 && id === GENERIC_ISSUE_TEMPLATE.id ? GENERIC_ISSUE_TEMPLATE : null)
+  );
+}
 
 export function issueTemplate(id: IssueTemplateId): IssueTemplateSchema {
   const schema = ISSUE_TEMPLATES.find((candidate) => candidate.id === id);

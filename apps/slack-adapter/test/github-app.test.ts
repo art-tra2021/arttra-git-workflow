@@ -64,6 +64,21 @@ describe("GitHub App adapter", () => {
     expect(calls.filter((url) => url.includes("access_tokens"))).toHaveLength(1);
   });
 
+  test("Issue template directoryの404は未導入として空一覧へ変換する", async () => {
+    const client = dependencies(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/app/installations/99/access_tokens")) {
+        return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
+      }
+      if (url.endsWith("/contents/.github/ISSUE_TEMPLATE")) {
+        return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+      }
+      throw new Error(`予期しないrequest: ${url}`);
+    });
+
+    expect(await client.listIssueTemplates("art-tra2021/no-template")).toEqual([]);
+  });
+
   test("viewer-aware repository一覧はpublic readとprivateのeffective permissionだけを返す", async () => {
     const collaboratorCalls: string[] = [];
     const client = dependencies(async (input) => {
@@ -272,6 +287,58 @@ describe("GitHub App adapter", () => {
     expect((createdBody as { body: string }).body).toContain(
       '<!-- ar:reviewers:v1 [{"id":456,"login":"reviewer"}] -->',
     );
+  });
+
+  test("template未導入repositoryでは標準IssueをGitHub APIへ送る", async () => {
+    let createdBody: unknown;
+    const client = dependencies(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app/installations/99/access_tokens")) {
+        return json({
+          token: "installation-token",
+          expires_at: "2026-08-01T01:00:00Z",
+          permissions: { issues: "write", contents: "read" },
+        });
+      }
+      if (url.endsWith("/repos/art-tra2021/no-template")) {
+        return json({ full_name: "art-tra2021/no-template" });
+      }
+      if (url.endsWith("/contents/.github/ISSUE_TEMPLATE")) {
+        return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+      }
+      if (url.endsWith("/repos/art-tra2021/no-template/issues")) {
+        createdBody = JSON.parse(String(init?.body));
+        return json({
+          number: 7,
+          title: "[Issue] 相談",
+          html_url: "https://github.com/art-tra2021/no-template/issues/7",
+          labels: [],
+          assignees: [],
+        });
+      }
+      throw new Error(`予期しないrequest: ${url}`);
+    });
+    const command: CreateIssueCommand = {
+      schemaVersion: 1,
+      kind: "issue.create",
+      repository: "art-tra2021/no-template",
+      template: "generic",
+      title: "相談",
+      fields: { summary: "テンプレート導入前の相談", done: "" },
+      actor: "U123",
+    };
+
+    await client.validateIssueAuthorization(command);
+    expect(await client.createIssue(command)).toEqual({
+      number: 7,
+      title: "[Issue] 相談",
+      url: "https://github.com/art-tra2021/no-template/issues/7",
+    });
+    expect(createdBody).toMatchObject({
+      title: "[Issue] 相談",
+      labels: ["type/intake", "status/triage"],
+    });
+    expect((createdBody as { body: string }).body).toContain("テンプレート導入前の相談");
   });
 
   test("GitHub AppはIssue作成後にnative parent・依存関係を付与する", async () => {
