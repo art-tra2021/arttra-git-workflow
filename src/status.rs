@@ -715,7 +715,7 @@ fn recommend(facts: &RecommendationFacts<'_>) -> Vec<NextAction> {
                 "未stageが{}件、未追跡が{}件ある",
                 facts.worktree.unstaged, facts.worktree.untracked
             ),
-            Some("git status --short".into()),
+            Some("git ar add".into()),
         )];
     }
     if facts.worktree.staged > 0 {
@@ -1064,6 +1064,27 @@ mod tests {
             upstream: &upstream,
         });
         assert_eq!(actions[0].id, "resolve-conflicts");
+    }
+
+    #[test]
+    fn unstaged_changes_point_to_the_guided_add_command() {
+        let worktree = WorktreeStatus {
+            clean: false,
+            unstaged: 1,
+            untracked: 1,
+            ..WorktreeStatus::default()
+        };
+        let upstream = UpstreamStatus::default();
+        let actions = recommend(&RecommendationFacts {
+            branch: "feature/82-add-action-rozwer",
+            protected: false,
+            issue: None,
+            pull_request: None,
+            worktree: &worktree,
+            upstream: &upstream,
+        });
+        assert_eq!(actions[0].id, "review-local-changes");
+        assert_eq!(actions[0].command.as_deref(), Some("git ar add"));
     }
 
     #[test]

@@ -67,9 +67,11 @@ pub enum Action {
     Tasks,
     Issue,
     Branch,
+    Add,
     Commit,
     Push,
     PullRequest,
+    Revert,
     Presence,
     Check,
     Rules,
@@ -177,14 +179,16 @@ impl ActionReport {
 }
 
 impl Action {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 15] = [
         Self::Status,
         Self::Tasks,
         Self::Issue,
         Self::Branch,
+        Self::Add,
         Self::Commit,
         Self::Push,
         Self::PullRequest,
+        Self::Revert,
         Self::Presence,
         Self::Check,
         Self::Rules,
@@ -199,9 +203,11 @@ impl Action {
             Self::Tasks => "自分のタスク",
             Self::Issue => "Issueを作る",
             Self::Branch => "branchを作る",
+            Self::Add => "変更を選ぶ（add）",
             Self::Commit => "commitを作る",
             Self::Push => "pushする",
             Self::PullRequest => "Pull Requestを作る",
+            Self::Revert => "commitを取り消す（revert）",
             Self::Presence => "作業の重複を確認",
             Self::Check => "一括チェック",
             Self::Rules => "Rules Insights",
@@ -217,9 +223,11 @@ impl Action {
             Self::Tasks => "GitHub Projectsから、自分が担当する仕事を一覧表示します。",
             Self::Issue => "相談、通常作業、小タスク、営業活動をGitHubへ登録します。",
             Self::Branch => "Issueに紐づく、命名規則どおりの作業branchを作ります。",
+            Self::Add => "commitへ入れる変更だけを複数選択してstageします。",
             Self::Commit => "変更の種類と内容を選び、検証済みのcommitを作ります。",
             Self::Push => "送信先とcommit数を確認してからGitHubへpushします。",
             Self::PullRequest => "Issueとの関係を保ったPull Requestを作成します。",
+            Self::Revert => "履歴を消さず、選んだcommitを打ち消すcommitを作ります。",
             Self::Presence => "他のbranchが同じファイルを触っていないか確認します。",
             Self::Check => "format、test、lint、securityをまとめて実行します。",
             Self::Rules => "GitHub Rulesetsの適用結果と拒否理由を確認します。",
@@ -235,9 +243,11 @@ impl Action {
             Self::Tasks => "git ar tasks",
             Self::Issue => "git ar issue",
             Self::Branch => "git ar branch",
+            Self::Add => "git ar add",
             Self::Commit => "git ar commit",
             Self::Push => "git ar push",
             Self::PullRequest => "git ar pr",
+            Self::Revert => "git ar revert",
             Self::Presence => "git ar presence check",
             Self::Check => "git ar check",
             Self::Rules => "git ar rules",
@@ -392,6 +402,83 @@ impl Shell {
                 KeyCode::Home | KeyCode::Char('g') => selected = 0,
                 KeyCode::End | KeyCode::Char('G') => selected = choices.len() - 1,
                 KeyCode::Enter => return Ok(Some(selected)),
+                KeyCode::Esc => return Ok(None),
+                _ => {}
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn choose_many(
+        &mut self,
+        action: Action,
+        status: &HomeStatus,
+        step: &str,
+        title: &str,
+        help: &str,
+        choices: &[PromptChoice],
+    ) -> Result<Option<Vec<usize>>> {
+        let Some(terminal) = &mut self.terminal else {
+            return Ok(None);
+        };
+        if choices.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let mut cursor = 0;
+        let mut checked = vec![false; choices.len()];
+        let mut validation = None;
+        loop {
+            terminal
+                .draw(|frame| {
+                    render_multiselect_screen(
+                        frame,
+                        action,
+                        status,
+                        step,
+                        title,
+                        help,
+                        choices,
+                        cursor,
+                        &checked,
+                        validation.as_deref(),
+                    );
+                })
+                .context("複数選択画面を描画できませんでした")?;
+            let Event::Key(key) = event::read().context("キー入力を読み取れませんでした")?
+            else {
+                continue;
+            };
+            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                continue;
+            }
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    cursor = cursor.checked_sub(1).unwrap_or(choices.len() - 1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => cursor = (cursor + 1) % choices.len(),
+                KeyCode::Home | KeyCode::Char('g') => cursor = 0,
+                KeyCode::End | KeyCode::Char('G') => cursor = choices.len() - 1,
+                KeyCode::Char(' ') => {
+                    checked[cursor] = !checked[cursor];
+                    validation = None;
+                }
+                KeyCode::Char('a') => {
+                    let next = !checked.iter().all(|value| *value);
+                    checked.fill(next);
+                    validation = None;
+                }
+                KeyCode::Enter => {
+                    let selected = checked
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, checked)| checked.then_some(index))
+                        .collect::<Vec<_>>();
+                    if selected.is_empty() {
+                        validation = Some("1件以上選択してください".to_owned());
+                    } else {
+                        return Ok(Some(selected));
+                    }
+                }
                 KeyCode::Esc => return Ok(None),
                 _ => {}
             }
@@ -764,11 +851,11 @@ fn render_choice_screen(
         .map(|choice| {
             ListItem::new(vec![
                 Line::from(Span::styled(
-                    choice.label.clone(),
+                    safe_text(&choice.label),
                     Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(
-                    choice.description.clone(),
+                    safe_text(&choice.description),
                     Style::default().fg(SECONDARY),
                 )),
             ])
@@ -788,6 +875,84 @@ fn render_choice_screen(
         areas.footer,
         "↑↓ / j k  選択    Enter  決定    Esc  ホームへ戻る",
         "↑↓  選択    Enter  決定    Esc  戻る",
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_multiselect_screen(
+    frame: &mut Frame<'_>,
+    action: Action,
+    status: &HomeStatus,
+    step: &str,
+    title: &str,
+    help: &str,
+    choices: &[PromptChoice],
+    cursor: usize,
+    checked: &[bool],
+    validation: Option<&str>,
+) {
+    let Some(areas) = render_action_chrome(frame, action, status) else {
+        return;
+    };
+    let [prompt_area, list_area] =
+        Layout::vertical([Constraint::Length(4), Constraint::Min(2)]).areas(areas.content);
+    let mut prompt = vec![
+        Line::from(Span::styled(
+            title.to_owned(),
+            Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            help.to_owned(),
+            Style::default().fg(SECONDARY),
+        )),
+    ];
+    if let Some(validation) = validation {
+        prompt.push(Line::from(Span::styled(
+            validation.to_owned(),
+            Style::default().fg(ERROR).add_modifier(Modifier::BOLD),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(prompt).wrap(Wrap { trim: true }),
+        prompt_area,
+    );
+    let items = choices
+        .iter()
+        .enumerate()
+        .map(|(index, choice)| {
+            let is_checked = checked.get(index).copied().unwrap_or(false);
+            ListItem::new(vec![
+                Line::from(vec![
+                    Span::styled(
+                        if is_checked { "[x] " } else { "[ ] " },
+                        Style::default().fg(if is_checked { SUCCESS } else { COMMENT }),
+                    ),
+                    Span::styled(
+                        safe_text(&choice.label),
+                        Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    safe_text(&choice.description),
+                    Style::default().fg(SECONDARY),
+                )),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected(Some(cursor));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(section_block(step))
+            .highlight_symbol("> ")
+            .highlight_style(Style::default().bg(FOCUS_BG)),
+        list_area,
+        &mut state,
+    );
+    render_action_footer(
+        frame,
+        areas.footer,
+        "↑↓ / j k  移動    Space  選択    a  全選択    Enter  決定    Esc  戻る",
+        "↑↓  移動  Space  選択  a  全選択  Enter  決定",
     );
 }
 
@@ -1665,7 +1830,8 @@ mod tests {
         Action, ActionReport, BRAND_BLUE, BRAND_CORAL, BRAND_GREEN, BRAND_YELLOW, HomeApp,
         LOGO_HEIGHT, LOGO_WIDTH, NARROW_TERMINAL_BREAKPOINT, PromptChoice, ReportLine, ReportTone,
         input_viewport, logo_color, render, render_choice_screen, render_confirm_screen,
-        render_input_screen, render_logo, render_report_screen, render_running_screen,
+        render_input_screen, render_logo, render_multiselect_screen, render_report_screen,
+        render_running_screen,
     };
     use crate::status::{
         HomeAction, HomeChanges, HomeIssue, HomePullRequest, HomeStatus, HomeUpstream,
@@ -1701,7 +1867,7 @@ mod tests {
             next_action: Some(HomeAction {
                 title: "変更ファイルを確認する".into(),
                 reason: "未stageの変更がある".into(),
-                command: Some("git status --short".into()),
+                command: Some("git ar add".into()),
             }),
             warnings: Vec::new(),
         }
@@ -1760,6 +1926,22 @@ mod tests {
                     );
                 })
                 .expect("choice render");
+            terminal
+                .draw(|frame| {
+                    render_multiselect_screen(
+                        frame,
+                        Action::Add,
+                        &status(),
+                        "ADD · 1/1",
+                        "commitへ入れる変更",
+                        "Spaceで必要なファイルだけ選びます。",
+                        &choices,
+                        1,
+                        &[true, false],
+                        None,
+                    );
+                })
+                .expect("multiselect render");
             terminal
                 .draw(|frame| {
                     render_input_screen(
@@ -1824,6 +2006,75 @@ mod tests {
         assert_eq!(viewport.text, "本語");
         assert_eq!(viewport.cursor_column, 6);
         assert!(viewport.cursor_column < 8);
+    }
+
+    #[test]
+    fn multiselect_screen_distinguishes_staged_choices_without_emoji() {
+        let backend = TestBackend::new(58, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let choices = vec![
+            PromptChoice::new("src/main.rs", "変更済み（未stage）"),
+            PromptChoice::new("src/tui.rs", "新しいファイル（未stage）"),
+        ];
+        terminal
+            .draw(|frame| {
+                render_multiselect_screen(
+                    frame,
+                    Action::Add,
+                    &status(),
+                    "ADD · 1/1",
+                    "commitへ入れる変更",
+                    "Spaceで選びます。",
+                    &choices,
+                    1,
+                    &[true, false],
+                    None,
+                );
+            })
+            .expect("multiselect render");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("[x] src/main.rs"));
+        assert!(rendered.contains("[ ] src/tui.rs"));
+    }
+
+    #[test]
+    fn choice_screen_removes_control_characters_from_repository_text() {
+        let backend = TestBackend::new(58, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let choices = vec![PromptChoice::new(
+            "commit\x1b[31m\nsubject",
+            "author\r\nname",
+        )];
+        terminal
+            .draw(|frame| {
+                render_choice_screen(
+                    frame,
+                    Action::Revert,
+                    &status(),
+                    "REVERT · 1/1",
+                    "取り消すcommit",
+                    "候補を選びます。",
+                    &choices,
+                    0,
+                );
+            })
+            .expect("choice render");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!rendered.contains('\x1b'));
+        assert!(rendered.contains("commit [31m subject"));
+        assert!(rendered.contains("author name"));
     }
 
     #[test]

@@ -4,8 +4,10 @@ mod governance;
 mod guard;
 mod policy;
 mod presence;
+mod revert;
 mod scheduler;
 mod setup;
+mod staging;
 mod status;
 mod tasks;
 mod telemetry;
@@ -20,7 +22,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use inquire::error::InquireError;
 use inquire::validator::Validation;
-use inquire::{Confirm, Select, Text};
+use inquire::{Confirm, MultiSelect, Select, Text};
 use serde::{Deserialize, Serialize};
 
 use crate::guard::{GuardDecision, GuardDenied};
@@ -60,8 +62,12 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Select files and add their current contents to the staging area.
+    Add(AddArgs),
     /// Build and optionally create a commit.
     Commit(CommitArgs),
+    /// Build and optionally create a commit that reverts an earlier commit.
+    Revert(RevertArgs),
     /// Push the current work branch after showing the exact destination.
     Push(PushArgs),
     /// Build and optionally create a Pull Request.
@@ -273,6 +279,25 @@ impl GuardAgent {
 }
 
 #[derive(Debug, Args, Default)]
+struct AddArgs {
+    /// File to stage. May be repeated. Use --json without paths to list candidates.
+    #[arg(long = "path", value_name = "PATH")]
+    paths: Vec<String>,
+    /// Stage every current candidate.
+    #[arg(long, conflicts_with = "paths")]
+    all: bool,
+    /// Show the exact plan without changing the index.
+    #[arg(long)]
+    dry_run: bool,
+    /// Stage without an interactive confirmation.
+    #[arg(long)]
+    yes: bool,
+    /// Return candidates, selection, and command as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Default)]
 struct CommitArgs {
     /// Conventional commit type.
     #[arg(long = "type", value_name = "TYPE")]
@@ -295,6 +320,37 @@ struct CommitArgs {
     /// Replace the current HEAD commit while preserving the same guided input.
     #[arg(long)]
     amend: bool,
+}
+
+#[derive(Debug, Args)]
+struct RevertArgs {
+    /// Commit SHA or unambiguous revision to revert.
+    #[arg(long)]
+    commit: Option<String>,
+    /// Number of non-merge commits shown as candidates.
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u8).range(1..=100))]
+    limit: u8,
+    /// Show the exact plan without creating a commit.
+    #[arg(long)]
+    dry_run: bool,
+    /// Create the revert commit without an interactive confirmation.
+    #[arg(long)]
+    yes: bool,
+    /// Return candidates or the plan as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+impl Default for RevertArgs {
+    fn default() -> Self {
+        Self {
+            commit: None,
+            limit: 20,
+            dry_run: false,
+            yes: false,
+            json: false,
+        }
+    }
 }
 
 #[derive(Debug, Args, Default)]
@@ -364,9 +420,22 @@ struct BranchArgs {
     /// Create and switch to the branch. Otherwise only preview it.
     #[arg(long)]
     create: bool,
+    /// Temporarily stash tracked and untracked changes, then restore them on the new branch.
+    #[arg(long)]
+    stash: bool,
     /// Return the draft as JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct BranchCommandPlan<'a> {
+    schema_version: u32,
+    #[serde(flatten)]
+    branch: &'a branch::BranchDraft,
+    from: Option<&'a str>,
+    transfer_changes_via_stash: bool,
+    command: Vec<String>,
 }
 
 #[derive(Debug, Args, Default)]
@@ -631,7 +700,9 @@ fn run() -> Result<()> {
     match cli.command {
         Some(Commands::Doctor { json }) => doctor(json),
         Some(Commands::Check { quick, json }) => check(quick, json),
+        Some(Commands::Add(args)) => add(args),
         Some(Commands::Commit(args)) => commit(args),
+        Some(Commands::Revert(args)) => revert_commit(args),
         Some(Commands::Push(args)) => push(args),
         Some(Commands::Pr(args)) => pull_request(args),
         Some(Commands::Branch(args)) => branch_command(args),
@@ -710,12 +781,14 @@ fn run_simple_action(action: tui::Action, policy: &Policy) -> Result<()> {
         tui::Action::Tasks => tasks::show(false, false, false, &policy.tasks),
         tui::Action::Issue => issue(IssueArgs::default()),
         tui::Action::Branch => branch_command(BranchArgs::default()),
+        tui::Action::Add => add(AddArgs::default()),
         tui::Action::Commit => commit(CommitArgs::default()),
         tui::Action::Push => push(PushArgs::default()),
         tui::Action::PullRequest => pull_request(PullRequestArgs {
             create: true,
             ..PullRequestArgs::default()
         }),
+        tui::Action::Revert => revert_commit(RevertArgs::default()),
         tui::Action::Presence => presence::check(&policy.presence, false),
         tui::Action::Check => check(false, false),
         tui::Action::Rules => governance::rules(10, None, false),
@@ -736,9 +809,11 @@ fn run_full_screen_action(
         tui::Action::Tasks => run_read_only_action(shell, action, home, &["tasks"]),
         tui::Action::Issue => tui_issue(shell, action, home),
         tui::Action::Branch => tui_branch(shell, action, home, policy),
+        tui::Action::Add => tui_add(shell, action, home),
         tui::Action::Commit => tui_commit(shell, action, home, policy),
         tui::Action::Push => tui_push(shell, action, home),
         tui::Action::PullRequest => tui_pull_request(shell, action, home, policy),
+        tui::Action::Revert => tui_revert(shell, action, home),
         tui::Action::Presence => run_read_only_action(shell, action, home, &["presence", "check"]),
         tui::Action::Check => run_read_only_action(shell, action, home, &["check"]),
         tui::Action::Rules => run_read_only_action(shell, action, home, &["rules"]),
@@ -1115,6 +1190,25 @@ fn tui_branch(
     else {
         return Ok(None);
     };
+    let transfer_changes = if home.changes.total() > 0 {
+        let Some(value) = shell.confirm(
+            action,
+            home,
+            "BRANCH · SAFETY",
+            "現在の変更も新しいbranchへ移しますか？",
+            "tracked・untrackedを一時stashし、branch作成後にstage状態も含めて復元します。",
+            &[],
+            true,
+            "stashして移す",
+            "移さず作成",
+        )?
+        else {
+            return Ok(None);
+        };
+        value
+    } else {
+        false
+    };
     let mut args = vec![
         "branch".into(),
         "--type".into(),
@@ -1127,6 +1221,9 @@ fn tui_branch(
         owner,
     ];
     push_optional_arg(&mut args, "--from", &from);
+    if transfer_changes {
+        args.push("--stash".into());
+    }
     let mut execute_args = args.clone();
     execute_args.push("--create".into());
     preview_and_execute(
@@ -1141,12 +1238,83 @@ fn tui_branch(
     )
 }
 
+fn tui_add(
+    shell: &mut tui::Shell,
+    action: tui::Action,
+    home: &status::HomeStatus,
+) -> Result<Option<tui::ActionReport>> {
+    let candidates = staging::candidates()?;
+    if candidates.is_empty() {
+        return Ok(Some(tui::ActionReport {
+            title: action.label().into(),
+            summary: "stageは不要です".into(),
+            ok: true,
+            lines: vec![tui::ReportLine::new(
+                "✓ 未stageの変更はありません",
+                tui::ReportTone::Success,
+            )],
+        }));
+    }
+    let choices = candidates
+        .iter()
+        .map(|candidate| {
+            tui::PromptChoice::new(
+                &candidate.path,
+                format!("[{}] {}", candidate.status, candidate.description),
+            )
+        })
+        .collect::<Vec<_>>();
+    let Some(selected) = shell.choose_many(
+        action,
+        home,
+        "ADD · 1/1",
+        "commitへ入れる変更",
+        "Spaceで必要なファイルだけ選びます。aで全選択・全解除できます。",
+        &choices,
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut base_args = vec!["add".into()];
+    for index in selected {
+        base_args.extend(["--path".into(), candidates[index].path.clone()]);
+    }
+    let mut preview_args = base_args.clone();
+    preview_args.push("--dry-run".into());
+    let mut execute_args = base_args;
+    execute_args.push("--yes".into());
+    preview_and_execute(
+        shell,
+        action,
+        home,
+        &preview_args,
+        &execute_args,
+        "選択した変更をstageしますか？",
+        "このあとcommitへ入るのはstageした内容だけです。",
+        "stageする",
+    )
+}
+
 fn tui_commit(
     shell: &mut tui::Shell,
     action: tui::Action,
     home: &status::HomeStatus,
     policy: &Policy,
 ) -> Result<Option<tui::ActionReport>> {
+    if home.changes.staged == 0 {
+        return Ok(Some(tui::ActionReport {
+            title: action.label().into(),
+            summary: "先にaddが必要です".into(),
+            ok: false,
+            lines: vec![
+                tui::ReportLine::new("stage済みの変更がありません", tui::ReportTone::Warning),
+                tui::ReportLine::new(
+                    "ホームの「変更を選ぶ（add）」からcommitへ入れるファイルを選んでください",
+                    tui::ReportTone::Info,
+                ),
+            ],
+        }));
+    }
     let choices = policy
         .commit
         .allowed_types
@@ -1229,6 +1397,65 @@ fn tui_commit(
         "この内容でcommitしますか？",
         "stage済みの変更だけがcommitされます。",
         "commitする",
+    )
+}
+
+fn tui_revert(
+    shell: &mut tui::Shell,
+    action: tui::Action,
+    home: &status::HomeStatus,
+) -> Result<Option<tui::ActionReport>> {
+    let candidates = revert::candidates(20)?;
+    if candidates.is_empty() {
+        return Ok(Some(tui::ActionReport {
+            title: action.label().into(),
+            summary: "対象がありません".into(),
+            ok: true,
+            lines: vec![tui::ReportLine::new(
+                "revertできる通常commitがありません",
+                tui::ReportTone::Secondary,
+            )],
+        }));
+    }
+    let choices = candidates
+        .iter()
+        .map(|candidate| {
+            tui::PromptChoice::new(
+                format!("{}  {}", candidate.short_commit, candidate.subject),
+                format!("{} · {}", candidate.author, candidate.committed_at),
+            )
+        })
+        .collect::<Vec<_>>();
+    let Some(index) = shell.choose(
+        action,
+        home,
+        "REVERT · 1/1",
+        "取り消すcommit",
+        "元の履歴は消さず、選んだ変更を打ち消す新しいcommitを作ります。",
+        &choices,
+        0,
+    )?
+    else {
+        return Ok(None);
+    };
+    let base_args = vec![
+        "revert".into(),
+        "--commit".into(),
+        candidates[index].commit.clone(),
+    ];
+    let mut preview_args = base_args.clone();
+    preview_args.push("--dry-run".into());
+    let mut execute_args = base_args;
+    execute_args.push("--yes".into());
+    preview_and_execute(
+        shell,
+        action,
+        home,
+        &preview_args,
+        &execute_args,
+        "このcommitの変更を打ち消しますか？",
+        "未コミット変更がある場合は開始せず、元のcommitも削除しません。",
+        "revertする",
     )
 }
 
@@ -1401,9 +1628,222 @@ fn merge_mode_arg(mode: MergeMode) -> &'static str {
     }
 }
 
+fn add(mut args: AddArgs) -> Result<()> {
+    let interactive = io::stdin().is_terminal();
+    if args.paths.is_empty() && !args.all && interactive && !args.json {
+        let candidates = staging::candidates()?;
+        if candidates.is_empty() {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&staging::build_plan(&[], false)?)?
+                );
+            } else {
+                println!("✓ stageが必要な変更はありません");
+            }
+            return Ok(());
+        }
+        let selected = MultiSelect::new("stageするファイル", candidates)
+            .with_help_message("Spaceで選択、Enterで決定します。必要な変更だけを選んでください")
+            .prompt()?;
+        args.paths = selected
+            .into_iter()
+            .map(|candidate| candidate.path)
+            .collect();
+    }
+
+    let plan = staging::build_plan(&args.paths, args.all)?;
+    if args.json {
+        if args.yes && plan.selected.is_empty() && !plan.candidates.is_empty() {
+            bail!("`--yes`で実行するには`--path <PATH>`または`--all`が必要です");
+        }
+        if args.dry_run || !args.yes || plan.selected.is_empty() {
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+            return Ok(());
+        }
+        staging::execute(&plan)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "ok": true,
+                "action": "add",
+                "plan": plan,
+            }))?
+        );
+        return Ok(());
+    }
+
+    print_add_plan(&plan);
+    if plan.candidates.is_empty() {
+        println!("✓ stageが必要な変更はありません");
+        return Ok(());
+    }
+    if plan.selected.is_empty() {
+        if args.dry_run {
+            return Ok(());
+        }
+        bail!(
+            "stageするファイルが選択されていません。`git ar add --path <PATH>`または`git ar add --all`を使用してください"
+        );
+    }
+    if args.dry_run {
+        return Ok(());
+    }
+    if !args.yes {
+        ensure_interactive()?;
+        if !Confirm::new("選択した変更をstageしますか？")
+            .with_default(false)
+            .with_help_message("commitにはstageした内容だけが入ります")
+            .prompt()?
+        {
+            return Ok(());
+        }
+    }
+    staging::execute(&plan)?;
+    println!("✓ {}ファイルをstageしました", plan.selected.len());
+    Ok(())
+}
+
+fn print_add_plan(plan: &staging::AddPlan) {
+    println!("[ADD] commitへ入れる変更を選択");
+    println!(
+        "  候補: {}ファイル / 選択: {}ファイル",
+        plan.candidates.len(),
+        plan.selected.len()
+    );
+    for candidate in &plan.selected {
+        println!("  [{}] {candidate}", candidate.status);
+    }
+    if plan.selected.is_empty() && !plan.candidates.is_empty() {
+        println!("  INFO  候補確認のみです。まだstage対象は選ばれていません");
+    }
+    println!("  実行内容: {}", plan.command.join(" "));
+}
+
+fn revert_commit(mut args: RevertArgs) -> Result<()> {
+    let interactive = io::stdin().is_terminal();
+    if args.commit.is_none() {
+        let candidates = revert::candidates(args.limit)?;
+        if args.json {
+            if args.yes {
+                bail!("`--yes`で実行するには`--commit <SHA>`が必要です");
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": 1,
+                    "action": "revert-candidates",
+                    "candidates": candidates,
+                }))?
+            );
+            return Ok(());
+        }
+        if !interactive {
+            bail!(
+                "revert対象が必要です。`git ar revert --json`で候補を確認し、`--commit <SHA>`を指定してください"
+            );
+        }
+        if candidates.is_empty() {
+            println!("revertできる通常commitがありません");
+            return Ok(());
+        }
+        args.commit = Some(
+            Select::new("取り消すcommit", candidates)
+                .with_help_message("元のcommitは消さず、変更を打ち消す新しいcommitを作ります")
+                .prompt()?
+                .commit,
+        );
+    }
+
+    let plan = revert::build_plan(args.commit.as_deref().expect("commit is selected"))?;
+    if args.json {
+        if args.dry_run || !args.yes {
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+            return Ok(());
+        }
+        ensure_revert_branch()?;
+        revert::execute(&plan)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "ok": true,
+                "action": "revert",
+                "plan": plan,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("[REVERT] 打ち消しcommitの準備");
+    println!(
+        "  対象: {} {}",
+        plan.target.short_commit, plan.target.subject
+    );
+    println!("  作成者: {}", plan.target.author);
+    println!("  日時: {}", plan.target.committed_at);
+    println!(
+        "  作業ツリー: {}",
+        if plan.worktree_clean {
+            "clean"
+        } else {
+            "未コミット変更あり（実行前に整理が必要）"
+        }
+    );
+    println!("  実行内容: {}", plan.command.join(" "));
+    if args.dry_run {
+        return Ok(());
+    }
+    ensure_revert_branch()?;
+    if !plan.worktree_clean {
+        bail!(
+            "未コミット変更があるためrevertを開始しません。先にcommitするか、branch作成時のstash移送を利用してください"
+        );
+    }
+    if !args.yes {
+        ensure_interactive()?;
+        if !Confirm::new("このcommitの変更を打ち消しますか？")
+            .with_default(false)
+            .with_help_message("履歴は削除せず、git revertで新しいcommitを作成します")
+            .prompt()?
+        {
+            return Ok(());
+        }
+    }
+    revert::execute(&plan)?;
+    println!(
+        "✓ 打ち消しcommitを作成しました: {}",
+        plan.target.short_commit
+    );
+    Ok(())
+}
+
+fn ensure_revert_branch() -> Result<()> {
+    let policy = Policy::load()?;
+    let current = branch::current_branch()?;
+    if policy
+        .branch
+        .protected_branches
+        .iter()
+        .any(|protected| protected == &current)
+    {
+        bail!(
+            "保護branch `{current}` ではrevertを作成しません。先にIssue branchを作成してください"
+        );
+    }
+    Ok(())
+}
+
 fn commit(mut args: CommitArgs) -> Result<()> {
     let policy = Policy::load()?;
     let interactive = io::stdin().is_terminal();
+    if !args.dry_run
+        && !args.amend
+        && lines(git_output(["diff", "--cached", "--name-only"])?).is_empty()
+    {
+        bail!("stage済みの変更がありません。先に`git ar add`でcommitへ入れる変更を選んでください");
+    }
 
     if args.kind.is_none() {
         ensure_interactive()?;
@@ -1666,6 +2106,9 @@ fn branch_command(mut args: BranchArgs) -> Result<()> {
     let policy = Policy::load()?;
     let interactive = io::stdin().is_terminal();
     if args.kind.is_none() {
+        if args.json {
+            bail!("branchの種類が必要です。`--type <TYPE>`を指定してください");
+        }
         ensure_interactive()?;
         args.kind = Some(
             Select::new(
@@ -1688,6 +2131,9 @@ fn branch_command(mut args: BranchArgs) -> Result<()> {
         );
     }
     if args.issue.is_none() {
+        if args.json {
+            bail!("関連Issue番号が必要です。`--issue <番号>`を指定してください");
+        }
         ensure_interactive()?;
         args.issue = Some(prompt_required_issue_number(
             "関連Issue番号（必須）",
@@ -1695,6 +2141,9 @@ fn branch_command(mut args: BranchArgs) -> Result<()> {
         )?);
     }
     if args.slug.is_none() {
+        if args.json {
+            bail!("作業内容が必要です。`--slug <内容>`を指定してください");
+        }
         ensure_interactive()?;
         args.slug = Some(prompt_required_text(
             "作業内容（英数字）",
@@ -1702,6 +2151,9 @@ fn branch_command(mut args: BranchArgs) -> Result<()> {
         )?);
     }
     if args.owner.is_none() {
+        if args.json {
+            bail!("担当者が必要です。`--owner <GitHubユーザー名>`を指定してください");
+        }
         ensure_interactive()?;
         let default_owner = branch::detect_owner();
         args.owner = Some(
@@ -1712,11 +2164,22 @@ fn branch_command(mut args: BranchArgs) -> Result<()> {
                 .prompt()?,
         );
     }
-    if interactive && args.from.is_none() {
+    if interactive && !args.json && args.from.is_none() {
         let from = Text::new("作成元branch（任意。空欄はGitHubのdefault branch）").prompt()?;
         if !from.trim().is_empty() {
             args.from = Some(from);
         }
+    }
+    if interactive
+        && !args.json
+        && !args.stash
+        && branch::has_changes()?
+        && Confirm::new("現在の変更をstash経由で新しいbranchへ移しますか？")
+            .with_default(true)
+            .with_help_message("untrackedとstage状態も退避し、branch作成後に復元します")
+            .prompt()?
+    {
+        args.stash = true;
     }
 
     let draft = branch::draft(
@@ -1728,22 +2191,82 @@ fn branch_command(mut args: BranchArgs) -> Result<()> {
         required(args.slug, "--slug", "作業内容")?,
         required(args.owner, "--owner", "担当者")?,
     )?;
+    let mut command = vec![
+        "git".into(),
+        "ar".into(),
+        "branch".into(),
+        "--type".into(),
+        draft.kind.clone(),
+        "--issue".into(),
+        draft.issue.to_string(),
+        "--slug".into(),
+        draft.slug.clone(),
+        "--owner".into(),
+        draft.owner.clone(),
+    ];
+    if let Some(from) = args.from.as_deref() {
+        command.extend(["--from".into(), from.into()]);
+    }
+    if args.stash {
+        command.push("--stash".into());
+    }
+    if args.create {
+        command.push("--create".into());
+    }
+    let plan = BranchCommandPlan {
+        schema_version: 1,
+        branch: &draft,
+        from: args.from.as_deref(),
+        transfer_changes_via_stash: args.stash,
+        command,
+    };
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&draft)?);
+        if !args.create {
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+            return Ok(());
+        }
     } else {
         println!("{}", draft.name);
+        if args.stash {
+            println!("  変更移送: stash → branch作成 → pop --index");
+        }
     }
     if !args.create {
         return Ok(());
     }
     if interactive
+        && !args.json
         && !Confirm::new("このbranchを作成しますか？")
             .with_default(false)
             .prompt()?
     {
         return Ok(());
     }
-    branch::create(&draft, args.from.as_deref())
+    if args.stash {
+        branch::create_transferring_changes(&draft, args.from.as_deref())?;
+    } else {
+        branch::create(&draft, args.from.as_deref())?;
+    }
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "ok": true,
+                "action": "branch-created",
+                "plan": plan,
+            }))?
+        );
+    } else {
+        println!(
+            "✓ Issue #{}に紐づくbranchを作成しました: {}",
+            draft.issue, draft.name
+        );
+        if args.stash {
+            println!("✓ 一時退避した変更を新しいbranchへ復元しました");
+        }
+    }
+    Ok(())
 }
 
 fn issue(mut args: IssueArgs) -> Result<()> {

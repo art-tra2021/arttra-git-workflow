@@ -26,7 +26,10 @@
 - `mise run verify`: format、check、test、clippy、共通lint、security
 - `mise run ar -- <args>`: インストール前のCLI実行
 - `git ar`: 人間向けTUI
+- `git ar add --json`: stage候補を取得し、`--path`または`--all`と`--yes`で決定的にstage
 - `git ar branch`: Issue、種別、内容、担当者から規則準拠branchを作成
+- `git ar branch --stash`: tracked・untracked変更を一時退避し、新branch作成後にstage状態ごと復元
+- `git ar revert --json`: 通常commitの候補を取得し、`--commit`と`--yes`で打ち消しcommitを作成
 - `git ar push --json`: push先、upstream、commit数、未commitファイル数を安全に確認
 - `git ar pr --json`: branchからIssueを判定し、Pull Request候補を構造化して確認
 - `git ar check --json`: AI向けに検査結果とdiagnosticsを一括取得
