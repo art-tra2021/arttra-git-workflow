@@ -19,8 +19,8 @@ describe("LifecycleNotificationService", () => {
     const harness = await createHarness();
     harness.github.issue = {
       ...harness.github.issue,
-      labels: ["type/work", "merge/self"],
-      parentIssueUrl: "https://api.github.com/repos/example/parent/issues/7",
+      labels: ["type/task", "merge/self"],
+      parentIssueUrl: "https://github.example/example/repo/issues/86",
       body: "## 完了条件\n\n- [ ] Slackへ通知する\n\n## 目標日\n\n2026-08-04",
     };
     harness.github.pullRequest = {
@@ -29,17 +29,39 @@ describe("LifecycleNotificationService", () => {
     };
 
     expect(await harness.service.process(issueOpenedJob())).toBe(2);
+    expect(await harness.service.process(selfMergeLabeledJob())).toBe(0);
     expect(harness.sent.map((value) => value.notification.kind)).toEqual([
       "issue-opened",
       "self-merge-scheduled",
     ]);
     expect(harness.sent.map((value) => value.threadTs)).toEqual([null, "900.1"]);
-    expect(harness.sent[0]?.notification.detail).toContain("親Issue: example/parent#7");
+    expect(harness.sent[0]?.notification.detail).toContain("親Issue: example/repo#86");
     expect(harness.sent[0]?.notification.detail).toContain("完了条件: Slackへ通知する");
     expect(harness.sent[0]?.notification.detail).toContain("目標日: 2026-08-04");
+    expect(harness.sent[0]?.notification).toMatchObject({
+      issueType: "task",
+      slackUserIds: ["UREQUESTER", "UOWNER"],
+    });
     expect(harness.sent[1]?.notification).toMatchObject({
       selfMergeControl: { repository: "example/repo", issueNumber: 44 },
       detail: "第三者承認を待たず、PR作成者本人が必須CI通過後にマージします。",
+    });
+  });
+
+  test("GitHub App作成Issueでも検証済み依頼者markerから重複なくmentionする", async () => {
+    const harness = await createHarness();
+    harness.github.issue = {
+      ...harness.github.issue,
+      authorLogin: "arttra-app[bot]",
+      assigneeLogins: ["requester", "owner"],
+      body: '<!-- ar:requester:v1 {"id":101,"login":"requester"} -->',
+    };
+
+    expect(await harness.service.process(issueOpenedJob())).toBe(1);
+    expect(harness.sent[0]?.notification.slackUserIds).toEqual(["UREQUESTER", "UOWNER"]);
+    expect(harness.sent[0]?.notification).toMatchObject({
+      actorLogin: "requester",
+      actorSlackUserId: "UREQUESTER",
     });
   });
 
@@ -47,7 +69,7 @@ describe("LifecycleNotificationService", () => {
     const harness = await createHarness();
     harness.github.issue = {
       ...harness.github.issue,
-      labels: ["type/work", "merge/self"],
+      labels: ["type/task", "merge/self"],
     };
     harness.github.pullRequest = {
       ...harness.github.pullRequest,
@@ -76,6 +98,13 @@ describe("LifecycleNotificationService", () => {
     expect(harness.sent[0]).toMatchObject({
       threadTs: null,
       notification: {
+        kind: "issue-opened",
+        slackUserIds: ["UREQUESTER", "UOWNER"],
+      },
+    });
+    expect(harness.sent[1]).toMatchObject({
+      threadTs: "900.1",
+      notification: {
         kind: "comment-created",
         actorLogin: "commenter",
         slackUserIds: ["UOWNER", "UMENTIONED"],
@@ -83,10 +112,28 @@ describe("LifecycleNotificationService", () => {
     });
 
     expect(await harness.service.process(issueClosedJob())).toBe(1);
-    expect(harness.sent[1]).toMatchObject({
+    expect(harness.sent[2]).toMatchObject({
       threadTs: "900.1",
       notification: { kind: "issue-completed", slackUserIds: ["UOWNER", "UREQUESTER"] },
     });
+  });
+
+  test("WorkはTaskと別の親投稿を持ち、merge方針を表示しない", async () => {
+    const harness = await createHarness();
+    harness.github.issue = {
+      ...harness.github.issue,
+      number: 86,
+      url: "https://github.example/example/repo/issues/86",
+      labels: ["type/work"],
+      parentIssueUrl: "https://github.example/example/intake/issues/7",
+    };
+
+    expect(await harness.service.process(issueOpenedJob(86, "delivery-work-open"))).toBe(1);
+    expect(harness.sent[0]).toMatchObject({
+      threadTs: null,
+      notification: { kind: "issue-opened", issueType: "work" },
+    });
+    expect(harness.sent[0]?.notification.detail).not.toContain("マージ方針");
   });
 
   test("差し戻し、修正push、マージを関連Issueのthreadへ集約する", async () => {
@@ -105,14 +152,15 @@ describe("LifecycleNotificationService", () => {
     expect(await harness.service.process(mergedJob())).toBe(1);
 
     expect(harness.sent.map((value) => value.notification.kind)).toEqual([
+      "issue-opened",
       "review-changes-requested",
       "revision-pushed",
       "pr-merged",
     ]);
-    expect(harness.sent.map((value) => value.threadTs)).toEqual([null, "900.1", "900.1"]);
-    expect(harness.sent[0]?.notification.slackUserIds).toEqual(["UAUTHOR"]);
-    expect(harness.sent[1]?.notification.slackUserIds).toEqual(["UREVIEWER"]);
-    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UAUTHOR", "UOWNER"]);
+    expect(harness.sent.map((value) => value.threadTs)).toEqual([null, "900.1", "900.1", "900.1"]);
+    expect(harness.sent[1]?.notification.slackUserIds).toEqual(["UAUTHOR"]);
+    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UREVIEWER"]);
+    expect(harness.sent[3]?.notification.slackUserIds).toEqual(["UAUTHOR", "UOWNER"]);
   });
 
   test("PR会話とコードコメントではPR作成者をmentionする", async () => {
@@ -122,25 +170,56 @@ describe("LifecycleNotificationService", () => {
     expect(await harness.service.process(reviewCommentJob())).toBe(1);
 
     expect(harness.sent.map((value) => value.notification.kind)).toEqual([
+      "issue-opened",
       "comment-created",
       "review-commented",
     ]);
-    expect(harness.sent[0]?.notification.slackUserIds).toEqual(["UAUTHOR", "UMENTIONED"]);
-    expect(harness.sent[1]?.notification.slackUserIds).toEqual(["UAUTHOR"]);
-    expect(harness.sent[1]?.threadTs).toBe("900.1");
+    expect(harness.sent[1]?.notification.slackUserIds).toEqual(["UAUTHOR", "UMENTIONED"]);
+    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UAUTHOR"]);
+    expect(harness.sent[2]?.threadTs).toBe("900.1");
   });
 
-  test("関連IssueがないPRはPR単位のthreadを作る", async () => {
+  test("primary Issueが一意でないPRはchannel直下にもIssue threadにも通知しない", async () => {
     const harness = await createHarness();
-    harness.github.pullRequest = { ...harness.github.pullRequest, linkedIssues: [] };
+    harness.github.pullRequest = {
+      ...harness.github.pullRequest,
+      primaryIssue: null,
+      closingIssueCount: 0,
+      linkedIssues: [],
+    };
 
-    expect(await harness.service.process(changesRequestedJob())).toBe(1);
+    expect(await harness.service.process(changesRequestedJob())).toBe(0);
+    expect(harness.sent).toHaveLength(0);
+  });
 
-    expect(harness.sent[0]?.notification.resource).toEqual({
-      kind: "pull-request",
-      number: 45,
-      title: "ライフサイクル通知",
-      url: "https://github.example/example/repo/pull/45",
+  test("closing IssueがWorkなら一意でもPR通知先にしない", async () => {
+    const harness = await createHarness();
+    harness.github.pullRequest = {
+      ...harness.github.pullRequest,
+      primaryIssue: { ...harness.github.issue, labels: ["type/work"] },
+      linkedIssues: [{ ...harness.github.issue, labels: ["type/work"] }],
+    };
+
+    expect(await harness.service.process(changesRequestedJob())).toBe(0);
+    expect(harness.sent).toHaveLength(0);
+  });
+
+  test("CI失敗をprimary Issue threadへ通知し、PR作成者と担当者を呼び出す", async () => {
+    const harness = await createHarness();
+
+    expect(await harness.service.process(checkRunFailedJob())).toBe(1);
+    expect(await harness.service.process(checkSuiteFailedJob())).toBe(0);
+
+    expect(harness.sent.map((value) => value.notification.kind)).toEqual([
+      "issue-opened",
+      "ci-failed",
+    ]);
+    expect(harness.sent[1]).toMatchObject({
+      threadTs: "900.1",
+      notification: {
+        slackUserIds: ["UAUTHOR", "UOWNER"],
+        actionUrl: "https://github.example/checks/501",
+      },
     });
   });
 });
@@ -181,7 +260,8 @@ class FakeLifecycleClient implements GitHubLifecycleClient {
     state: "open",
     authorLogin: "requester",
     assigneeLogins: ["owner"],
-    labels: ["type/work", "merge/review"],
+    labels: ["type/task", "merge/review"],
+    parentIssueUrl: "https://github.example/example/repo/issues/86",
   };
 
   pullRequest: PullRequestReviewContext = {
@@ -197,6 +277,8 @@ class FakeLifecycleClient implements GitHubLifecycleClient {
     mergeableState: "clean",
     body: "Closes #44",
     files: ["src/app.ts"],
+    primaryIssue: this.issue,
+    closingIssueCount: 1,
     linkedIssues: [this.issue],
     codeowners: "* @reviewer",
     requiredApprovals: 1,
@@ -211,7 +293,13 @@ class FakeLifecycleClient implements GitHubLifecycleClient {
   }
 
   async loadPullRequestReviewContext(): Promise<PullRequestReviewContext> {
-    return this.pullRequest;
+    return {
+      ...this.pullRequest,
+      primaryIssue:
+        this.pullRequest.closingIssueCount === 1
+          ? (this.pullRequest.linkedIssues[0] ?? null)
+          : null,
+    };
   }
 }
 
@@ -250,12 +338,26 @@ function issueClosedJob() {
   };
 }
 
-function issueOpenedJob() {
+function issueOpenedJob(issueNumber = 44, deliveryId = "delivery-open") {
   return {
     schemaVersion: 1 as const,
-    deliveryId: "delivery-open",
+    deliveryId,
     event: "issues",
-    payload: { ...basePayload(), action: "opened", issue: { number: 44 } },
+    payload: { ...basePayload(), action: "opened", issue: { number: issueNumber } },
+  };
+}
+
+function selfMergeLabeledJob() {
+  return {
+    schemaVersion: 1 as const,
+    deliveryId: "delivery-self-merge-label",
+    event: "issues",
+    payload: {
+      ...basePayload(),
+      action: "labeled",
+      issue: { number: 44 },
+      label: { name: "merge/self" },
+    },
   };
 }
 
@@ -268,6 +370,37 @@ function checkSuiteCompletedJob() {
       ...basePayload(),
       action: "completed",
       check_suite: { conclusion: "success", pull_requests: [{ number: 45 }] },
+    },
+  };
+}
+
+function checkRunFailedJob() {
+  return {
+    schemaVersion: 1 as const,
+    deliveryId: "delivery-check-failure",
+    event: "check_run",
+    payload: {
+      ...basePayload(),
+      action: "completed",
+      check_run: {
+        name: "verify",
+        conclusion: "failure",
+        html_url: "https://github.example/checks/501",
+        pull_requests: [{ number: 45 }],
+      },
+    },
+  };
+}
+
+function checkSuiteFailedJob() {
+  return {
+    schemaVersion: 1 as const,
+    deliveryId: "delivery-check-suite-failure",
+    event: "check_suite",
+    payload: {
+      ...basePayload(),
+      action: "completed",
+      check_suite: { conclusion: "failure", pull_requests: [{ number: 45 }] },
     },
   };
 }

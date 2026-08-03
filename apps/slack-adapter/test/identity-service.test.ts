@@ -70,6 +70,7 @@ describe("GitHubIdentityService", () => {
     expect(resolved.assigneeGitHubLogins).toEqual(["octocat"]);
     expect(resolved.reviewerGitHubLogins).toEqual(["octocat"]);
     expect(resolved.reviewerGitHubUsers).toEqual([{ id: 987, login: "octocat" }]);
+    expect(resolved.requesterGitHubUser).toEqual({ id: 987, login: "octocat" });
   });
 
   test("連携解除でmappingを削除する", async () => {

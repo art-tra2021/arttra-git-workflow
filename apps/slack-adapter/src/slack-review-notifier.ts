@@ -1,7 +1,11 @@
 import type {
   LifecycleNotifier,
-  LifecycleResource,
   ResolveLifecycleSlackUserId,
+} from "./lifecycle-notification-service.ts";
+import {
+  issueRootActorLogin,
+  issueRootMentionLogins,
+  issueRootNotification,
 } from "./lifecycle-notification-service.ts";
 import { notificationIntentId } from "./notification-outbox.ts";
 import type { NotificationThreadService } from "./notification-thread-service.ts";
@@ -26,12 +30,17 @@ export class SlackReviewNotifier {
     model: ReviewRequestReadModel,
     context: { sourceDeliveryId?: string } = {},
   ): Promise<void> {
-    const assigneeLogins = model.linkedIssues.flatMap((issue) => issue.assigneeLogins);
-    const assigneeSlackIds = await Promise.all(
-      assigneeLogins
-        .filter((login) => login.toLowerCase() !== model.authorLogin.toLowerCase())
-        .map(this.resolveSlackUserId),
-    );
+    if (model.closingIssueCount !== 1 || !model.primaryIssue?.labels.includes("type/task")) {
+      return;
+    }
+    const issue = model.primaryIssue;
+    const assigneeLogins = issue.assigneeLogins;
+    const assigneeSlackIds = await Promise.all(assigneeLogins.map(this.resolveSlackUserId));
+    const [actorSlackUserId, rootActorSlackUserId, ...rootResolvedUserIds] = await Promise.all([
+      this.resolveSlackUserId(model.authorLogin),
+      this.resolveSlackUserId(issueRootActorLogin(issue)),
+      ...issueRootMentionLogins(issue).map(this.resolveSlackUserId),
+    ]);
     const slackUserIds = [
       ...new Set([
         ...model.reviewers.flatMap((reviewer) =>
@@ -57,17 +66,30 @@ export class SlackReviewNotifier {
       title: model.pullRequest.title,
       url: model.pullRequest.url,
     };
-    const resources: LifecycleResource[] =
-      model.linkedIssues.length > 0
-        ? model.linkedIssues.map((issue) => ({
-            kind: "issue",
-            number: issue.number,
-            title: issue.title,
-            url: issue.url,
-          }))
-        : [{ kind: "pull-request", ...pullRequest }];
-    for (const resource of resources) {
-      await this.threads.publish(resource.url, (threadTs) =>
+    const resource = {
+      kind: "issue" as const,
+      number: issue.number,
+      title: issue.title,
+      url: issue.url,
+    };
+    const rootNotification = issueRootNotification(
+      issue,
+      [...new Set(rootResolvedUserIds.filter((value): value is string => value !== null))],
+      rootActorSlackUserId,
+    );
+    await this.threads.publishReply(
+      resource.url,
+      () =>
+        this.notifier.notify(rootNotification, null, {
+          intentId: notificationIntentId({
+            kind: "lifecycle",
+            resourceUrl: issue.url,
+            notificationKind: "issue-opened",
+            eventFingerprint: "issue-root-v1",
+          }),
+          ...(context.sourceDeliveryId ? { sourceDeliveryId: context.sourceDeliveryId } : {}),
+        }),
+      (threadTs) =>
         this.notifier.notify(
           {
             schemaVersion: 1,
@@ -75,7 +97,9 @@ export class SlackReviewNotifier {
             resource,
             pullRequest,
             actorLogin: model.authorLogin,
+            actorSlackUserId,
             slackUserIds,
+            issueType: rootNotification.issueType,
             summary: "PRが作成され、レビュー依頼が設定されました。",
             detail,
             nextAction: model.nextAction,
@@ -93,7 +117,6 @@ export class SlackReviewNotifier {
             ...(context.sourceDeliveryId ? { sourceDeliveryId: context.sourceDeliveryId } : {}),
           },
         ),
-      );
-    }
+    );
   }
 }

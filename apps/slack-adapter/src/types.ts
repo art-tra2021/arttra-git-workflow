@@ -86,6 +86,8 @@ export interface CreateIssueCommand {
   assigneeGitHubLogins?: string[];
   reviewerGitHubLogins?: string[];
   reviewerGitHubUsers?: Array<{ id: number; login: string }>;
+  /** Slack actorからOAuthで検証したIssue依頼者。Issue本文のversion付きmarkerへ保存する。 */
+  requesterGitHubUser?: { id: number; login: string };
   /** GitHub native parent/blocked-by/blocking relations. Omitted in legacy commands. */
   relationships?: IssueRelationships;
 }

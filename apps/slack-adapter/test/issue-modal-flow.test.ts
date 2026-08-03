@@ -136,13 +136,13 @@ describe("Slack Issue modal flow", () => {
     expect(() => selectedRepositoryValue({})).toThrow("repositoryが選択されていません");
   });
 
-  test("work templateの内容に依存せずPR確認方法を明示する", () => {
+  test("task templateの内容に依存せずPR確認方法を明示する", () => {
     const schema: IssueTemplateSchema = {
-      id: "work",
-      name: "作業",
-      titlePrefix: "[Work] ",
-      labels: ["type/work"],
-      fields: [{ id: "outcome", label: "成果", kind: "textarea", required: true }],
+      id: "task",
+      name: "PR実装タスク",
+      titlePrefix: "[Task] ",
+      labels: ["type/task"],
+      fields: [{ id: "action", label: "実装", kind: "textarea", required: true }],
     };
     const modal = issueDetailModal(
       {
@@ -150,56 +150,81 @@ describe("Slack Issue modal flow", () => {
         responseUrl: "https://hooks.slack.test/response",
         slackTeamId: "T123",
         repository: "art-tra2021/work",
-        template: "work",
+        template: "task",
       },
       schema,
     );
     const rendered = JSON.stringify(modal);
     expect(rendered).toContain("PRの確認方法");
-    expect(rendered).toContain("トップレベル成果");
-    expect(rendered).toContain("既存Issueの子");
     expect(rendered).toContain("通常レビュー（既定）");
     expect(rendered).toContain("自分でマージ可");
     expect(rendered).toContain("緊急マージ（事後レビュー必須）");
     expect(rendered).toContain("セルフマージは事前承認を待ちません");
   });
 
-  test("work templateの旧merge項目を送信時に二重読取しない", () => {
+  test("task templateのmerge項目を送信時に二重読取しない", () => {
     expect(
       issueFieldValues(
         {
-          hierarchy: { value: { selected_option: { value: "トップレベル成果" } } },
-          background: { value: { value: "背景" } },
-          outcome: { value: { value: "成果" } },
+          parent: { value: { value: "" } },
+          action: { value: { value: "実装" } },
           done: { value: { value: "- [ ] 完了" } },
-          scope: { value: { value: "adapterのみ" } },
-          out_of_scope: { value: { value: "" } },
-          known_constraints: { value: { value: "" } },
-          verification: { value: { value: "/ar newで確認" } },
-          acceptance: { value: { value: "" } },
-          blocked_by: { value: { value: "" } },
-          target_date: { value: { value: "2026-08-04" } },
+          boundaries: { value: { value: "adapterのみ" } },
         },
-        issueTemplate("work"),
+        issueTemplate("task"),
       ),
     ).toEqual({
-      hierarchy: "トップレベル成果",
       parent: "",
-      background: "背景",
-      outcome: "成果",
+      action: "実装",
       done: "- [ ] 完了",
-      scope: "adapterのみ",
-      out_of_scope: "",
-      known_constraints: "",
-      verification: "/ar newで確認",
-      acceptance: "",
-      blocked_by: "",
-      target_date: "2026-08-04",
+      boundaries: "adapterのみ",
     });
   });
 
-  test("全templateへ親Issue・blocked-by・blockingの共通入力を表示する", () => {
-    const modal = issueDetailModal(
+  test("旧Work templateのtop-level階層項目を送信時に読み取らない", () => {
+    expect(
+      issueFieldValues(
+        { outcome: { value: { value: "成果" } } },
+        {
+          id: "work",
+          name: "旧Work",
+          titlePrefix: "[Work] ",
+          labels: ["type/work"],
+          fields: [
+            {
+              id: "hierarchy",
+              label: "階層",
+              kind: "select",
+              required: true,
+              options: ["Intakeから分解する", "最上位として作る"],
+            },
+            { id: "outcome", label: "成果", kind: "textarea", required: true },
+          ],
+        },
+      ),
+    ).toEqual({ outcome: "成果" });
+  });
+
+  test("TaskはWork/Business親、WorkはIntake親を案内する", () => {
+    const taskModal = issueDetailModal(
+      {
+        channelId: "C123",
+        responseUrl: "https://hooks.slack.test/response",
+        slackTeamId: "T123",
+        repository: "art-tra2021/work",
+        template: "task",
+      },
+      issueTemplate("task"),
+    );
+    const blockIds = taskModal.blocks.flatMap((block) =>
+      "block_id" in block ? [block.block_id] : [],
+    );
+    expect(blockIds).toContain("relationship-parent");
+    expect(blockIds).toContain("relationship-blocked-by");
+    expect(blockIds).toContain("relationship-blocking");
+    expect(JSON.stringify(taskModal)).toContain("type/work または type/business");
+
+    const workModal = issueDetailModal(
       {
         channelId: "C123",
         responseUrl: "https://hooks.slack.test/response",
@@ -209,11 +234,14 @@ describe("Slack Issue modal flow", () => {
       },
       issueTemplate("work"),
     );
-    const blockIds = modal.blocks.flatMap((block) => ("block_id" in block ? [block.block_id] : []));
-    expect(blockIds).toContain("relationship-parent");
-    expect(blockIds).toContain("relationship-blocked-by");
-    expect(blockIds).toContain("relationship-blocking");
-    expect(JSON.stringify(modal)).toContain("owner/repo#123");
+    const workBlockIds = workModal.blocks.flatMap((block) =>
+      "block_id" in block ? [block.block_id] : [],
+    );
+    expect(workBlockIds).toContain("relationship-parent");
+    expect(workBlockIds).toContain("relationship-blocked-by");
+    const renderedWork = JSON.stringify(workModal);
+    expect(renderedWork).not.toContain("最上位として作る");
+    expect(renderedWork).toContain("type/intake");
   });
 
   test("共通関係blocksをCreateIssueCommand用の入力へ変換する", () => {

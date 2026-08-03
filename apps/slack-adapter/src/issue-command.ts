@@ -45,29 +45,26 @@ export function buildCreateIssueCommand(input: CreateIssueInput): CreateIssueCom
   const fields: Record<string, string> = Object.fromEntries(
     schema.fields.map((field) => [field.id, input.fields[field.id]?.trim() ?? ""]),
   );
-  if (input.template === "work" || input.template === "business") {
+  if (input.template === "task") {
     const mergeMode = (input.mergeMode ?? input.fields.merge ?? MERGE_MODES[0]).trim();
     if (!MERGE_MODES.includes(mergeMode as MergeMode)) {
       throw new Error("PRのマージ方針を選択してください");
     }
     fields.merge = mergeMode;
+  } else {
+    // 古いrepository templateにmerge項目が残っていても、成果Issueへ方針を持ち込まない。
+    delete fields.merge;
   }
   const relationships = parseIssueRelationships(input.relationships, fields, repository);
   if (input.template === "work" || input.template === "business") {
-    const hierarchy = input.fields.hierarchy?.trim() ?? "";
-    if (hierarchy !== "トップレベル成果" && hierarchy !== "既存Issueの子") {
-      throw new Error("階層を選択してください");
-    }
-    fields.hierarchy = hierarchy;
-    if (hierarchy === "トップレベル成果" && relationships.parent) {
-      throw new Error("トップレベル成果には親Issueを指定できません");
-    }
-    if (hierarchy === "既存Issueの子" && !relationships.parent) {
-      throw new Error("既存Issueの子には親Issueを指定してください");
-    }
+    delete fields.hierarchy;
+    if (!relationships.parent) throw new Error("Work / Businessには親Intakeを指定してください");
   }
   for (const field of schema.fields) {
-    if (ISSUE_RELATIONSHIP_FIELD_IDS.has(field.id)) {
+    if (
+      ISSUE_RELATIONSHIP_FIELD_IDS.has(field.id) ||
+      (field.id === "merge" && input.template !== "task")
+    ) {
       continue;
     }
     const value = fields[field.id] ?? "";
@@ -78,9 +75,8 @@ export function buildCreateIssueCommand(input: CreateIssueInput): CreateIssueCom
       throw new Error(`${field.label}を選択してください`);
     }
   }
-  const requiredParent = schema.fields.find((field) => field.id === "parent" && field.required);
-  if (requiredParent && !relationships.parent) {
-    throw new Error(`${requiredParent.label}を入力してください`);
+  if (input.template === "task" && !relationships.parent) {
+    throw new Error("Taskには親Work / Businessを指定してください");
   }
 
   const command: CreateIssueCommand = {

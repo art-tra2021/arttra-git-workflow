@@ -22,10 +22,16 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
     threadTs: string | null,
     metadata?: NotificationIntentMetadata,
   ): Promise<ThreadMessageResult> {
+    if (!threadTs && notification.kind !== "issue-opened") {
+      throw new Error(
+        `Issue threadが見つからないため、${notification.kind}通知のchannel直下への送信を停止しました。`,
+      );
+    }
     const mentions = notification.slackUserIds.map((userId) => `<@${userId}>`).join(" ");
     const target = notification.pullRequest ?? notification.resource;
     const tone = lifecycleTone(notification.kind);
-    const label = kindLabel(notification.kind);
+    const label = kindLabel(notification);
+    const replyBroadcast = isSelfMergeNotice(notification.kind);
     const response = await this.client.chat.postMessage({
       channel: this.channelId,
       text: `${mentions ? `${mentions} ` : ""}${slackPlain(tone, notification.summary)} ${target.url}`,
@@ -41,7 +47,7 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
               notification.pullRequest
                 ? `*PR:* <${notification.pullRequest.url}|#${notification.pullRequest.number} ${escapeMrkdwn(notification.pullRequest.title)}>`
                 : null,
-              `*実行者:* @${escapeMrkdwn(notification.actorLogin)}`,
+              `*実行者:* ${actorLabel(notification)}`,
               `*内容:* ${escapeMrkdwn(notification.detail)}`,
             ]
               .filter((value): value is string => Boolean(value))
@@ -79,7 +85,11 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
           ],
         },
       ],
-      ...(threadTs ? { thread_ts: threadTs, reply_broadcast: false } : {}),
+      ...(threadTs
+        ? replyBroadcast
+          ? { thread_ts: threadTs, reply_broadcast: true as const }
+          : { thread_ts: threadTs, reply_broadcast: false as const }
+        : {}),
       ...(metadata
         ? {
             metadata: {
@@ -98,7 +108,27 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
   }
 }
 
-function kindLabel(kind: LifecycleNotificationKind): string {
+function isSelfMergeNotice(kind: LifecycleNotificationKind): boolean {
+  return kind === "self-merge-scheduled";
+}
+
+function actorLabel(notification: LifecycleNotification): string {
+  return notification.actorSlackUserId &&
+    /^[A-Z][A-Z0-9]{1,31}$/.test(notification.actorSlackUserId)
+    ? `<@${notification.actorSlackUserId}>`
+    : `@${escapeMrkdwn(notification.actorLogin)}`;
+}
+
+function kindLabel(notification: LifecycleNotification): string {
+  if (notification.kind === "issue-opened") {
+    const labels = {
+      intake: "新しいIntake",
+      work: "新しいWork",
+      task: "新しいTask",
+      business: "新しいBusiness",
+    } as const;
+    return notification.issueType ? labels[notification.issueType] : "新しいIssue";
+  }
   const labels: Record<LifecycleNotificationKind, string> = {
     "issue-opened": "新しいIssue",
     "issue-reopened": "Issueが再開されました",
@@ -112,10 +142,11 @@ function kindLabel(kind: LifecycleNotificationKind): string {
     "review-commented": "レビューコメントが追加されました",
     "review-dismissed": "レビュー結果が取り消されました",
     "revision-pushed": "差し戻し後の修正がpushされました",
+    "ci-failed": "🚨 CIに対応が必要です",
     "self-merge-scheduled": "⚠️ セルフマージ予定",
     "self-merge-ready": "⚠️ セルフマージ予定・CI通過",
   };
-  return labels[kind];
+  return labels[notification.kind];
 }
 
 function escapeMrkdwn(value: string): string {

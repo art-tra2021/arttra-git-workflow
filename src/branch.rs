@@ -13,6 +13,7 @@ pub struct BranchDraft {
     pub name: String,
     pub kind: String,
     pub issue: u64,
+    pub issue_kind: &'static str,
     pub slug: String,
     pub owner: String,
 }
@@ -56,6 +57,7 @@ pub fn draft(
         name,
         kind,
         issue,
+        issue_kind: "task",
         slug,
         owner,
     })

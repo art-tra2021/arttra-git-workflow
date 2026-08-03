@@ -19,7 +19,8 @@ describe("SlackReviewNotifier", () => {
         },
       },
       new NotificationThreadService(store),
-      async (login) => (login === "owner" ? "UOWNER" : null),
+      async (login) =>
+        ({ author: "UAUTHOR", owner: "UOWNER", requester: "UREQUESTER" })[login] ?? null,
     );
 
     await notifier.notify({
@@ -33,18 +34,9 @@ describe("SlackReviewNotifier", () => {
         headSha: "head-1",
       },
       authorLogin: "author",
-      linkedIssues: [
-        {
-          number: 44,
-          title: "ライフサイクル通知",
-          url: "https://github.example/issues/44",
-          body: "",
-          state: "open",
-          authorLogin: "requester",
-          assigneeLogins: ["owner"],
-          labels: ["type/work", "merge/review"],
-        },
-      ],
+      primaryIssue: issue(),
+      closingIssueCount: 1,
+      linkedIssues: [issue()],
       requiredApprovals: 1,
       reviewers: [
         {
@@ -61,14 +53,75 @@ describe("SlackReviewNotifier", () => {
       updatedAt: "2026-08-02T00:00:00Z",
     });
 
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(2);
     expect(sent[0]).toMatchObject({
       threadTs: null,
       notification: {
+        kind: "issue-opened",
+        slackUserIds: ["UREQUESTER", "UOWNER"],
+        resource: { kind: "issue", number: 44 },
+      },
+    });
+    expect(sent[1]).toMatchObject({
+      threadTs: "970.1",
+      notification: {
         kind: "review-requested",
         slackUserIds: ["UREVIEWER", "UOWNER"],
+        actorSlackUserId: "UAUTHOR",
         resource: { kind: "issue", number: 44 },
       },
     });
   });
+
+  test("primary Issueが一意でないPRは通知しない", async () => {
+    const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-review-thread-")));
+    const sent: LifecycleNotification[] = [];
+    const notifier = new SlackReviewNotifier(
+      {
+        notify: async (notification) => {
+          sent.push(notification);
+          return { messageTs: "970.2" };
+        },
+      },
+      new NotificationThreadService(store),
+      async () => null,
+    );
+
+    await notifier.notify({
+      schemaVersion: 1,
+      kind: "review.request",
+      repository: "example/repo",
+      pullRequest: {
+        number: 46,
+        title: "親なし",
+        url: "https://github.example/pull/46",
+        headSha: "head-2",
+      },
+      authorLogin: "author",
+      primaryIssue: null,
+      closingIssueCount: 0,
+      linkedIssues: [],
+      requiredApprovals: 1,
+      reviewers: [],
+      teams: [],
+      dueDate: null,
+      nextAction: "GitHubで確認する",
+      updatedAt: "2026-08-02T00:00:00Z",
+    });
+
+    expect(sent).toHaveLength(0);
+  });
 });
+
+function issue() {
+  return {
+    number: 44,
+    title: "ライフサイクル通知",
+    url: "https://github.example/issues/44",
+    body: "",
+    state: "open" as const,
+    authorLogin: "requester",
+    assigneeLogins: ["owner"],
+    labels: ["type/task", "merge/review"],
+  };
+}

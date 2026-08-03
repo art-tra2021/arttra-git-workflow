@@ -253,10 +253,15 @@ export class GitHubIdentityService {
     command: CreateIssueCommand,
     slackTeamId: string,
   ): Promise<CreateIssueCommand> {
-    const assignees = await this.resolveMany(slackTeamId, command.assigneeSlackUserIds ?? []);
-    const reviewers = await this.resolveMany(slackTeamId, command.reviewerSlackUserIds ?? []);
+    const [requester, assignees, reviewers] = await Promise.all([
+      this.get(slackTeamId, command.actor),
+      this.resolveMany(slackTeamId, command.assigneeSlackUserIds ?? []),
+      this.resolveMany(slackTeamId, command.reviewerSlackUserIds ?? []),
+    ]);
+    if (!requester) throw new MissingGitHubIdentityError([command.actor]);
     return {
       ...command,
+      requesterGitHubUser: { id: requester.githubUserId, login: requester.githubLogin },
       assigneeGitHubLogins: assignees.map((identity) => identity.githubLogin),
       reviewerGitHubLogins: reviewers.map((identity) => identity.githubLogin),
       reviewerGitHubUsers: reviewers.map((identity) => ({

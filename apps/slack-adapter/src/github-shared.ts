@@ -1,5 +1,6 @@
 import { parse } from "yaml";
 import { ISSUE_RELATIONSHIP_FIELD_IDS } from "./issue-relationships.ts";
+import { issueRequesterMarker } from "./issue-requester.ts";
 import type { IssueFieldSchema, IssueTemplateSchema } from "./issue-schema.ts";
 import type { CreateIssueCommand } from "./types.ts";
 
@@ -68,21 +69,24 @@ export function buildIssueCreateInput(
 ): IssueCreateInput {
   const body = [
     ...schema.fields
-      .filter((field) => !ISSUE_RELATIONSHIP_FIELD_IDS.has(field.id))
+      .filter(
+        (field) =>
+          !ISSUE_RELATIONSHIP_FIELD_IDS.has(field.id) &&
+          (field.id !== "merge" || command.template === "task"),
+      )
       .flatMap((field) => [`## ${field.label}`, "", command.fields[field.id] || "未設定", ""]),
     "## 作成元",
     "",
     "Slack `/ar new`",
     "",
+    ...(command.requesterGitHubUser ? [issueRequesterMarker(command.requesterGitHubUser), ""] : []),
     "## 予定レビュワー",
     "",
     `<!-- ar:reviewers:v1 ${JSON.stringify(command.reviewerGitHubUsers ?? [])} -->`,
     (command.reviewerGitHubLogins ?? []).map((login) => `@${login}`).join(" ") || "未設定",
   ].join("\n");
-  const labels = schema.labels.filter(
-    (label) => command.template !== "work" || !label.startsWith("merge/"),
-  );
-  if (command.template === "work") {
+  const labels = schema.labels.filter((label) => !label.startsWith("merge/"));
+  if (command.template === "task") {
     const mergeLabel: Record<string, string> = {
       "通常レビュー（既定）": "merge/review",
       自分でマージ可: "merge/self",

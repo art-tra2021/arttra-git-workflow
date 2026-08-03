@@ -249,13 +249,17 @@ Issueごとの親投稿tsは共通state storeへ保存する。
 期限、blocker、CI失敗、conflictなど同じIssueの続報は親投稿のthreadへ返信し、channelへ新しい親投稿を増やさない。
 日次digestはIssue別threadへ入れず、独立した一覧投稿とする。
 
-PR作成時は、Issue本文の予定reviewer、変更fileに対するCODEOWNERS、Rulesetを再取得する。
-GitHubへ正式なReview Requestを設定し、reviewerとPR作成者以外のIssue担当者をnative mentionする。
+PR作成時は、GitHubが`Closes`から解決したprimary closing Taskがちょうど1件であることを確認し、そのTask本文の予定reviewer、変更fileに対するCODEOWNERS、Rulesetを再取得する。
+`Relates to`や単なるIssue番号は通知先にせず、primary closing Taskが0件、複数件、または`type/task`でない場合はchannel直下へfallbackしない。
+GitHubへ正式なReview Requestを設定し、reviewerとIssue担当者をnative mentionする。
 Issue作成モーダルで選択した担当者または予定reviewerがGitHub未連携の場合、Issue作成者だけへエラーを返して終わらせない。
 対象のSlack user IDをnative mentionし、`🧩 GitHub連携が必要です`と`/ar connect github`を通知する。
 同じ利用者への連携要求は24時間抑止し、表示名やメールアドレスからGitHubアカウントを推測しない。
-PR作成、Issue・PRコメント、Approve、差し戻し、差し戻し後のpush、マージ、Issue closeは関連Issueのthreadへ返信する。
-関連IssueがないPRだけはPR URLをキーとする専用threadを作る。
+Issueの最初の親投稿ではIssue作成者と担当者をnative mentionし、Intake、Work、Task、Businessごとに見出しと次の操作を変える。
+WorkまたはBusinessと、その子Taskはそれぞれ独立したSlack親投稿を持つ。
+PR作成、Issue・PRコメント、Approve、差し戻し、差し戻し後のpush、CI失敗、マージ、Issue closeはprimary closing Taskのthreadへ返信し、親Work側へ混ぜない。
+Issue作成eventより続報が先に届いてもIssue概要の親投稿を先に作り、続報をchannel直下へ平投稿しない。
+セルフマージ対象になった最初の警告だけはthread返信をchannelにも展開し、CI通過後の通知はthread内だけにする。
 コメント時はIssue担当者またはPR作成者と、コメント本文で明示された`@github-login`を通知対象とする。
 差し戻し時はPR作成者、修正push時は差し戻したreviewer、マージとIssue close時は担当者を通知対象とする。
 通知対象はGitHub OAuthで検証済みのaccount mappingだけをSlack user IDへ変換し、表示名やメールから推測しない。
@@ -287,9 +291,9 @@ Slackの通常操作はこのcacheだけを読み、GitHubの一時的な遅延�
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から一日一回実行する。
 優先度、期限、次の行動で整列した未完了作業を一投稿へまとめ、生のGitHub eventを連続投稿しない。
 
-PR作成・更新時は、linked Issueのversion付き予定reviewer、変更fileに最後に一致するCODEOWNERS、active Rulesetの必要承認数をGitHubから再取得する。
+PR作成・更新時は、唯一のprimary closing Taskにあるversion付き予定reviewer、変更fileに最後に一致するCODEOWNERS、active Rulesetの必要承認数をGitHubから再取得する。
 GitHubへ正式なuser/team review requestを設定した後、検証済みaccount mappingを持つ利用者だけSlackでmentionする。
-通知にはPR、選定理由、目標日、必要承認数、次の操作を表示し、関連Issueのthreadへ集約する。
+通知にはPR、選定理由、目標日、必要承認数、次の操作を表示し、primary closing Taskのthreadへ集約する。
 同じreviewer・理由・期限では既定24時間再通知せず、未対応が続く場合だけ再通知する。
 Cloud Schedulerは固定JSON `{"schemaVersion":1,"kind":"review.remind"}` を`/internal/review-reminders`へ定期送信する。
 本文に対する`X-Ar-Job-Signature`を設定し、workerは保存済みread modelのPRだけをGitHubから再取得して未対応を判定する。

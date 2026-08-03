@@ -70,6 +70,7 @@ export function lifecycleTone(kind: LifecycleNotificationKind): SlackMessageTone
     "review-dismissed": "warning",
     "review-requested": "review",
     "revision-pushed": "revision",
+    "ci-failed": "error",
     "self-merge-scheduled": "warning",
     "self-merge-ready": "warning",
   };

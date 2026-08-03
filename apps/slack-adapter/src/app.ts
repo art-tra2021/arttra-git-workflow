@@ -453,9 +453,6 @@ export function createSlackApp(
         throw new Error(`Issue templateが見つかりません: ${metadata.template}`);
       }
       const fields = issueFieldValues(view.state.values, schema);
-      if (metadata.template === "work" || metadata.template === "business") {
-        fields.hierarchy = selectedValue(view.state.values, "hierarchy", "value");
-      }
       const command = buildCreateIssueCommand({
         repository: metadata.repository,
         template: metadata.template,
@@ -466,7 +463,7 @@ export function createSlackApp(
         slackTeamId: metadata.slackTeamId,
         assigneeSlackUserIds: selectedUsers(view.state.values, "assignees", "value"),
         reviewerSlackUserIds: selectedUsers(view.state.values, "reviewers", "value"),
-        ...(metadata.template === "work" || metadata.template === "business"
+        ...(metadata.template === "task"
           ? { mergeMode: selectedValue(view.state.values, "merge-policy", "value") }
           : {}),
         schema,
@@ -1176,51 +1173,37 @@ export function issueDetailModal(metadata: IssueModalMetadata, schema: IssueTemp
                 field.initialValue,
               ),
         ),
-      ...(schema.id === "work" || schema.id === "business" ? [issueHierarchyPolicy()] : []),
       ...issueRelationshipInputs(schema),
-      ...(schema.id === "work" || schema.id === "business" ? [issueMergePolicy()] : []),
+      ...(schema.id === "task" ? [issueMergePolicy()] : []),
       issueMembers("assignees", "担当者"),
       issueMembers("reviewers", "予定レビュワー"),
     ],
   };
 }
 
-function issueHierarchyPolicy() {
-  const descriptions: Record<string, string> = {
-    トップレベル成果: "新しい成果・案件の起点として作ります。親Issueは指定しません。",
-    既存Issueの子: "既存の成果を分解したIssueとして作ります。親Issueが必須です。",
-  };
-  const options = ["トップレベル成果", "既存Issueの子"];
-  return {
-    type: "input" as const,
-    block_id: "hierarchy",
-    label: { type: "plain_text" as const, text: "Issueの階層" },
-    hint: {
-      type: "plain_text" as const,
-      text: "親子関係とblocked-byは別です。子を選んだ場合は下の親Issueも指定してください。",
-    },
-    element: {
-      type: "static_select" as const,
-      action_id: "value",
-      initial_option: describedOption(
-        options[0] ?? "",
-        options[0] ?? "",
-        descriptions[options[0] ?? ""] ?? "",
-      ),
-      options: options.map((value) => describedOption(value, value, descriptions[value] ?? "")),
-    },
-  };
-}
-
 function issueRelationshipInputs(schema: IssueTemplateSchema) {
-  const parentField = schema.fields.find((field) => field.id === "parent");
+  const parentField =
+    schema.fields.find((field) => field.id === "parent") ??
+    (schema.id === "task"
+      ? { id: "parent", label: "親Work / Business", required: true }
+      : schema.id === "work" || schema.id === "business"
+        ? { id: "parent", label: "親Intake", required: true }
+        : undefined);
+  const parentHint =
+    schema.id === "task"
+      ? "type/work または type/business のIssueを、123、owner/repo#123、またはGitHub Issue URLで1件指定"
+      : "type/intake のIssueを、123、owner/repo#123、またはGitHub Issue URLで1件指定";
   return [
-    issueRelationshipInput(
-      "relationship-parent",
-      "親Issue",
-      parentField?.required ?? false,
-      "123、owner/repo#123、またはGitHub Issue URL（1件）",
-    ),
+    ...(parentField
+      ? [
+          issueRelationshipInput(
+            "relationship-parent",
+            parentField.label,
+            parentField.required,
+            parentHint,
+          ),
+        ]
+      : []),
     issueRelationshipInput(
       "relationship-blocked-by",
       "ブロック元（このIssueが待つもの）",
@@ -1367,7 +1350,7 @@ export function issueFieldValues(
 ): Record<string, string> {
   return Object.fromEntries(
     schema.fields
-      .filter((field) => field.id !== "merge")
+      .filter((field) => field.id !== "merge" && field.id !== "hierarchy")
       .map((field) => [
         field.id,
         field.kind === "select"

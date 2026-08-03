@@ -1,23 +1,15 @@
-name: 作業チケット
-description: 成果と完了条件を持つ、PRに対応する作業
+name: 開発成果（Work）
+description: 複数のTaskを束ねる開発成果の調整Issue。Slackでは独立した親投稿を持つ
 title: "[Work] "
-labels: ["type/work", "status/todo", "merge/review"]
+labels: ["type/work", "status/todo"]
 body:
-  - type: dropdown
-    id: hierarchy
-    attributes:
-      label: 階層
-      description: 独立した成果ならトップレベル、既存成果の一部なら子Issueを選ぶ。
-      options:
-        - トップレベル成果
-        - 既存Issueの子
-    validations:
-      required: true
   - type: input
     id: parent
     attributes:
-      label: 親Issue
-      description: 「既存Issueの子」を選んだ場合は必須。例：#123
+      label: 親Intake
+      description: type/intake Issueを1件指定する。別repositoryの場合はIssue URLを書く。例：#123
+    validations:
+      required: true
   - type: textarea
     id: background
     attributes:
@@ -67,17 +59,6 @@ body:
     attributes:
       label: 依頼者の受入確認（必要な場合）
       description: 実現したこと、確認手順、確認点、既存影響、対象外、制約をまとめる。不要なら空欄でよい。
-  - type: dropdown
-    id: merge
-    attributes:
-      label: マージ方式
-      description: ラベルが正本です。作成後に必要なら merge/self または merge/emergency へ変更します。
-      options:
-        - 通常レビュー（既定）
-        - 自分でマージ可
-        - 緊急マージ（事後レビュー必須）
-    validations:
-      required: true
   - type: input
     id: blocked_by
     attributes:

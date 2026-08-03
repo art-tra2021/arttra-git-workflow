@@ -153,16 +153,23 @@ describe("GitHubWebhookProcessor", () => {
     expect(syncCount).toBe(2);
   });
 
-  test("CI結果の変更で人間向け即時通知を再評価する", async () => {
+  test("CI結果はlifecycle通知へ一本化し、汎用作業通知を重ねない", async () => {
     const store = memoryStore();
     let notificationCount = 0;
+    let lifecycleCount = 0;
     const notifications = {
       notifyImmediate: async () => {
         notificationCount += 1;
         return 1;
       },
     } as unknown as WorkNotificationService;
-    const processor = new GitHubWebhookProcessor(null, store, undefined, notifications);
+    const lifecycle = {
+      process: async () => {
+        lifecycleCount += 1;
+        return 1;
+      },
+    } as unknown as LifecycleNotificationService;
+    const processor = new GitHubWebhookProcessor(null, store, undefined, notifications, lifecycle);
     const job = {
       schemaVersion: 1 as const,
       deliveryId: "delivery-check",
@@ -173,7 +180,8 @@ describe("GitHubWebhookProcessor", () => {
     await processor.process(job);
     await processor.process(job);
 
-    expect(notificationCount).toBe(1);
+    expect(lifecycleCount).toBe(1);
+    expect(notificationCount).toBe(0);
   });
 
   test("Issueコメントをライフサイクル通知へ一度だけ渡す", async () => {
@@ -321,6 +329,44 @@ describe("GitHubWebhookProcessor", () => {
     expect(lifecycleCalls).toBe(1);
     expect(await store.get("github-delivery", job.deliveryId)).toMatchObject({
       status: "failed",
+    });
+  });
+
+  test("Issue thread root作成競合はdeliveryをretryableに戻して再試行する", async () => {
+    const store = memoryStore();
+    let lifecycleCalls = 0;
+    const lifecycle = {
+      process: async () => {
+        lifecycleCalls += 1;
+        if (lifecycleCalls === 1) {
+          throw new RetryableWorkError(
+            "notification_thread_root_in_progress",
+            "Issue通知threadのrootを別workerが作成中です。",
+          );
+        }
+        return 1;
+      },
+    } as unknown as LifecycleNotificationService;
+    const processor = new GitHubWebhookProcessor(null, store, undefined, null, lifecycle);
+    const job = {
+      schemaVersion: 1 as const,
+      deliveryId: "delivery-thread-retry",
+      event: "issue_comment",
+      payload: { action: "created" },
+    };
+
+    await expect(processor.process(job)).rejects.toMatchObject({
+      code: "notification_thread_root_in_progress",
+    });
+    expect(await store.get("github-delivery", job.deliveryId)).toMatchObject({
+      status: "retryable",
+      failure: "notification_thread_root_in_progress",
+    });
+
+    await processor.process(job);
+    expect(lifecycleCalls).toBe(2);
+    expect(await store.get("github-delivery", job.deliveryId)).toMatchObject({
+      status: "completed",
     });
   });
 

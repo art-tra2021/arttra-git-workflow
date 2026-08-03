@@ -111,6 +111,52 @@ interface ApiIssue {
   pull_request?: unknown;
 }
 
+interface ClosingIssuesResponse {
+  data?: {
+    repository?: {
+      pullRequest?: {
+        closingIssuesReferences?: {
+          totalCount?: number;
+          nodes?: Array<{
+            number: number;
+            title: string;
+            url: string;
+            body: string;
+            state: "OPEN" | "CLOSED";
+            author?: { login?: string } | null;
+            parent?: { url?: string } | null;
+            assignees?: { nodes?: Array<{ login?: string } | null> } | null;
+            labels?: { nodes?: Array<{ name?: string } | null> } | null;
+          } | null>;
+        } | null;
+      } | null;
+    } | null;
+  };
+}
+
+const PULL_REQUEST_CLOSING_ISSUES_QUERY = `
+  query PullRequestClosingIssues($owner: String!, $name: String!, $number: Int!) {
+    repository(owner: $owner, name: $name) {
+      pullRequest(number: $number) {
+        closingIssuesReferences(first: 100) {
+          totalCount
+          nodes {
+            number
+            title
+            url
+            body
+            state
+            author { login }
+            parent { url }
+            assignees(first: 100) { nodes { login } }
+            labels(first: 100) { nodes { name } }
+          }
+        }
+      }
+    }
+  }
+`;
+
 interface ContentEntry {
   name: string;
   path: string;
@@ -346,6 +392,7 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     const relationTargets = hasIssueRelationships(relationships)
       ? await this.validateIssueRelationships(command.repository, relationships, viewer)
       : new Map<string, ApiIssue>();
+    this.assertIssueHierarchy(command.template, relationships, relationTargets);
     const input = buildIssueCreateInput(command, schema);
     const issue = await this.api<ApiIssue>(`/repos/${command.repository}/issues`, {
       method: "POST",
@@ -432,6 +479,47 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       targets.set(issueReferenceKey(reference), issue);
     }
     return targets;
+  }
+
+  private assertIssueHierarchy(
+    template: string,
+    relationships: IssueRelationships,
+    targets: Map<string, ApiIssue>,
+  ): void {
+    const parent = relationships.parent;
+    if ((template === "task" || template === "work" || template === "business") && !parent) {
+      throw new Error(
+        template === "task"
+          ? "Taskには親Work / Businessを指定してください。"
+          : "Work / Businessには親Intakeを指定してください。",
+      );
+    }
+    if ((template === "intake" || template === "generic") && parent) {
+      throw new Error("Intakeには親Issueを指定できません。");
+    }
+    if (!parent) return;
+
+    const parentIssue = targets.get(issueReferenceKey(parent));
+    const parentLabels = parentIssue ? issueContext(parentIssue).labels : [];
+    const parentTypes = parentLabels.filter((label) => label.startsWith("type/"));
+    const valid =
+      template === "task"
+        ? parentTypes.length === 1 && ["type/work", "type/business"].includes(parentTypes[0] ?? "")
+        : template === "work" || template === "business"
+          ? parentTypes.length === 1 && parentTypes[0] === "type/intake"
+          : false;
+    if (valid) return;
+
+    const expected =
+      template === "task"
+        ? "type/work または type/business"
+        : template === "work" || template === "business"
+          ? "type/intake"
+          : "親なし";
+    const actual = parentTypes.length > 0 ? parentTypes.join(", ") : "typeラベルなし";
+    throw new Error(
+      `${issueReferenceLabel(parent)} は${template}の親にできません。期待: ${expected}、現在: ${actual}`,
+    );
   }
 
   private async attachIssueRelationships(
@@ -561,14 +649,14 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       requested_reviewers: Array<{ login: string }>;
       requested_teams: Array<{ slug: string }>;
     }>(`/repos/${repository}/pulls/${pullRequestNumber}`);
-    const [files, reviews, linkedIssues, codeowners, requiredApprovals] = await Promise.all([
+    const [files, reviews, closingIssues, codeowners, requiredApprovals] = await Promise.all([
       this.paginate<Array<{ filename: string }>>(
         `/repos/${repository}/pulls/${pullRequestNumber}/files`,
       ),
       this.paginate<Array<{ state: string; user: { login: string } }>>(
         `/repos/${repository}/pulls/${pullRequestNumber}/reviews`,
       ),
-      this.loadLinkedIssues(repository, pullRequest.body ?? ""),
+      this.loadClosingIssues(repository, pullRequestNumber),
       this.loadCodeowners(repository),
       this.loadRequiredApprovals(repository),
     ]);
@@ -586,7 +674,9 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       mergeableState: pullRequest.mergeable_state ?? "unknown",
       body: pullRequest.body ?? "",
       files: files.map((file) => file.filename),
-      linkedIssues,
+      primaryIssue: closingIssues.totalCount === 1 ? (closingIssues.issues[0] ?? null) : null,
+      closingIssueCount: closingIssues.totalCount,
+      linkedIssues: closingIssues.issues,
       codeowners,
       requiredApprovals,
       requestedReviewerLogins: pullRequest.requested_reviewers.map((reviewer) => reviewer.login),
@@ -625,6 +715,9 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     reason: string,
   ): Promise<GitHubIssueContext> {
     const issue = await this.loadIssueContext(repository, issueNumber);
+    if (!issue.labels.includes("type/task")) {
+      throw new Error(`Issue #${issueNumber}はTaskではありません。`);
+    }
     if (!issue.labels.includes("merge/self")) {
       throw new Error(`Issue #${issueNumber}はセルフマージ予定ではありません。`);
     }
@@ -751,19 +844,46 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     }
   }
 
-  private async loadLinkedIssues(
+  private async loadClosingIssues(
     repository: string,
-    pullRequestBody: string,
-  ): Promise<GitHubIssueContext[]> {
-    const numbers = [...pullRequestBody.matchAll(/(?:^|\s)#([1-9][0-9]*)\b/gm)]
-      .map((match) => Number(match[1]))
-      .filter((number, index, values) => values.indexOf(number) === index)
-      .slice(0, 10);
-    return Promise.all(
-      numbers.map(async (number) =>
-        issueContext(await this.api<ApiIssue>(`/repos/${repository}/issues/${number}`)),
-      ),
-    );
+    pullRequestNumber: number,
+  ): Promise<{ totalCount: number; issues: GitHubIssueContext[] }> {
+    const normalizedRepository = normalizeRepositoryName(repository);
+    const [owner, name] = normalizedRepository.split("/");
+    if (!owner || !name) {
+      throw new Error("repository名からownerとnameを読み取れませんでした。");
+    }
+    const response = await this.api<ClosingIssuesResponse>("/graphql", {
+      method: "POST",
+      body: JSON.stringify({
+        query: PULL_REQUEST_CLOSING_ISSUES_QUERY,
+        variables: { owner, name, number: pullRequestNumber },
+      }),
+    });
+    const references = response.data?.repository?.pullRequest?.closingIssuesReferences;
+    const totalCount = references?.totalCount;
+    if (!Number.isSafeInteger(totalCount) || (totalCount ?? -1) < 0) {
+      throw new Error("PRのclosing Issue件数をGitHubから読み取れませんでした。");
+    }
+    const issues = (references?.nodes ?? []).flatMap((issue): GitHubIssueContext[] => {
+      if (!issue) return [];
+      return [
+        {
+          number: issue.number,
+          title: issue.title,
+          url: issue.url,
+          body: issue.body,
+          state: issue.state === "CLOSED" ? "closed" : "open",
+          authorLogin: issue.author?.login ?? "",
+          assigneeLogins: (issue.assignees?.nodes ?? []).flatMap((assignee) =>
+            assignee?.login ? [assignee.login] : [],
+          ),
+          labels: (issue.labels?.nodes ?? []).flatMap((label) => (label?.name ? [label.name] : [])),
+          parentIssueUrl: issue.parent?.url ?? null,
+        },
+      ];
+    });
+    return { totalCount: totalCount ?? 0, issues };
   }
 
   private async loadCodeowners(repository: string): Promise<string> {
