@@ -807,63 +807,163 @@ fn render_input_screen(
     let Some(areas) = render_action_chrome(frame, action, status) else {
         return;
     };
-    let before = value[..cursor].iter().collect::<String>();
-    let current = value.get(cursor).copied().unwrap_or(' ');
-    let after = value
-        .get(cursor.saturating_add(1)..)
-        .unwrap_or_default()
-        .iter()
-        .collect::<String>();
-    let mut lines = vec![
-        Line::from(Span::styled(
-            title.to_owned(),
-            Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            help.to_owned(),
-            Style::default().fg(SECONDARY),
-        )),
-        Line::default(),
-        Line::from(vec![
-            Span::styled("> ", Style::default().fg(ACCENT_CYAN)),
-            Span::styled(before, Style::default().fg(PRIMARY)),
-            Span::styled(
-                current.to_string(),
-                Style::default()
-                    .fg(PRIMARY)
-                    .bg(FOCUS_BG)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(after, Style::default().fg(PRIMARY)),
-        ]),
-        Line::default(),
-        Line::from(Span::styled(
+    let block = section_block(step);
+    let inner = block.inner(areas.content);
+    frame.render_widget(block, areas.content);
+    let input_areas = input_areas(inner);
+
+    if let Some(title_area) = input_areas.title {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                title.to_owned(),
+                Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+            ))),
+            title_area,
+        );
+    }
+    if let Some(help_area) = input_areas.help {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                help.to_owned(),
+                Style::default().fg(SECONDARY),
+            ))
+            .wrap(Wrap { trim: true }),
+            help_area,
+        );
+    }
+
+    let viewport = input_viewport(value, cursor, input_areas.input.width);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(viewport.prefix, Style::default().fg(ACCENT_CYAN)),
+            Span::styled(viewport.text, Style::default().fg(PRIMARY)),
+        ])),
+        input_areas.input,
+    );
+    let cursor_x = input_areas
+        .input
+        .x
+        .saturating_add(viewport.cursor_column)
+        .min(input_areas.input.right().saturating_sub(1));
+    frame.set_cursor_position((cursor_x, input_areas.input.y));
+
+    if let Some(info_area) = input_areas.info {
+        let mut info = vec![Line::from(Span::styled(
             if required {
                 "必須項目"
             } else {
                 "任意項目（空欄でも進めます）"
             },
             Style::default().fg(COMMENT),
-        )),
-    ];
-    if let Some(validation) = validation {
-        lines.push(Line::from(Span::styled(
-            validation,
-            Style::default().fg(ERROR).add_modifier(Modifier::BOLD),
-        )));
+        ))];
+        if let Some(validation) = validation {
+            info.push(Line::from(Span::styled(
+                validation.to_owned(),
+                Style::default().fg(ERROR).add_modifier(Modifier::BOLD),
+            )));
+        }
+        frame.render_widget(Paragraph::new(info).wrap(Wrap { trim: true }), info_area);
     }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(section_block(step))
-            .wrap(Wrap { trim: false }),
-        areas.content,
-    );
     render_action_footer(
         frame,
         areas.footer,
         "入力    Enter  決定    ←→  カーソル    Ctrl+U  消去    Esc  戻る",
         "Enter  決定    ←→  移動    Esc  戻る",
     );
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InputAreas {
+    title: Option<Rect>,
+    help: Option<Rect>,
+    input: Rect,
+    info: Option<Rect>,
+}
+
+fn input_areas(area: Rect) -> InputAreas {
+    let row = |offset: u16, height: u16| Rect {
+        x: area.x,
+        y: area.y.saturating_add(offset),
+        width: area.width,
+        height: height.min(area.height.saturating_sub(offset)),
+    };
+    if area.height >= 7 {
+        InputAreas {
+            title: Some(row(0, 1)),
+            help: Some(row(1, 2)),
+            input: row(4, 1),
+            info: Some(row(6, area.height - 6)),
+        }
+    } else if area.height >= 4 {
+        InputAreas {
+            title: Some(row(0, 1)),
+            help: Some(row(1, 1)),
+            input: row(2, 1),
+            info: Some(row(3, area.height - 3)),
+        }
+    } else if area.height >= 2 {
+        InputAreas {
+            title: Some(row(0, 1)),
+            help: None,
+            input: row(1, 1),
+            info: None,
+        }
+    } else {
+        InputAreas {
+            title: None,
+            help: None,
+            input: row(0, 1),
+            info: None,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct InputViewport {
+    prefix: &'static str,
+    text: String,
+    cursor_column: u16,
+}
+
+fn input_viewport(value: &[char], cursor: usize, width: u16) -> InputViewport {
+    const PREFIX_WIDTH: usize = 2;
+    let cursor = cursor.min(value.len());
+    let available = usize::from(width).saturating_sub(PREFIX_WIDTH).max(1);
+    let cursor_glyph_width = value
+        .get(cursor)
+        .map_or(1, |character| character_display_width(*character).max(1))
+        .min(available);
+    let before_budget = available.saturating_sub(cursor_glyph_width);
+    let mut start = cursor;
+    let mut before_width = 0_usize;
+    while start > 0 {
+        let character_width = character_display_width(value[start - 1]);
+        if before_width.saturating_add(character_width) > before_budget {
+            break;
+        }
+        before_width += character_width;
+        start -= 1;
+    }
+
+    let mut end = start;
+    let mut visible_width = 0_usize;
+    while end < value.len() {
+        let character_width = character_display_width(value[end]);
+        if visible_width.saturating_add(character_width) > available {
+            break;
+        }
+        visible_width += character_width;
+        end += 1;
+    }
+    InputViewport {
+        prefix: if start == 0 { "> " } else { "‹ " },
+        text: value[start..end].iter().collect(),
+        cursor_column: u16::try_from(PREFIX_WIDTH.saturating_add(before_width)).unwrap_or(u16::MAX),
+    }
+}
+
+fn character_display_width(character: char) -> usize {
+    Line::raw(character.to_string()).width()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1564,8 +1664,8 @@ mod tests {
     use super::{
         Action, ActionReport, BRAND_BLUE, BRAND_CORAL, BRAND_GREEN, BRAND_YELLOW, HomeApp,
         LOGO_HEIGHT, LOGO_WIDTH, NARROW_TERMINAL_BREAKPOINT, PromptChoice, ReportLine, ReportTone,
-        logo_color, render, render_choice_screen, render_confirm_screen, render_input_screen,
-        render_logo, render_report_screen, render_running_screen,
+        input_viewport, logo_color, render, render_choice_screen, render_confirm_screen,
+        render_input_screen, render_logo, render_report_screen, render_running_screen,
     };
     use crate::status::{
         HomeAction, HomeChanges, HomeIssue, HomePullRequest, HomeStatus, HomeUpstream,
@@ -1704,6 +1804,69 @@ mod tests {
                 })
                 .expect("report render");
         }
+    }
+
+    #[test]
+    fn input_viewport_counts_japanese_characters_by_terminal_width() {
+        let value = "日本語".chars().collect::<Vec<_>>();
+        assert_eq!(
+            input_viewport(&value, 2, 12),
+            super::InputViewport {
+                prefix: "> ",
+                text: "日本語".into(),
+                cursor_column: 6,
+            }
+        );
+
+        let long_value = "abcdef日本語".chars().collect::<Vec<_>>();
+        let viewport = input_viewport(&long_value, long_value.len(), 8);
+        assert_eq!(viewport.prefix, "‹ ");
+        assert_eq!(viewport.text, "本語");
+        assert_eq!(viewport.cursor_column, 6);
+        assert!(viewport.cursor_column < 8);
+    }
+
+    #[test]
+    fn input_screen_uses_the_terminal_cursor_and_clears_it_after_leaving() {
+        let backend = TestBackend::new(58, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let value = "日本語".chars().collect::<Vec<_>>();
+        terminal
+            .draw(|frame| {
+                render_input_screen(
+                    frame,
+                    Action::Commit,
+                    &status(),
+                    "COMMIT · 2/4",
+                    "変更内容",
+                    "何を変えたか入力します。",
+                    &value,
+                    2,
+                    None,
+                    true,
+                );
+            })
+            .expect("input render");
+
+        assert!(terminal.backend().cursor_visible());
+        let cursor = terminal.backend().cursor_position();
+        let cursor_cell = terminal
+            .backend()
+            .buffer()
+            .cell((cursor.x, cursor.y))
+            .expect("cursor cell");
+        assert_eq!(cursor_cell.bg, Color::Reset);
+
+        let report = ActionReport {
+            title: "完了".into(),
+            summary: "完了しました".into(),
+            ok: true,
+            lines: Vec::new(),
+        };
+        terminal
+            .draw(|frame| render_report_screen(frame, Action::Commit, &status(), &report, 0))
+            .expect("report render");
+        assert!(!terminal.backend().cursor_visible());
     }
 
     #[test]
