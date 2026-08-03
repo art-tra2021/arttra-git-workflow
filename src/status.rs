@@ -650,7 +650,7 @@ fn recommend(facts: &RecommendationFacts<'_>) -> Vec<NextAction> {
             "push-commits",
             "commitをpushする",
             format!("upstreamより{} commit進んでいる", facts.upstream.ahead),
-            Some("git push".into()),
+            Some("git ar push".into()),
         )];
     }
     if let Some(pull_request) = facts.pull_request {
@@ -754,7 +754,7 @@ fn recommend(facts: &RecommendationFacts<'_>) -> Vec<NextAction> {
                     .unwrap_or("default branch"),
                 facts.upstream.commits_ahead_of_base
             ),
-            Some("gh pr create --fill".into()),
+            Some("git ar pr --create".into()),
         )];
     }
     if facts.upstream.configured
