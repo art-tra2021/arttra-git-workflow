@@ -11,15 +11,15 @@
 //! - License: `LICENSES/Apache-2.0.txt`
 
 use std::fmt;
-use std::io::{self, Write, stdout};
+use std::io::{self, stdout};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::cursor::{Hide, Show};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use inquire::Select;
 use ratatui::backend::CrosstermBackend;
@@ -76,6 +76,104 @@ pub enum Action {
     Doctor,
     Context,
     Exit,
+}
+
+#[derive(Debug, Clone)]
+pub struct PromptChoice {
+    pub label: String,
+    pub description: String,
+}
+
+impl PromptChoice {
+    pub fn new(label: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            description: description.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportTone {
+    Primary,
+    Secondary,
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReportLine {
+    pub text: String,
+    pub tone: ReportTone,
+}
+
+impl ReportLine {
+    pub fn new(text: impl Into<String>, tone: ReportTone) -> Self {
+        Self {
+            text: text.into(),
+            tone,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ActionReport {
+    pub title: String,
+    pub summary: String,
+    pub ok: bool,
+    pub lines: Vec<ReportLine>,
+}
+
+impl ActionReport {
+    pub fn from_output(action: Action, ok: bool, stdout: &str, stderr: &str) -> Self {
+        let mut lines = output_lines(stdout);
+        if !stderr.trim().is_empty() {
+            if !lines.is_empty() {
+                lines.push(ReportLine::new("", ReportTone::Secondary));
+            }
+            lines.extend(output_lines(stderr).into_iter().map(|mut line| {
+                if matches!(line.tone, ReportTone::Primary | ReportTone::Secondary) {
+                    line.tone = ReportTone::Error;
+                }
+                line
+            }));
+        }
+        if lines.is_empty() {
+            lines.push(ReportLine::new(
+                if ok {
+                    "処理は正常に完了しました。"
+                } else {
+                    "処理を完了できませんでした。"
+                },
+                if ok {
+                    ReportTone::Success
+                } else {
+                    ReportTone::Error
+                },
+            ));
+        }
+        Self {
+            title: action.label().into(),
+            summary: if ok {
+                "完了しました".into()
+            } else {
+                "確認が必要です".into()
+            },
+            ok,
+            lines,
+        }
+    }
+
+    pub fn error(action: Action, error: &anyhow::Error) -> Self {
+        Self {
+            title: action.label().into(),
+            summary: "処理を開始できませんでした".into(),
+            ok: false,
+            lines: vec![ReportLine::new(format!("{error:#}"), ReportTone::Error)],
+        }
+    }
 }
 
 impl Action {
@@ -251,33 +349,32 @@ impl Shell {
         }
     }
 
-    pub fn begin_action(&mut self, action: Action, status: &HomeStatus) -> Result<()> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn choose(
+        &mut self,
+        action: Action,
+        status: &HomeStatus,
+        step: &str,
+        title: &str,
+        help: &str,
+        choices: &[PromptChoice],
+        initial: usize,
+    ) -> Result<Option<usize>> {
         let Some(terminal) = &mut self.terminal else {
-            return Ok(());
+            return Ok(None);
         };
-        clear_for_redraw(terminal).context("実行画面を初期化できませんでした")?;
-        let mut output_row = 0;
-        terminal
-            .draw(|frame| output_row = render_action_shell(frame, action, status))
-            .context("実行画面を描画できませんでした")?;
-        disable_raw_mode().context("terminalの入力モードを切り替えられませんでした")?;
-        execute!(stdout(), Show, MoveTo(2, output_row))
-            .context("実行画面へ移動できませんでした")?;
-        Ok(())
-    }
-
-    pub fn finish_action(&mut self, error: Option<&anyhow::Error>) -> Result<bool> {
-        if self.terminal.is_none() {
-            return Ok(false);
+        if choices.is_empty() {
+            return Ok(None);
         }
-        if let Some(error) = error {
-            println!("\nERROR  {error:#}");
-        }
-        println!("\n────────────────────────");
-        println!("Enter  ホームへ戻る    q  git arを終了");
-        stdout().flush().context("実行結果を表示できませんでした")?;
-        enable_raw_mode().context("terminalをraw modeへ戻せませんでした")?;
+        let mut selected = initial.min(choices.len() - 1);
         loop {
+            terminal
+                .draw(|frame| {
+                    render_choice_screen(
+                        frame, action, status, step, title, help, choices, selected,
+                    );
+                })
+                .context("選択画面を描画できませんでした")?;
             let Event::Key(key) = event::read().context("キー入力を読み取れませんでした")?
             else {
                 continue;
@@ -286,27 +383,226 @@ impl Shell {
                 continue;
             }
             match key.code {
-                KeyCode::Enter | KeyCode::Esc => {
-                    execute!(stdout(), Hide).context("カーソルを隠せませんでした")?;
-                    clear_for_redraw(self.terminal.as_mut().expect("全画面terminalが存在する"))
-                        .context("ホーム画面へ戻れませんでした")?;
-                    return Ok(true);
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected = selected.checked_sub(1).unwrap_or(choices.len() - 1);
                 }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    selected = (selected + 1) % choices.len();
+                }
+                KeyCode::Home | KeyCode::Char('g') => selected = 0,
+                KeyCode::End | KeyCode::Char('G') => selected = choices.len() - 1,
+                KeyCode::Enter => return Ok(Some(selected)),
+                KeyCode::Esc => return Ok(None),
+                _ => {}
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn input(
+        &mut self,
+        action: Action,
+        status: &HomeStatus,
+        step: &str,
+        title: &str,
+        help: &str,
+        initial: &str,
+        required: bool,
+    ) -> Result<Option<String>> {
+        let Some(terminal) = &mut self.terminal else {
+            return Ok(None);
+        };
+        let mut value = initial.chars().collect::<Vec<_>>();
+        let mut cursor = value.len();
+        let mut validation: Option<String> = None;
+        loop {
+            terminal
+                .draw(|frame| {
+                    render_input_screen(
+                        frame,
+                        action,
+                        status,
+                        step,
+                        title,
+                        help,
+                        &value,
+                        cursor,
+                        validation.as_deref(),
+                        required,
+                    );
+                })
+                .context("入力画面を描画できませんでした")?;
+            let event = event::read().context("キー入力を読み取れませんでした")?;
+            match event {
+                Event::Key(key)
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
+                    match key.code {
+                        KeyCode::Enter => {
+                            let output = value.iter().collect::<String>();
+                            if required && output.trim().is_empty() {
+                                validation = Some("この項目は必須です".into());
+                            } else {
+                                return Ok(Some(output.trim().to_owned()));
+                            }
+                        }
+                        KeyCode::Esc => return Ok(None),
+                        KeyCode::Left => cursor = cursor.saturating_sub(1),
+                        KeyCode::Right => cursor = (cursor + 1).min(value.len()),
+                        KeyCode::Home => cursor = 0,
+                        KeyCode::End => cursor = value.len(),
+                        KeyCode::Backspace if cursor > 0 => {
+                            cursor -= 1;
+                            value.remove(cursor);
+                            validation = None;
+                        }
+                        KeyCode::Delete if cursor < value.len() => {
+                            value.remove(cursor);
+                            validation = None;
+                        }
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            value.clear();
+                            cursor = 0;
+                            validation = None;
+                        }
+                        KeyCode::Char(character)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            value.insert(cursor, character);
+                            cursor += 1;
+                            validation = None;
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Paste(contents) => {
+                    for character in contents.chars().filter(|character| !character.is_control()) {
+                        value.insert(cursor, character);
+                        cursor += 1;
+                    }
+                    validation = None;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn confirm(
+        &mut self,
+        action: Action,
+        status: &HomeStatus,
+        step: &str,
+        title: &str,
+        help: &str,
+        details: &[ReportLine],
+        default: bool,
+        accept_label: &str,
+        reject_label: &str,
+    ) -> Result<Option<bool>> {
+        let Some(terminal) = &mut self.terminal else {
+            return Ok(None);
+        };
+        let mut accepted = default;
+        let mut scroll = 0_u16;
+        loop {
+            let size = terminal
+                .size()
+                .context("terminalサイズを取得できませんでした")?;
+            let max_scroll = confirm_scroll_limit(size.width, size.height, details);
+            scroll = scroll.min(max_scroll);
+            terminal
+                .draw(|frame| {
+                    render_confirm_screen(
+                        frame,
+                        action,
+                        status,
+                        step,
+                        title,
+                        help,
+                        details,
+                        scroll,
+                        accepted,
+                        accept_label,
+                        reject_label,
+                    );
+                })
+                .context("確認画面を描画できませんでした")?;
+            let Event::Key(key) = event::read().context("キー入力を読み取れませんでした")?
+            else {
+                continue;
+            };
+            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                continue;
+            }
+            match key.code {
+                KeyCode::Left | KeyCode::Right | KeyCode::Tab => accepted = !accepted,
+                KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => scroll = (scroll + 1).min(max_scroll),
+                KeyCode::PageUp => scroll = scroll.saturating_sub(8),
+                KeyCode::PageDown => scroll = (scroll + 8).min(max_scroll),
+                KeyCode::Home | KeyCode::Char('g') => scroll = 0,
+                KeyCode::End | KeyCode::Char('G') => scroll = max_scroll,
+                KeyCode::Char('y') => accepted = true,
+                KeyCode::Char('n') => accepted = false,
+                KeyCode::Enter => return Ok(Some(accepted)),
+                KeyCode::Esc => return Ok(None),
+                _ => {}
+            }
+        }
+    }
+
+    pub fn running(&mut self, action: Action, status: &HomeStatus, message: &str) -> Result<()> {
+        let Some(terminal) = &mut self.terminal else {
+            return Ok(());
+        };
+        terminal
+            .draw(|frame| render_running_screen(frame, action, status, message))
+            .context("実行中画面を描画できませんでした")?;
+        Ok(())
+    }
+
+    pub fn report(
+        &mut self,
+        action: Action,
+        status: &HomeStatus,
+        report: &ActionReport,
+    ) -> Result<bool> {
+        let Some(terminal) = &mut self.terminal else {
+            return Ok(false);
+        };
+        let mut scroll = 0_u16;
+        loop {
+            let size = terminal
+                .size()
+                .context("terminalサイズを取得できませんでした")?;
+            let max_scroll = report_scroll_limit(size.width, size.height, report);
+            scroll = scroll.min(max_scroll);
+            terminal
+                .draw(|frame| render_report_screen(frame, action, status, report, scroll))
+                .context("結果画面を描画できませんでした")?;
+            let Event::Key(key) = event::read().context("キー入力を読み取れませんでした")?
+            else {
+                continue;
+            };
+            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                continue;
+            }
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => scroll = (scroll + 1).min(max_scroll),
+                KeyCode::PageUp => scroll = scroll.saturating_sub(8),
+                KeyCode::PageDown => scroll = (scroll + 8).min(max_scroll),
+                KeyCode::Home | KeyCode::Char('g') => scroll = 0,
+                KeyCode::End | KeyCode::Char('G') => scroll = max_scroll,
+                KeyCode::Enter | KeyCode::Esc => return Ok(true),
                 KeyCode::Char('q') => return Ok(false),
                 _ => {}
             }
         }
     }
-}
-
-fn clear_for_redraw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-    execute!(stdout(), Clear(ClearType::All), MoveTo(0, 0))?;
-    // Command output bypasses Ratatui, so invalidate both diff buffers and
-    // preserve the active-buffer index. The next frame then repaints all cells.
-    terminal.current_buffer_mut().reset();
-    terminal.swap_buffers();
-    terminal.swap_buffers();
-    Ok(())
 }
 
 fn run_simple() -> Result<Option<Action>> {
@@ -385,20 +681,30 @@ fn render(frame: &mut Frame<'_>, app: &mut HomeApp, status: &HomeStatus) {
     render_footer(frame, footer_area, status, area.width);
 }
 
-fn render_action_shell(frame: &mut Frame<'_>, action: Action, status: &HomeStatus) -> u16 {
-    let frame_area = frame.area();
-    let area = inset(frame_area, 1, 1);
+#[derive(Debug, Clone, Copy)]
+struct ActionAreas {
+    content: Rect,
+    footer: Rect,
+}
+
+fn render_action_chrome(
+    frame: &mut Frame<'_>,
+    action: Action,
+    status: &HomeStatus,
+) -> Option<ActionAreas> {
+    let area = inset(frame.area(), 1, 1);
     if area.width < 24 || area.height < 15 {
         render_too_small(frame, area);
-        return frame_area.bottom().saturating_sub(1);
+        return None;
     }
 
     let compact = area.width < NARROW_TERMINAL_BREAKPOINT || area.height < MIN_DETAIL_HEIGHT;
     let header_height = if compact { COMPACT_HEADER_HEIGHT } else { 5 };
-    let [header_area, workflow_area, _output_area] = Layout::vertical([
+    let [header_area, workflow_area, content_area, footer_area] = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Length(5),
         Constraint::Min(1),
+        Constraint::Length(1),
     ])
     .areas(area);
     render_header(frame, header_area, status, compact);
@@ -421,10 +727,305 @@ fn render_action_shell(frame: &mut Frame<'_>, action: Action, status: &HomeStatu
         .wrap(Wrap { trim: true }),
         workflow_area,
     );
-    workflow_area
-        .bottom()
-        .saturating_add(1)
-        .min(frame_area.bottom().saturating_sub(1))
+    Some(ActionAreas {
+        content: content_area,
+        footer: footer_area,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_choice_screen(
+    frame: &mut Frame<'_>,
+    action: Action,
+    status: &HomeStatus,
+    step: &str,
+    title: &str,
+    help: &str,
+    choices: &[PromptChoice],
+    selected: usize,
+) {
+    let Some(areas) = render_action_chrome(frame, action, status) else {
+        return;
+    };
+    let [prompt_area, list_area] =
+        Layout::vertical([Constraint::Length(3), Constraint::Min(2)]).areas(areas.content);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                title,
+                Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(help, Style::default().fg(SECONDARY))),
+        ]),
+        prompt_area,
+    );
+    let items = choices
+        .iter()
+        .map(|choice| {
+            ListItem::new(vec![
+                Line::from(Span::styled(
+                    choice.label.clone(),
+                    Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    choice.description.clone(),
+                    Style::default().fg(SECONDARY),
+                )),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(section_block(step))
+            .highlight_symbol("> ")
+            .highlight_style(Style::default().bg(FOCUS_BG)),
+        list_area,
+        &mut state,
+    );
+    render_action_footer(
+        frame,
+        areas.footer,
+        "↑↓ / j k  選択    Enter  決定    Esc  ホームへ戻る",
+        "↑↓  選択    Enter  決定    Esc  戻る",
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_input_screen(
+    frame: &mut Frame<'_>,
+    action: Action,
+    status: &HomeStatus,
+    step: &str,
+    title: &str,
+    help: &str,
+    value: &[char],
+    cursor: usize,
+    validation: Option<&str>,
+    required: bool,
+) {
+    let Some(areas) = render_action_chrome(frame, action, status) else {
+        return;
+    };
+    let before = value[..cursor].iter().collect::<String>();
+    let current = value.get(cursor).copied().unwrap_or(' ');
+    let after = value
+        .get(cursor.saturating_add(1)..)
+        .unwrap_or_default()
+        .iter()
+        .collect::<String>();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            title.to_owned(),
+            Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            help.to_owned(),
+            Style::default().fg(SECONDARY),
+        )),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(ACCENT_CYAN)),
+            Span::styled(before, Style::default().fg(PRIMARY)),
+            Span::styled(
+                current.to_string(),
+                Style::default()
+                    .fg(PRIMARY)
+                    .bg(FOCUS_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(after, Style::default().fg(PRIMARY)),
+        ]),
+        Line::default(),
+        Line::from(Span::styled(
+            if required {
+                "必須項目"
+            } else {
+                "任意項目（空欄でも進めます）"
+            },
+            Style::default().fg(COMMENT),
+        )),
+    ];
+    if let Some(validation) = validation {
+        lines.push(Line::from(Span::styled(
+            validation,
+            Style::default().fg(ERROR).add_modifier(Modifier::BOLD),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(section_block(step))
+            .wrap(Wrap { trim: false }),
+        areas.content,
+    );
+    render_action_footer(
+        frame,
+        areas.footer,
+        "入力    Enter  決定    ←→  カーソル    Ctrl+U  消去    Esc  戻る",
+        "Enter  決定    ←→  移動    Esc  戻る",
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_confirm_screen(
+    frame: &mut Frame<'_>,
+    action: Action,
+    status: &HomeStatus,
+    step: &str,
+    title: &str,
+    help: &str,
+    details: &[ReportLine],
+    scroll: u16,
+    accepted: bool,
+    accept_label: &str,
+    reject_label: &str,
+) {
+    let Some(areas) = render_action_chrome(frame, action, status) else {
+        return;
+    };
+    let [details_area, buttons_area] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(areas.content);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            title.to_owned(),
+            Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            help.to_owned(),
+            Style::default().fg(SECONDARY),
+        )),
+        Line::default(),
+    ];
+    lines.extend(details.iter().map(styled_report_line));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(section_block(step))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        details_area,
+    );
+    let selected = |value: bool| {
+        if value == accepted {
+            Style::default()
+                .fg(PRIMARY)
+                .bg(FOCUS_BG)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(SECONDARY)
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("  {accept_label}  "), selected(true)),
+            Span::raw("    "),
+            Span::styled(format!("  {reject_label}  "), selected(false)),
+        ]))
+        .alignment(Alignment::Center),
+        buttons_area,
+    );
+    render_action_footer(
+        frame,
+        areas.footer,
+        "↑↓  内容    ←→  選択    Enter  決定    y / n  直接選択    Esc  戻る",
+        "↑↓  内容    ←→  選択    Enter  決定",
+    );
+}
+
+fn render_running_screen(
+    frame: &mut Frame<'_>,
+    action: Action,
+    status: &HomeStatus,
+    message: &str,
+) {
+    let Some(areas) = render_action_chrome(frame, action, status) else {
+        return;
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "RUNNING",
+                Style::default()
+                    .fg(ACCENT_CYAN)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::default(),
+            Line::from(Span::styled(message, Style::default().fg(PRIMARY))),
+            Line::default(),
+            Line::from(Span::styled(
+                "完了後、この画面に結果を表示します。",
+                Style::default().fg(SECONDARY),
+            )),
+        ])
+        .block(section_block("PROGRESS"))
+        .wrap(Wrap { trim: true }),
+        areas.content,
+    );
+    render_action_footer(
+        frame,
+        areas.footer,
+        "処理を実行しています",
+        "処理を実行しています",
+    );
+}
+
+fn render_report_screen(
+    frame: &mut Frame<'_>,
+    action: Action,
+    status: &HomeStatus,
+    report: &ActionReport,
+    scroll: u16,
+) {
+    let Some(areas) = render_action_chrome(frame, action, status) else {
+        return;
+    };
+    let summary_tone = if report.ok {
+        ReportTone::Success
+    } else {
+        ReportTone::Error
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                if report.ok { "OK     " } else { "CHECK  " },
+                report_style(summary_tone).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                report.title.clone(),
+                Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            report.summary.clone(),
+            report_style(summary_tone),
+        )),
+        Line::default(),
+    ];
+    lines.extend(report.lines.iter().map(styled_report_line));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(section_block("RESULT"))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        areas.content,
+    );
+    render_action_footer(
+        frame,
+        areas.footer,
+        "↑↓ / PgUp PgDn  スクロール    Enter  ホームへ戻る    q  終了",
+        "↑↓  移動    Enter  ホーム    q  終了",
+    );
+}
+
+fn render_action_footer(frame: &mut Frame<'_>, area: Rect, wide: &str, narrow: &str) {
+    let text = if area.width < NARROW_TERMINAL_BREAKPOINT {
+        narrow
+    } else {
+        wide
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(text, Style::default().fg(COMMENT)))),
+        area,
+    );
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, status: &HomeStatus, compact: bool) {
@@ -718,7 +1319,7 @@ fn render_too_small(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-fn section_block(title: &'static str) -> Block<'static> {
+fn section_block(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::TOP)
         .border_style(Style::default().fg(BORDER))
@@ -794,6 +1395,154 @@ fn safe_text(value: &str) -> String {
         .join(" ")
 }
 
+fn styled_report_line(line: &ReportLine) -> Line<'static> {
+    Line::from(Span::styled(
+        sanitize_output(&line.text),
+        report_style(line.tone),
+    ))
+}
+
+fn report_style(tone: ReportTone) -> Style {
+    Style::default().fg(match tone {
+        ReportTone::Primary => PRIMARY,
+        ReportTone::Secondary => SECONDARY,
+        ReportTone::Info => ACCENT_CYAN,
+        ReportTone::Success => SUCCESS,
+        ReportTone::Warning => WARNING,
+        ReportTone::Error => ERROR,
+    })
+}
+
+fn output_lines(output: &str) -> Vec<ReportLine> {
+    strip_ansi(output)
+        .lines()
+        .map(|line| {
+            let line = line.trim_end();
+            ReportLine::new(line, output_tone(line))
+        })
+        .collect()
+}
+
+fn output_tone(line: &str) -> ReportTone {
+    let trimmed = line.trim_start();
+    let lowercase = trimmed.to_ascii_lowercase();
+    if trimmed.starts_with('✓')
+        || lowercase.starts_with("ok")
+        || lowercase.starts_with("pass")
+        || lowercase.contains("finished")
+    {
+        ReportTone::Success
+    } else if trimmed.starts_with('✗')
+        || lowercase.starts_with("error")
+        || lowercase.starts_with("failed")
+        || lowercase.starts_with("failure")
+        || lowercase.starts_with("arttra:")
+    {
+        ReportTone::Error
+    } else if lowercase.starts_with("warn") || lowercase.contains("warning") {
+        ReportTone::Warning
+    } else if trimmed.starts_with('#') || (trimmed.starts_with('[') && trimmed.ends_with(']')) {
+        ReportTone::Info
+    } else if line.starts_with(char::is_whitespace) || trimmed.starts_with('-') {
+        ReportTone::Secondary
+    } else {
+        ReportTone::Primary
+    }
+}
+
+fn strip_ansi(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            output.push(character);
+            continue;
+        }
+        if characters.next_if_eq(&'[').is_none() {
+            continue;
+        }
+        for sequence in characters.by_ref() {
+            if ('@'..='~').contains(&sequence) {
+                break;
+            }
+        }
+    }
+    output
+}
+
+fn sanitize_output(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+fn report_scroll_limit(width: u16, height: u16, report: &ActionReport) -> u16 {
+    if width < 24 || height < 15 {
+        return 0;
+    }
+    let compact = width.saturating_sub(2) < NARROW_TERMINAL_BREAKPOINT
+        || height.saturating_sub(2) < MIN_DETAIL_HEIGHT;
+    let header_height = if compact { COMPACT_HEADER_HEIGHT } else { 5 };
+    let visible = height
+        .saturating_sub(2)
+        .saturating_sub(header_height)
+        .saturating_sub(5)
+        .saturating_sub(1)
+        .max(1);
+    let line_width = width.saturating_sub(6).max(1) as usize;
+    let wrapped_lines = report
+        .lines
+        .iter()
+        .map(|line| {
+            Line::raw(line.text.as_str())
+                .width()
+                .max(1)
+                .div_ceil(line_width)
+        })
+        .sum::<usize>()
+        .saturating_add(3);
+    wrapped_lines
+        .saturating_sub(visible as usize)
+        .min(u16::MAX as usize) as u16
+}
+
+fn confirm_scroll_limit(width: u16, height: u16, details: &[ReportLine]) -> u16 {
+    if width < 24 || height < 15 {
+        return 0;
+    }
+    let compact = width.saturating_sub(2) < NARROW_TERMINAL_BREAKPOINT
+        || height.saturating_sub(2) < MIN_DETAIL_HEIGHT;
+    let header_height = if compact { COMPACT_HEADER_HEIGHT } else { 5 };
+    let visible = height
+        .saturating_sub(2)
+        .saturating_sub(header_height)
+        .saturating_sub(5)
+        .saturating_sub(1)
+        .saturating_sub(3)
+        .max(1);
+    let line_width = width.saturating_sub(6).max(1) as usize;
+    let wrapped_lines = details
+        .iter()
+        .map(|line| {
+            Line::raw(line.text.as_str())
+                .width()
+                .max(1)
+                .div_ceil(line_width)
+        })
+        .sum::<usize>()
+        .saturating_add(3);
+    wrapped_lines
+        .saturating_sub(visible as usize)
+        .min(u16::MAX as usize) as u16
+}
+
 fn inset(area: Rect, horizontal: u16, vertical: u16) -> Rect {
     if area.width <= horizontal * 2 || area.height <= vertical * 2 {
         return area;
@@ -813,9 +1562,10 @@ mod tests {
     use ratatui::style::Color;
 
     use super::{
-        Action, BRAND_BLUE, BRAND_CORAL, BRAND_GREEN, BRAND_YELLOW, HomeApp, LOGO_HEIGHT,
-        LOGO_WIDTH, NARROW_TERMINAL_BREAKPOINT, logo_color, render, render_action_shell,
-        render_logo,
+        Action, ActionReport, BRAND_BLUE, BRAND_CORAL, BRAND_GREEN, BRAND_YELLOW, HomeApp,
+        LOGO_HEIGHT, LOGO_WIDTH, NARROW_TERMINAL_BREAKPOINT, PromptChoice, ReportLine, ReportTone,
+        logo_color, render, render_choice_screen, render_confirm_screen, render_input_screen,
+        render_logo, render_report_screen, render_running_screen,
     };
     use crate::status::{
         HomeAction, HomeChanges, HomeIssue, HomePullRequest, HomeStatus, HomeUpstream,
@@ -879,18 +1629,99 @@ mod tests {
     }
 
     #[test]
-    fn renders_action_shell_without_leaving_the_full_screen_layout() {
+    fn renders_every_action_phase_inside_the_full_screen_layout() {
         for (width, height) in [(110, 32), (58, 24), (42, 18)] {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).expect("test terminal");
-            let mut output_row = 0;
+            let choices = vec![
+                PromptChoice::new("feat", "新しい機能を追加する"),
+                PromptChoice::new("fix", "不具合を修正する"),
+            ];
+            let report = ActionReport {
+                title: "環境を診断".into(),
+                summary: "完了しました".into(),
+                ok: true,
+                lines: vec![ReportLine::new(
+                    "✓ hooks: hk管理のGit hookが有効です",
+                    ReportTone::Success,
+                )],
+            };
             terminal
                 .draw(|frame| {
-                    output_row = render_action_shell(frame, Action::Commit, &status());
+                    render_choice_screen(
+                        frame,
+                        Action::Commit,
+                        &status(),
+                        "COMMIT · 1/4",
+                        "変更の種類",
+                        "変更内容に合う種類を選びます。",
+                        &choices,
+                        0,
+                    );
                 })
-                .expect("action shell render");
-            assert!(output_row < height);
+                .expect("choice render");
+            terminal
+                .draw(|frame| {
+                    render_input_screen(
+                        frame,
+                        Action::Commit,
+                        &status(),
+                        "COMMIT · 2/4",
+                        "変更内容",
+                        "何を変えたか入力します。",
+                        &"UIを統一".chars().collect::<Vec<_>>(),
+                        5,
+                        None,
+                        true,
+                    );
+                })
+                .expect("input render");
+            terminal
+                .draw(|frame| {
+                    render_confirm_screen(
+                        frame,
+                        Action::Commit,
+                        &status(),
+                        "CONFIRM",
+                        "commitしますか？",
+                        "内容を確認してください。",
+                        &report.lines,
+                        0,
+                        false,
+                        "commitする",
+                        "戻る",
+                    );
+                })
+                .expect("confirm render");
+            terminal
+                .draw(|frame| {
+                    render_running_screen(frame, Action::Doctor, &status(), "環境を診断しています");
+                })
+                .expect("running render");
+            terminal
+                .draw(|frame| {
+                    render_report_screen(frame, Action::Doctor, &status(), &report, 0);
+                })
+                .expect("report render");
         }
+    }
+
+    #[test]
+    fn command_output_is_sanitized_and_colored_for_the_result_view() {
+        let report = ActionReport::from_output(
+            Action::Doctor,
+            false,
+            "\u{1b}[32m✓ hooks: OK\u{1b}[0m\nWARN  miseを確認してください\n",
+            "arttra: doctor found setup problems\n",
+        );
+        assert!(!report.ok);
+        assert_eq!(report.lines[0].text, "✓ hooks: OK");
+        assert_eq!(report.lines[0].tone, ReportTone::Success);
+        assert_eq!(report.lines[1].tone, ReportTone::Warning);
+        assert_eq!(
+            report.lines.last().expect("stderr line").tone,
+            ReportTone::Error
+        );
     }
 
     #[test]

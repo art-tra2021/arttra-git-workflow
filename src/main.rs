@@ -689,45 +689,716 @@ fn tui() -> Result<()> {
         let Some(action) = shell.select(&home)? else {
             return Ok(());
         };
-        shell.begin_action(action, &home)?;
-
-        let result = match action {
-            tui::Action::Status => status::show(None, false, &policy.branch),
-            tui::Action::Tasks => tasks::show(false, false, false, &policy.tasks),
-            tui::Action::Issue => issue(IssueArgs::default()),
-            tui::Action::Branch => branch_command(BranchArgs::default()),
-            tui::Action::Commit => commit(CommitArgs::default()),
-            tui::Action::Push => push(PushArgs::default()),
-            tui::Action::PullRequest => pull_request(PullRequestArgs {
-                create: true,
-                ..PullRequestArgs::default()
-            }),
-            tui::Action::Presence => presence::check(&policy.presence, false),
-            tui::Action::Check => check(false, false),
-            tui::Action::Rules => governance::rules(10, None, false),
-            tui::Action::Doctor => doctor(false),
-            tui::Action::Context => context(false),
-            tui::Action::Exit => Ok(()),
-        };
-
         if !shell.is_full_screen() {
-            return result;
+            return run_simple_action(action, &policy);
         }
-        let visible_error = result
-            .as_ref()
-            .err()
-            .filter(|error| !interactive_operation_cancelled(error));
-        if !shell.finish_action(visible_error)? {
+
+        let report = match run_full_screen_action(&mut shell, action, &home, &policy) {
+            Ok(Some(report)) => report,
+            Ok(None) => continue,
+            Err(error) => tui::ActionReport::error(action, &error),
+        };
+        if !shell.report(action, &home, &report)? {
             return Ok(());
         }
     }
 }
 
-fn interactive_operation_cancelled(error: &anyhow::Error) -> bool {
-    matches!(
-        error.downcast_ref::<InquireError>(),
-        Some(InquireError::OperationCanceled | InquireError::OperationInterrupted)
+fn run_simple_action(action: tui::Action, policy: &Policy) -> Result<()> {
+    match action {
+        tui::Action::Status => status::show(None, false, &policy.branch),
+        tui::Action::Tasks => tasks::show(false, false, false, &policy.tasks),
+        tui::Action::Issue => issue(IssueArgs::default()),
+        tui::Action::Branch => branch_command(BranchArgs::default()),
+        tui::Action::Commit => commit(CommitArgs::default()),
+        tui::Action::Push => push(PushArgs::default()),
+        tui::Action::PullRequest => pull_request(PullRequestArgs {
+            create: true,
+            ..PullRequestArgs::default()
+        }),
+        tui::Action::Presence => presence::check(&policy.presence, false),
+        tui::Action::Check => check(false, false),
+        tui::Action::Rules => governance::rules(10, None, false),
+        tui::Action::Doctor => doctor(false),
+        tui::Action::Context => context(false),
+        tui::Action::Exit => Ok(()),
+    }
+}
+
+fn run_full_screen_action(
+    shell: &mut tui::Shell,
+    action: tui::Action,
+    home: &status::HomeStatus,
+    policy: &Policy,
+) -> Result<Option<tui::ActionReport>> {
+    match action {
+        tui::Action::Status => run_read_only_action(shell, action, home, &["status"]),
+        tui::Action::Tasks => run_read_only_action(shell, action, home, &["tasks"]),
+        tui::Action::Issue => tui_issue(shell, action, home),
+        tui::Action::Branch => tui_branch(shell, action, home, policy),
+        tui::Action::Commit => tui_commit(shell, action, home, policy),
+        tui::Action::Push => tui_push(shell, action, home),
+        tui::Action::PullRequest => tui_pull_request(shell, action, home, policy),
+        tui::Action::Presence => run_read_only_action(shell, action, home, &["presence", "check"]),
+        tui::Action::Check => run_read_only_action(shell, action, home, &["check"]),
+        tui::Action::Rules => run_read_only_action(shell, action, home, &["rules"]),
+        tui::Action::Doctor => run_read_only_action(shell, action, home, &["doctor"]),
+        tui::Action::Context => run_read_only_action(shell, action, home, &["context"]),
+        tui::Action::Exit => Ok(None),
+    }
+}
+
+fn run_read_only_action(
+    shell: &mut tui::Shell,
+    action: tui::Action,
+    home: &status::HomeStatus,
+    args: &[&str],
+) -> Result<Option<tui::ActionReport>> {
+    let args = args
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<Vec<_>>();
+    let output = run_tui_command(shell, action, home, &args, "情報を取得しています")?;
+    Ok(Some(report_from_output(action, &output)))
+}
+
+fn run_tui_command(
+    shell: &mut tui::Shell,
+    action: tui::Action,
+    home: &status::HomeStatus,
+    args: &[String],
+    message: &str,
+) -> Result<Output> {
+    shell.running(action, home, message)?;
+    let executable =
+        std::env::current_exe().context("git arの実行ファイルを確認できませんでした")?;
+    Command::new(executable)
+        .args(args)
+        .env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .context("git arの処理を起動できませんでした")
+}
+
+fn report_from_output(action: tui::Action, output: &Output) -> tui::ActionReport {
+    tui::ActionReport::from_output(
+        action,
+        output.status.success(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn preview_and_execute(
+    shell: &mut tui::Shell,
+    action: tui::Action,
+    home: &status::HomeStatus,
+    preview_args: &[String],
+    execute_args: &[String],
+    title: &str,
+    help: &str,
+    accept_label: &str,
+) -> Result<Option<tui::ActionReport>> {
+    let preview = run_tui_command(shell, action, home, preview_args, "内容を検証しています")?;
+    let preview_report = report_from_output(action, &preview);
+    if !preview.status.success() {
+        return Ok(Some(preview_report));
+    }
+    let confirmed = shell.confirm(
+        action,
+        home,
+        "CONFIRM",
+        title,
+        help,
+        &preview_report.lines,
+        false,
+        accept_label,
+        "戻る",
+    )?;
+    if confirmed != Some(true) {
+        return Ok(None);
+    }
+    let output = run_tui_command(shell, action, home, execute_args, "処理を実行しています")?;
+    Ok(Some(report_from_output(action, &output)))
+}
+
+fn tui_issue(
+    shell: &mut tui::Shell,
+    action: tui::Action,
+    home: &status::HomeStatus,
+) -> Result<Option<tui::ActionReport>> {
+    let kinds = [
+        IssueKind::Intake,
+        IssueKind::Work,
+        IssueKind::Task,
+        IssueKind::Business,
+    ];
+    let choices = vec![
+        tui::PromptChoice::new("相談・受付", "まだ整理できていない依頼やアイデア"),
+        tui::PromptChoice::new("作業チケット", "単独で目的と完了条件を持つ仕事"),
+        tui::PromptChoice::new("小タスク", "親Issueを分けた具体的な作業"),
+        tui::PromptChoice::new("営業・業務変更", "提案、契約、運用など開発以外の仕事"),
+    ];
+    let Some(kind_index) = shell.choose(
+        action,
+        home,
+        "ISSUE · 1/7",
+        "Issueの種類",
+        "迷ったら、完了条件が決まっている仕事は作業チケットを選びます。",
+        &choices,
+        1,
+    )?
+    else {
+        return Ok(None);
+    };
+    let kind = kinds[kind_index];
+
+    let merge = if kind.needs_merge_policy() {
+        let modes = [
+            MergeMode::Review,
+            MergeMode::SelfMerge,
+            MergeMode::Emergency,
+        ];
+        let choices = vec![
+            tui::PromptChoice::new("通常レビュー", "他の人の承認後にマージします"),
+            tui::PromptChoice::new("本人マージ可", "権限がある本人がCI通過後にマージできます"),
+            tui::PromptChoice::new("緊急マージ", "理由を残して先に反映し、事後確認します"),
+        ];
+        let Some(index) = shell.choose(
+            action,
+            home,
+            "ISSUE · 2/7",
+            "マージ方針",
+            "変更の影響と権限に合わせて選びます。",
+            &choices,
+            0,
+        )?
+        else {
+            return Ok(None);
+        };
+        Some(modes[index])
+    } else {
+        None
+    };
+
+    let Some(title) = shell.input(
+        action,
+        home,
+        "ISSUE · 3/7",
+        "Issueタイトル",
+        "何を実現する仕事かを一文で入力します。",
+        "",
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(background) = shell.input(
+        action,
+        home,
+        "ISSUE · 4/7",
+        "背景",
+        "なぜ今この仕事が必要なのかを入力します。",
+        "",
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(goal) = shell.input(
+        action,
+        home,
+        "ISSUE · 5/7",
+        "目的",
+        "完了後に誰がどう助かるかを入力します。",
+        "",
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(done) = shell.input(
+        action,
+        home,
+        "ISSUE · 6/7",
+        "完了条件",
+        "確認できる状態を一文で入力します。",
+        "",
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(with_relations) = shell.confirm(
+        action,
+        home,
+        "ISSUE · 7/7",
+        "依存関係と目標日",
+        "親Issue、ブロック関係、目標日も設定できます。",
+        &[],
+        false,
+        "設定する",
+        "設定しない",
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let mut parent = String::new();
+    let mut blocked_by = String::new();
+    let mut blocking = String::new();
+    let mut target_date = String::new();
+    if with_relations {
+        let Some(value) = shell.input(
+            action,
+            home,
+            "ISSUE · 追加 1/4",
+            "親Issue番号",
+            "このIssueをまとめる上位Issueです。例: 60",
+            "",
+            false,
+        )?
+        else {
+            return Ok(None);
+        };
+        parent = value;
+        let Some(value) = shell.input(
+            action,
+            home,
+            "ISSUE · 追加 2/4",
+            "先に終わる必要があるIssue",
+            "このIssueを止めている仕事です。複数はカンマ区切り。",
+            "",
+            false,
+        )?
+        else {
+            return Ok(None);
+        };
+        blocked_by = value;
+        let Some(value) = shell.input(
+            action,
+            home,
+            "ISSUE · 追加 3/4",
+            "このIssueの完了を待つIssue",
+            "このIssueが止めている後続の仕事です。複数はカンマ区切り。",
+            "",
+            false,
+        )?
+        else {
+            return Ok(None);
+        };
+        blocking = value;
+        let Some(value) = shell.input(
+            action,
+            home,
+            "ISSUE · 追加 4/4",
+            "目標日",
+            "YYYY-MM-DD形式。Projectsとカレンダーへ反映されます。",
+            "",
+            false,
+        )?
+        else {
+            return Ok(None);
+        };
+        target_date = value;
+    }
+
+    let mut args = vec!["issue".into(), "--kind".into(), issue_kind_arg(kind).into()];
+    if let Some(merge) = merge {
+        args.extend(["--merge".into(), merge_mode_arg(merge).into()]);
+    }
+    args.extend([
+        "--title".into(),
+        title,
+        "--background".into(),
+        background,
+        "--goal".into(),
+        goal,
+        "--done".into(),
+        done,
+    ]);
+    push_optional_arg(&mut args, "--parent", &parent);
+    push_repeated_args(&mut args, "--blocked-by", &blocked_by);
+    push_repeated_args(&mut args, "--blocking", &blocking);
+    push_optional_arg(&mut args, "--target-date", &target_date);
+    let mut execute_args = args.clone();
+    execute_args.push("--create".into());
+    preview_and_execute(
+        shell,
+        action,
+        home,
+        &args,
+        &execute_args,
+        "この内容でIssueを作成しますか？",
+        "登録前に内容を確認してください。",
+        "作成する",
+    )
+}
+
+fn tui_branch(
+    shell: &mut tui::Shell,
+    action: tui::Action,
+    home: &status::HomeStatus,
+    policy: &Policy,
+) -> Result<Option<tui::ActionReport>> {
+    let choices = policy
+        .branch
+        .allowed_types
+        .iter()
+        .map(|kind| tui::PromptChoice::new(kind, branch_type_description(kind)))
+        .collect::<Vec<_>>();
+    let Some(index) = shell.choose(
+        action,
+        home,
+        "BRANCH · 1/5",
+        "branchの種類",
+        "通常の機能追加はfeature、不具合修正はfixを選びます。",
+        &choices,
+        0,
+    )?
+    else {
+        return Ok(None);
+    };
+    let kind = policy.branch.allowed_types[index].clone();
+    let issue_default = home
+        .issue
+        .as_ref()
+        .map(|issue| issue.number.to_string())
+        .unwrap_or_default();
+    let Some(issue) = shell.input(
+        action,
+        home,
+        "BRANCH · 2/5",
+        "関連Issue番号",
+        "このbranchで対応するIssue番号です。",
+        &issue_default,
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(slug) = shell.input(
+        action,
+        home,
+        "BRANCH · 3/5",
+        "作業内容",
+        "短い英単語で入力します。空白はハイフンへ変換されます。",
+        "",
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(owner) = shell.input(
+        action,
+        home,
+        "BRANCH · 4/5",
+        "担当者",
+        "GitHubのユーザー名です。通常は自動入力のままで構いません。",
+        &branch::detect_owner(),
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(from) = shell.input(
+        action,
+        home,
+        "BRANCH · 5/5",
+        "作成元branch",
+        "空欄ならGitHubのdefault branchを使用します。",
+        "",
+        false,
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut args = vec![
+        "branch".into(),
+        "--type".into(),
+        kind,
+        "--issue".into(),
+        issue,
+        "--slug".into(),
+        slug,
+        "--owner".into(),
+        owner,
+    ];
+    push_optional_arg(&mut args, "--from", &from);
+    let mut execute_args = args.clone();
+    execute_args.push("--create".into());
+    preview_and_execute(
+        shell,
+        action,
+        home,
+        &args,
+        &execute_args,
+        "このbranchを作成しますか？",
+        "Issueに紐づけて作成し、そのbranchへ移動します。",
+        "作成する",
+    )
+}
+
+fn tui_commit(
+    shell: &mut tui::Shell,
+    action: tui::Action,
+    home: &status::HomeStatus,
+    policy: &Policy,
+) -> Result<Option<tui::ActionReport>> {
+    let choices = policy
+        .commit
+        .allowed_types
+        .iter()
+        .map(|kind| tui::PromptChoice::new(kind, commit_type_description(kind)))
+        .collect::<Vec<_>>();
+    let Some(index) = shell.choose(
+        action,
+        home,
+        "COMMIT · 1/4",
+        "変更の種類",
+        "迷ったら、機能追加はfeat、不具合修正はfixを選びます。",
+        &choices,
+        0,
+    )?
+    else {
+        return Ok(None);
+    };
+    let kind = policy.commit.allowed_types[index].clone();
+    let Some(summary) = shell.input(
+        action,
+        home,
+        "COMMIT · 2/4",
+        "変更内容",
+        "何を変えたかを一文で入力します。空白のままでは進めません。",
+        "",
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(scope) = shell.input(
+        action,
+        home,
+        "COMMIT · 3/4",
+        "変更範囲 scope",
+        "例: cli / slack / docs。迷ったら空欄で構いません。",
+        "",
+        false,
+    )?
+    else {
+        return Ok(None);
+    };
+    let issue_default = home
+        .issue
+        .as_ref()
+        .map(|issue| issue.number.to_string())
+        .unwrap_or_default();
+    let Some(issue) = shell.input(
+        action,
+        home,
+        "COMMIT · 4/4",
+        "関連Issue番号",
+        "Issueがない小さな作業なら空欄にできます。",
+        &issue_default,
+        false,
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut base_args = vec![
+        "commit".into(),
+        "--type".into(),
+        kind,
+        "--summary".into(),
+        summary,
+    ];
+    push_optional_arg(&mut base_args, "--scope", &scope);
+    push_optional_arg(&mut base_args, "--issue", &issue);
+    let mut preview_args = base_args.clone();
+    preview_args.push("--dry-run".into());
+    let mut execute_args = base_args;
+    execute_args.push("--yes".into());
+    preview_and_execute(
+        shell,
+        action,
+        home,
+        &preview_args,
+        &execute_args,
+        "この内容でcommitしますか？",
+        "stage済みの変更だけがcommitされます。",
+        "commitする",
+    )
+}
+
+fn tui_push(
+    shell: &mut tui::Shell,
+    action: tui::Action,
+    home: &status::HomeStatus,
+) -> Result<Option<tui::ActionReport>> {
+    let Some(remote) = shell.input(
+        action,
+        home,
+        "PUSH · 1/1",
+        "送信先 remote",
+        "通常はoriginのままで構いません。force pushは行いません。",
+        "origin",
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    let base_args = vec!["push".into(), "--remote".into(), remote];
+    let mut preview_args = base_args.clone();
+    preview_args.push("--dry-run".into());
+    let mut execute_args = base_args;
+    execute_args.push("--yes".into());
+    preview_and_execute(
+        shell,
+        action,
+        home,
+        &preview_args,
+        &execute_args,
+        "このbranchをGitHubへpushしますか？",
+        "送信先とcommit数を確認してください。",
+        "pushする",
+    )
+}
+
+fn tui_pull_request(
+    shell: &mut tui::Shell,
+    action: tui::Action,
+    home: &status::HomeStatus,
+    policy: &Policy,
+) -> Result<Option<tui::ActionReport>> {
+    let suggested_title =
+        delivery::suggested_pull_request_title(home.issue.as_ref().map(|issue| issue.number))
+            .unwrap_or_default();
+    let Some(title) = shell.input(
+        action,
+        home,
+        "PULL REQUEST · 1/5",
+        "Pull Requestタイトル",
+        "何を変え、何が良くなるかを一文で入力します。",
+        &suggested_title,
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    let issue_default = home
+        .issue
+        .as_ref()
+        .map(|issue| issue.number.to_string())
+        .unwrap_or_default();
+    let Some(issue) = shell.input(
+        action,
+        home,
+        "PULL REQUEST · 2/5",
+        "関連Issue番号",
+        "branch名から推測できる場合は自動入力されています。",
+        &issue_default,
+        false,
+    )?
+    else {
+        return Ok(None);
+    };
+    let default_base = policy
+        .branch
+        .protected_branches
+        .first()
+        .map(String::as_str)
+        .unwrap_or("main");
+    let Some(base) = shell.input(
+        action,
+        home,
+        "PULL REQUEST · 3/5",
+        "作成先branch",
+        "通常はmainのままで構いません。",
+        default_base,
+        true,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(draft) = shell.confirm(
+        action,
+        home,
+        "PULL REQUEST · 4/5",
+        "Draftにしますか？",
+        "作業途中ならDraftにすると、完成までレビュー要求を保留できます。",
+        &[],
+        true,
+        "Draftにする",
+        "レビュー可能",
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(reviewers) = shell.input(
+        action,
+        home,
+        "PULL REQUEST · 5/5",
+        "reviewer",
+        "GitHubユーザー名をカンマ区切りで入力。空欄なら自動選定に任せます。",
+        "",
+        false,
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut args = vec!["pr".into(), "--title".into(), title, "--base".into(), base];
+    push_optional_arg(&mut args, "--issue", &issue);
+    if draft {
+        args.push("--draft".into());
+    }
+    push_repeated_args(&mut args, "--reviewer", &reviewers);
+    let mut execute_args = args.clone();
+    execute_args.extend(["--create".into(), "--yes".into()]);
+    preview_and_execute(
+        shell,
+        action,
+        home,
+        &args,
+        &execute_args,
+        "この内容でPull Requestを作成しますか？",
+        "Issue、作成先、公開状態、reviewerを確認してください。",
+        "作成する",
+    )
+}
+
+fn push_optional_arg(args: &mut Vec<String>, name: &str, value: &str) {
+    if !value.trim().is_empty() {
+        args.extend([name.into(), value.trim().into()]);
+    }
+}
+
+fn push_repeated_args(args: &mut Vec<String>, name: &str, values: &str) {
+    for value in values
+        .split([',', '、', ' '])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        args.extend([name.into(), value.into()]);
+    }
+}
+
+fn issue_kind_arg(kind: IssueKind) -> &'static str {
+    match kind {
+        IssueKind::Intake => "intake",
+        IssueKind::Work => "work",
+        IssueKind::Task => "task",
+        IssueKind::Business => "business",
+    }
+}
+
+fn merge_mode_arg(mode: MergeMode) -> &'static str {
+    match mode {
+        MergeMode::Review => "review",
+        MergeMode::SelfMerge => "self",
+        MergeMode::Emergency => "emergency",
+    }
 }
 
 fn commit(mut args: CommitArgs) -> Result<()> {
