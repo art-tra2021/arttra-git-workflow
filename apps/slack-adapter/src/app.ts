@@ -44,6 +44,12 @@ export interface SlackAdapterDependencies extends IssueMetadataSource {
   createIssue(command: CreateIssueCommand): Promise<CreatedIssue>;
   validateIssueAuthorization(command: CreateIssueCommand): Promise<void>;
   repositoryPermission(repository: string, githubLogin: string): Promise<RepositoryPermission>;
+  stopSelfMerge?(
+    repository: string,
+    issueNumber: number,
+    actorLogin: string,
+    reason: string,
+  ): Promise<{ number: number; title: string; url: string; assigneeLogins: string[] }>;
 }
 
 export interface SlackAppOptions {
@@ -73,6 +79,7 @@ export interface SlackAppOptions {
   syncProjectProjection?: (request: ProjectProjectionRequest) => Promise<ProjectProjectionResult>;
   receiver?: Receiver;
   tokenVerificationEnabled?: boolean;
+  resolveSlackUserId?: (githubLogin: string) => Promise<string | null>;
 }
 
 export interface ProjectProjectionRequest {
@@ -445,24 +452,48 @@ export function createSlackApp(
       if (!schema) {
         throw new Error(`Issue templateが見つかりません: ${metadata.template}`);
       }
+      const fields = issueFieldValues(view.state.values, schema);
+      if (metadata.template === "work" || metadata.template === "business") {
+        fields.hierarchy = selectedValue(view.state.values, "hierarchy", "value");
+      }
       const command = buildCreateIssueCommand({
         repository: metadata.repository,
         template: metadata.template,
         title: inputValue(view.state.values, "title", "value"),
-        fields: issueFieldValues(view.state.values, schema),
+        fields,
         relationships: issueRelationshipValues(view.state.values),
         actor: body.user.id,
         slackTeamId: metadata.slackTeamId,
         assigneeSlackUserIds: selectedUsers(view.state.values, "assignees", "value"),
         reviewerSlackUserIds: selectedUsers(view.state.values, "reviewers", "value"),
-        ...(metadata.template === "work"
+        ...(metadata.template === "work" || metadata.template === "business"
           ? { mergeMode: selectedValue(view.state.values, "merge-policy", "value") }
           : {}),
         schema,
       });
       const resolved = await options.identityService.resolveCommand(command, metadata.slackTeamId);
       let approvalReason: string | null = null;
-      if (requiresIssueApproval(resolved)) {
+      if (resolved.fields.merge === "自分でマージ可") {
+        const identity = await options.identityService.get(metadata.slackTeamId, body.user.id);
+        let permission: RepositoryPermission = "none";
+        if (identity) {
+          permission = await dependencies.repositoryPermission(
+            command.repository,
+            identity.githubLogin,
+          );
+        }
+        const decision = decidePrivilegedMerge(
+          body.user.id,
+          selfApprovers,
+          identity?.githubLogin ?? null,
+          permission,
+        );
+        if (!decision.direct) {
+          throw new Error(
+            `セルフマージを直接指定する権限がありません。${decision.reason} 通常レビューを選ぶか、管理者へ設定を依頼してください。`,
+          );
+        }
+      } else if (requiresIssueApproval(resolved)) {
         const identity = await options.identityService.get(metadata.slackTeamId, body.user.id);
         let permission: RepositoryPermission = "none";
         if (identity) {
@@ -625,6 +656,105 @@ export function createSlackApp(
     }
   });
 
+  app.action("ar.self-merge.stop", async ({ ack, action, body, client }) => {
+    await ack();
+    if (action.type !== "button" || !action.value || !("trigger_id" in body)) return;
+    const target = parseSelfMergeTarget(action.value);
+    if (!target) return;
+    const message = "message" in body ? body.message : undefined;
+    const channel = "channel" in body ? body.channel : undefined;
+    const channelId = channel && "id" in channel ? channel.id : "";
+    const rootTs = message && "ts" in message ? (message.thread_ts ?? message.ts) : "";
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: {
+        type: "modal",
+        callback_id: "ar.self-merge.stop.submit",
+        private_metadata: JSON.stringify({ ...target, channelId, rootTs }),
+        title: { type: "plain_text", text: "セルフマージ停止" },
+        submit: { type: "plain_text", text: "停止する" },
+        close: { type: "plain_text", text: "キャンセル" },
+        blocks: [
+          {
+            type: "input",
+            block_id: "reason",
+            label: { type: "plain_text", text: "停止理由" },
+            element: {
+              type: "plain_text_input",
+              action_id: "value",
+              multiline: true,
+              placeholder: { type: "plain_text", text: "レビューが必要な理由を記載してください" },
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  app.view("ar.self-merge.stop.submit", async ({ ack, body, view, client }) => {
+    const target = parseSelfMergeTarget(view.private_metadata);
+    const reason = inputValue(view.state.values, "reason", "value").trim();
+    if (!target || !reason) {
+      await ack({
+        response_action: "errors",
+        errors: { reason: "停止理由を入力してください。" },
+      });
+      return;
+    }
+    try {
+      if (!dependencies.stopSelfMerge) {
+        throw new Error("セルフマージ停止に対応するGitHub App backendが設定されていません。");
+      }
+      const teamId = "team" in body && body.team?.id ? body.team.id : "";
+      const actorLogin = await options.identityService.requireGitHubLogin(teamId, body.user.id);
+      const permission = await dependencies.repositoryPermission(target.repository, actorLogin);
+      if (!(["write", "maintain", "admin"] as RepositoryPermission[]).includes(permission)) {
+        throw new Error("セルフマージを停止するにはGitHubのwrite以上の権限が必要です。");
+      }
+      const issue = await dependencies.stopSelfMerge(
+        target.repository,
+        target.issueNumber,
+        actorLogin,
+        reason,
+      );
+      await ack();
+      const ownerIds = options.resolveSlackUserId
+        ? await Promise.all(issue.assigneeLogins.map(options.resolveSlackUserId))
+        : [];
+      const mentions = ownerIds
+        .filter((value): value is string => Boolean(value))
+        .map((value) => `<@${value}>`)
+        .join(" ");
+      if (target.channelId) {
+        try {
+          await client.chat.postMessage({
+            channel: target.channelId,
+            ...(target.rootTs ? { thread_ts: target.rootTs, reply_broadcast: false } : {}),
+            text: slackPlain(
+              "warning",
+              `${mentions ? `${mentions} ` : ""}<@${body.user.id}> がセルフマージを停止しました。理由: ${reason} ${issue.url}`,
+            ),
+            unfurl_links: false,
+            unfurl_media: false,
+          });
+        } catch (error) {
+          console.error(
+            error instanceof Error
+              ? `セルフマージ停止後のSlack通知に失敗しました: ${error.message}`
+              : "セルフマージ停止後のSlack通知に失敗しました。",
+          );
+        }
+      }
+    } catch (error) {
+      await ack({
+        response_action: "errors",
+        errors: {
+          reason: error instanceof Error ? error.message : "セルフマージを停止できませんでした。",
+        },
+      });
+    }
+  });
+
   app.action("ar.claim", async ({ ack, action, body, respond }) => {
     await ack();
     if (action.type !== "button" || !action.value) {
@@ -705,6 +835,35 @@ function projectProjectionErrorMessage(error: unknown): string {
     return "Slack Canvasへのアクセスを設定できません。Appの参加先とCanvas権限を確認してください。";
   }
   return error instanceof Error ? error.message : "Project投影を同期できませんでした。";
+}
+
+interface SelfMergeTarget {
+  repository: string;
+  issueNumber: number;
+  channelId?: string;
+  rootTs?: string;
+}
+
+function parseSelfMergeTarget(value: string): SelfMergeTarget | null {
+  try {
+    const parsed = JSON.parse(value) as Partial<SelfMergeTarget>;
+    if (
+      !parsed.repository ||
+      !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(parsed.repository) ||
+      !Number.isSafeInteger(parsed.issueNumber) ||
+      Number(parsed.issueNumber) < 1
+    ) {
+      return null;
+    }
+    return {
+      repository: parsed.repository,
+      issueNumber: Number(parsed.issueNumber),
+      ...(parsed.channelId ? { channelId: parsed.channelId } : {}),
+      ...(parsed.rootTs ? { rootTs: parsed.rootTs } : {}),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function parseIssueUrl(value: string): { repository: string; number: number } | null {
@@ -1000,7 +1159,12 @@ export function issueDetailModal(metadata: IssueModalMetadata, schema: IssueTemp
       },
       issueInput("title", "タイトル", false),
       ...schema.fields
-        .filter((field) => field.id !== "merge" && !ISSUE_RELATIONSHIP_FIELD_IDS.has(field.id))
+        .filter(
+          (field) =>
+            field.id !== "merge" &&
+            field.id !== "hierarchy" &&
+            !ISSUE_RELATIONSHIP_FIELD_IDS.has(field.id),
+        )
         .map((field) =>
           field.kind === "select"
             ? issueSelect(field.id, field.label, field.options ?? [], field.required)
@@ -1012,11 +1176,39 @@ export function issueDetailModal(metadata: IssueModalMetadata, schema: IssueTemp
                 field.initialValue,
               ),
         ),
+      ...(schema.id === "work" || schema.id === "business" ? [issueHierarchyPolicy()] : []),
       ...issueRelationshipInputs(schema),
-      ...(schema.id === "work" ? [issueMergePolicy()] : []),
+      ...(schema.id === "work" || schema.id === "business" ? [issueMergePolicy()] : []),
       issueMembers("assignees", "担当者"),
       issueMembers("reviewers", "予定レビュワー"),
     ],
+  };
+}
+
+function issueHierarchyPolicy() {
+  const descriptions: Record<string, string> = {
+    トップレベル成果: "新しい成果・案件の起点として作ります。親Issueは指定しません。",
+    既存Issueの子: "既存の成果を分解したIssueとして作ります。親Issueが必須です。",
+  };
+  const options = ["トップレベル成果", "既存Issueの子"];
+  return {
+    type: "input" as const,
+    block_id: "hierarchy",
+    label: { type: "plain_text" as const, text: "Issueの階層" },
+    hint: {
+      type: "plain_text" as const,
+      text: "親子関係とblocked-byは別です。子を選んだ場合は下の親Issueも指定してください。",
+    },
+    element: {
+      type: "static_select" as const,
+      action_id: "value",
+      initial_option: describedOption(
+        options[0] ?? "",
+        options[0] ?? "",
+        descriptions[options[0] ?? ""] ?? "",
+      ),
+      options: options.map((value) => describedOption(value, value, descriptions[value] ?? "")),
+    },
   };
 }
 
@@ -1066,7 +1258,7 @@ function issueRelationshipInput(blockId: string, label: string, required: boolea
 function issueMergePolicy() {
   const descriptions: Record<string, string> = {
     "通常レビュー（既定）": "PR作成者以外の承認を受けてからマージします。",
-    自分でマージ可: "許可された人だけ直通し、それ以外はSlackで承認を求めます。",
+    自分でマージ可: "本人が必須CI後にマージします。Slackへ強調通知し、権限者が停止できます。",
     "緊急マージ（事後レビュー必須）": "緊急時用です。権限確認またはSlack承認が必要です。",
   };
   return {
@@ -1075,7 +1267,7 @@ function issueMergePolicy() {
     label: { type: "plain_text" as const, text: "PRの確認方法" },
     hint: {
       type: "plain_text" as const,
-      text: "権限が足りない指定は拒否せず、許可できる人へ承認依頼を送ります。",
+      text: "セルフマージは事前承認を待ちません。緊急マージだけ権限確認または承認が必要です。",
     },
     element: {
       type: "static_select" as const,

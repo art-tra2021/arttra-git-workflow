@@ -14,6 +14,7 @@ body:
     id: action
     attributes:
       label: やること
+      description: 親Issueの成果へどう寄与するかが分かる単位で書く。
     validations:
       required: true
   - type: textarea
@@ -23,3 +24,8 @@ body:
       value: "- [ ] "
     validations:
       required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: 触ってよい範囲・触らない範囲
+      description: 他の人へ渡せるTaskでは、対象、禁止範囲、確認方法、相談先を記載する。

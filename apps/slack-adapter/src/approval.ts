@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { StateStore } from "./state-store.ts";
 import type { CreatedIssue, CreateIssueCommand, RepositoryPermission } from "./types.ts";
 
-const PRIVILEGED_MERGE_MODES = new Set(["自分でマージ可", "緊急マージ（事後レビュー必須）"]);
+const APPROVAL_REQUIRED_MERGE_MODES = new Set(["緊急マージ（事後レビュー必須）"]);
 const APPROVAL_NAMESPACE = "issue-approval";
 const AUDIT_NAMESPACE = "issue-approval-audit";
 
@@ -216,7 +216,10 @@ export class IssueApprovalService {
 }
 
 export function requiresIssueApproval(command: CreateIssueCommand): boolean {
-  return command.template === "work" && PRIVILEGED_MERGE_MODES.has(command.fields.merge ?? "");
+  return (
+    (command.template === "work" || command.template === "business") &&
+    APPROVAL_REQUIRED_MERGE_MODES.has(command.fields.merge ?? "")
+  );
 }
 
 export function canApproveIssue(

@@ -10,7 +10,7 @@ pr_json="$(
 )"
 author="$(jq -r '.author.login' <<<"$pr_json")"
 head_ref="$(jq -r '.headRefName' <<<"$pr_json")"
-issue_number="$(jq -r '.closingIssuesReferences[0].number // empty' <<<"$pr_json")"
+closing_issue_count="$(jq -r '(.closingIssuesReferences // []) | length' <<<"$pr_json")"
 
 # GitHubが検証した依存更新Appだけは、Issueを別途作らずCIを正本にする。
 # branch名だけでは信用せず、Appのloginとprefixの両方を照合する。
@@ -20,11 +20,17 @@ if [[ "$author" == "app/dependabot" && "$head_ref" == dependabot/* ]] ||
 	exit 0
 fi
 
-if [[ -z "$issue_number" ]]; then
+if [[ "$closing_issue_count" -eq 0 ]]; then
 	echo "AR-PR-001: PRにIssueが関連付いていません。本文へ \`Closes #123\` を追加してください。" >&2
 	exit 1
 fi
 
+if [[ "$closing_issue_count" -ne 1 ]]; then
+	echo "AR-PR-005: primary closing Issueはちょうど1件にしてください（現在${closing_issue_count}件）。本文の \`Closes #123\` は1件だけにし、追加の関連Issueは \`Relates to #456\` などで記載してください。" >&2
+	exit 1
+fi
+
+issue_number="$(jq -r '.closingIssuesReferences[0].number' <<<"$pr_json")"
 labels="$(gh api "repos/${GH_REPO}/issues/${issue_number}" --jq '.labels[].name')"
 mode_count="$(grep -Ec '^merge/(review|self|emergency)$' <<<"$labels" || true)"
 if [[ "$mode_count" -ne 1 ]]; then

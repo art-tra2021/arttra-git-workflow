@@ -607,6 +607,7 @@ describe("GitHub App adapter", () => {
           body: "Closes #29",
           draft: false,
           state: "open",
+          mergeable_state: "clean",
           user: { login: "author" },
           head: { sha: "abc123" },
           requested_reviewers: [],
@@ -651,6 +652,7 @@ describe("GitHub App adapter", () => {
       number: 28,
       files: ["src/app.ts"],
       requiredApprovals: 2,
+      mergeableState: "clean",
       approvedReviewerLogins: ["finished"],
       changesRequestedReviewerLogins: [],
       linkedIssues: [
@@ -671,6 +673,55 @@ describe("GitHub App adapter", () => {
       ["frontend"],
     );
     expect(requested).toEqual({ reviewers: ["alice"], team_reviewers: ["frontend"] });
+  });
+
+  test("セルフマージ停止はreview labelへ切り替えて停止者と理由をIssueへ記録する", async () => {
+    const requests: Array<{ url: string; method: string; body: unknown }> = [];
+    let loadCount = 0;
+    const client = dependencies(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app/installations/99/access_tokens")) {
+        return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
+      }
+      if (url.endsWith("/issues/86") && (!init?.method || init.method === "GET")) {
+        loadCount += 1;
+        return json({
+          number: 86,
+          title: "self merge",
+          body: "done",
+          html_url: "https://github.example/issues/86",
+          state: "open",
+          user: { login: "requester" },
+          assignees: [{ login: "owner" }],
+          labels: loadCount === 1 ? ["type/work", "merge/self"] : ["type/work", "merge/review"],
+        });
+      }
+      requests.push({
+        url,
+        method: init?.method ?? "GET",
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      return json([]);
+    });
+
+    const issue = await client.stopSelfMerge(
+      "art-tra2021/arttra-git-workflow",
+      86,
+      "stopper",
+      "影響範囲を第三者が確認する必要があるため",
+    );
+
+    expect(issue.labels).toContain("merge/review");
+    expect(requests.map((request) => [request.method, request.url])).toEqual([
+      ["PATCH", "https://github.example/api/v3/repos/art-tra2021/arttra-git-workflow/issues/86"],
+      [
+        "POST",
+        "https://github.example/api/v3/repos/art-tra2021/arttra-git-workflow/issues/86/comments",
+      ],
+    ]);
+    expect(JSON.stringify(requests.at(-1)?.body)).toContain("@stopper");
+    expect(JSON.stringify(requests.at(-1)?.body)).toContain("影響範囲を第三者が確認");
+    expect(requests[0]?.body).toEqual({ labels: ["type/work", "merge/review"] });
   });
 });
 

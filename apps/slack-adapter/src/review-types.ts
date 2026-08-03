@@ -6,6 +6,8 @@ export interface GitHubIssueContext {
   state: "open" | "closed";
   authorLogin: string;
   assigneeLogins: string[];
+  labels: string[];
+  parentIssueUrl?: string | null;
 }
 
 export interface PullRequestReviewContext {
@@ -18,6 +20,7 @@ export interface PullRequestReviewContext {
   headSha: string;
   draft: boolean;
   state: "open" | "closed";
+  mergeableState?: string;
   body: string;
   files: string[];
   linkedIssues: GitHubIssueContext[];
@@ -51,6 +54,12 @@ export interface GitHubReviewClient {
 export interface GitHubLifecycleClient
   extends Pick<GitHubReviewClient, "loadPullRequestReviewContext"> {
   loadIssueContext(repository: string, issueNumber: number): Promise<GitHubIssueContext>;
+  stopSelfMerge?(
+    repository: string,
+    issueNumber: number,
+    actorLogin: string,
+    reason: string,
+  ): Promise<GitHubIssueContext>;
 }
 
 export interface ReviewRequestReadModel {

@@ -81,6 +81,7 @@ depends = [
   "security:actions",
   "slack:check",
   "setup-ui:test",
+  "pr-policy:test",
   "templates:check",
 ]
 
@@ -202,6 +203,10 @@ run = "bash scripts/setup-ui.sh --show-latest-log"
 [tasks."setup-ui:test"]
 description = "Test setup failure logs and cross-platform clipboard backends"
 run = "bash scripts/setup-ui-test.sh"
+
+[tasks."pr-policy:test"]
+description = "Test deterministic Pull Request to primary Issue policy"
+run = "bash scripts/pr-policy-test.sh"
 
 [tasks.ar]
 description = "Run git-ar from source"

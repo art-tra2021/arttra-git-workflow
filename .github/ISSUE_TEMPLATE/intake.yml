@@ -3,6 +3,11 @@ description: 思いつき、営業相談、不具合らしきものをまず置�
 title: "[Intake] "
 labels: ["type/intake", "status/triage"]
 body:
+  - type: input
+    id: parent
+    attributes:
+      label: 関連する親Issue（任意）
+      description: 既存の成果に関する相談なら指定する。例：#123
   - type: textarea
     id: summary
     attributes:

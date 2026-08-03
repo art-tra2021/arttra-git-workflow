@@ -3,6 +3,21 @@ description: コード以外もPRで変更履歴を残すための作業
 title: "[Business] "
 labels: ["type/business", "status/todo", "merge/review"]
 body:
+  - type: dropdown
+    id: hierarchy
+    attributes:
+      label: 階層
+      description: 独立した成果ならトップレベル、既存成果の一部なら子Issueを選ぶ。
+      options:
+        - トップレベル成果
+        - 既存Issueの子
+    validations:
+      required: true
+  - type: input
+    id: parent
+    attributes:
+      label: 親Issue
+      description: 「既存Issueの子」を選んだ場合は必須。例：#123
   - type: textarea
     id: current
     attributes:
@@ -19,6 +34,40 @@ body:
     id: approval
     attributes:
       label: 誰が何を確認すればよいか
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 対象・影響・触らない範囲
+      description: 対象文書・顧客・運用、影響、変更しない境界を書く。
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: 今回やらないこと
+      description: 別Issueへ分けた内容や、今回の完了条件に含めない内容を書く。
+  - type: textarea
+    id: known_constraints
+    attributes:
+      label: 既知の制約・懸念
+      description: 制約がなければ空欄でよい。高リスク変更では切り戻し方法も書く。
+  - type: textarea
+    id: verification
+    attributes:
+      label: 確認方法
+      description: 変更結果を誰がどの手順で確認できるかを書く。
+    validations:
+      required: true
+  - type: dropdown
+    id: merge
+    attributes:
+      label: マージ方式
+      options:
+        - 通常レビュー（既定）
+        - 自分でマージ可
+        - 緊急マージ（事後レビュー必須）
     validations:
       required: true
   - type: input

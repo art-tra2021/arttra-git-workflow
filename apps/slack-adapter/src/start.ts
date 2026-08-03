@@ -582,6 +582,7 @@ const app = createSlackApp(dependencies, {
   identityService,
   requirementNotifier,
   issueMetadata,
+  resolveSlackUserId,
   revokeProjectProjections: async (teamId, userId) => {
     await canvasProjectionService.revokeViewerAccess(teamId, userId);
     await projectListService.revokeViewerAccess(teamId, userId);

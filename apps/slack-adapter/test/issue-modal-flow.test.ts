@@ -156,28 +156,43 @@ describe("Slack Issue modal flow", () => {
     );
     const rendered = JSON.stringify(modal);
     expect(rendered).toContain("PRの確認方法");
+    expect(rendered).toContain("トップレベル成果");
+    expect(rendered).toContain("既存Issueの子");
     expect(rendered).toContain("通常レビュー（既定）");
     expect(rendered).toContain("自分でマージ可");
     expect(rendered).toContain("緊急マージ（事後レビュー必須）");
-    expect(rendered).toContain("許可できる人へ承認依頼");
+    expect(rendered).toContain("セルフマージは事前承認を待ちません");
   });
 
   test("work templateの旧merge項目を送信時に二重読取しない", () => {
     expect(
       issueFieldValues(
         {
+          hierarchy: { value: { selected_option: { value: "トップレベル成果" } } },
           background: { value: { value: "背景" } },
           outcome: { value: { value: "成果" } },
           done: { value: { value: "- [ ] 完了" } },
+          scope: { value: { value: "adapterのみ" } },
+          out_of_scope: { value: { value: "" } },
+          known_constraints: { value: { value: "" } },
+          verification: { value: { value: "/ar newで確認" } },
+          acceptance: { value: { value: "" } },
           blocked_by: { value: { value: "" } },
           target_date: { value: { value: "2026-08-04" } },
         },
         issueTemplate("work"),
       ),
     ).toEqual({
+      hierarchy: "トップレベル成果",
+      parent: "",
       background: "背景",
       outcome: "成果",
       done: "- [ ] 完了",
+      scope: "adapterのみ",
+      out_of_scope: "",
+      known_constraints: "",
+      verification: "/ar newで確認",
+      acceptance: "",
       blocked_by: "",
       target_date: "2026-08-04",
     });

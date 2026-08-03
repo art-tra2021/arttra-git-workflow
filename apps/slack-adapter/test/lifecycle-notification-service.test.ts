@@ -15,6 +15,56 @@ import type {
 import { LocalStateStore } from "../src/state-store.ts";
 
 describe("LifecycleNotificationService", () => {
+  test("通常Issue作成をchannel rootへ即時通知し、セルフマージ予定を同じthreadで強調する", async () => {
+    const harness = await createHarness();
+    harness.github.issue = {
+      ...harness.github.issue,
+      labels: ["type/work", "merge/self"],
+      parentIssueUrl: "https://api.github.com/repos/example/parent/issues/7",
+      body: "## 完了条件\n\n- [ ] Slackへ通知する\n\n## 目標日\n\n2026-08-04",
+    };
+    harness.github.pullRequest = {
+      ...harness.github.pullRequest,
+      linkedIssues: [harness.github.issue],
+    };
+
+    expect(await harness.service.process(issueOpenedJob())).toBe(2);
+    expect(harness.sent.map((value) => value.notification.kind)).toEqual([
+      "issue-opened",
+      "self-merge-scheduled",
+    ]);
+    expect(harness.sent.map((value) => value.threadTs)).toEqual([null, "900.1"]);
+    expect(harness.sent[0]?.notification.detail).toContain("親Issue: example/parent#7");
+    expect(harness.sent[0]?.notification.detail).toContain("完了条件: Slackへ通知する");
+    expect(harness.sent[0]?.notification.detail).toContain("目標日: 2026-08-04");
+    expect(harness.sent[1]?.notification).toMatchObject({
+      selfMergeControl: { repository: "example/repo", issueNumber: 44 },
+      detail: "第三者承認を待たず、PR作成者本人が必須CI通過後にマージします。",
+    });
+  });
+
+  test("セルフマージPRのCI成功をIssue threadへ通知する", async () => {
+    const harness = await createHarness();
+    harness.github.issue = {
+      ...harness.github.issue,
+      labels: ["type/work", "merge/self"],
+    };
+    harness.github.pullRequest = {
+      ...harness.github.pullRequest,
+      linkedIssues: [harness.github.issue],
+    };
+    await harness.service.process(issueOpenedJob());
+
+    expect(await harness.service.process(checkSuiteCompletedJob())).toBe(1);
+    expect(harness.sent.at(-1)).toMatchObject({
+      threadTs: "900.1",
+      notification: {
+        kind: "self-merge-ready",
+        selfMergeControl: { repository: "example/repo", issueNumber: 44 },
+      },
+    });
+  });
+
   test("Issueコメントの担当者と明示mentionを同じthreadへ通知し、closeも同居させる", async () => {
     const harness = await createHarness();
     const comment = issueCommentJob("delivery-comment");
@@ -131,6 +181,7 @@ class FakeLifecycleClient implements GitHubLifecycleClient {
     state: "open",
     authorLogin: "requester",
     assigneeLogins: ["owner"],
+    labels: ["type/work", "merge/review"],
   };
 
   pullRequest: PullRequestReviewContext = {
@@ -143,6 +194,7 @@ class FakeLifecycleClient implements GitHubLifecycleClient {
     headSha: "head-2",
     draft: false,
     state: "open",
+    mergeableState: "clean",
     body: "Closes #44",
     files: ["src/app.ts"],
     linkedIssues: [this.issue],
@@ -195,6 +247,28 @@ function issueClosedJob() {
     deliveryId: "delivery-close",
     event: "issues",
     payload: { ...basePayload(), action: "closed", issue: { number: 44 } },
+  };
+}
+
+function issueOpenedJob() {
+  return {
+    schemaVersion: 1 as const,
+    deliveryId: "delivery-open",
+    event: "issues",
+    payload: { ...basePayload(), action: "opened", issue: { number: 44 } },
+  };
+}
+
+function checkSuiteCompletedJob() {
+  return {
+    schemaVersion: 1 as const,
+    deliveryId: "delivery-check-success",
+    event: "check_suite",
+    payload: {
+      ...basePayload(),
+      action: "completed",
+      check_suite: { conclusion: "success", pull_requests: [{ number: 45 }] },
+    },
   };
 }
 

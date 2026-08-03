@@ -14,9 +14,16 @@ describe("Issue作成command", () => {
       template: "work",
       title: " SlackからIssueを作る ",
       fields: {
+        hierarchy: "トップレベル成果",
+        parent: "",
         background: " 手作業が必要 ",
         outcome: " Slackから作成できる ",
         done: "- [ ] Issueが作成される",
+        scope: "Slack adapterのみ",
+        out_of_scope: "GitHub UI",
+        known_constraints: "",
+        verification: "/ar newで確認する",
+        acceptance: "",
         merge: "自分でマージ可",
         blocked_by: "",
         target_date: "2026-08-15",
@@ -31,9 +38,16 @@ describe("Issue作成command", () => {
       template: "work",
       title: "SlackからIssueを作る",
       fields: {
+        hierarchy: "トップレベル成果",
+        parent: "",
         background: "手作業が必要",
         outcome: "Slackから作成できる",
         done: "- [ ] Issueが作成される",
+        scope: "Slack adapterのみ",
+        out_of_scope: "GitHub UI",
+        known_constraints: "",
+        verification: "/ar newで確認する",
+        acceptance: "",
         merge: "自分でマージ可",
         blocked_by: "",
         target_date: "2026-08-15",
@@ -62,7 +76,7 @@ describe("Issue作成command", () => {
       repository: "art-tra2021/service",
       template: "work",
       title: "共通方針",
-      fields: { outcome: "運用を統一する" },
+      fields: { hierarchy: "トップレベル成果", outcome: "運用を統一する" },
       mergeMode: "緊急マージ（事後レビュー必須）",
       actor: "U123",
       schema: {
@@ -74,6 +88,59 @@ describe("Issue作成command", () => {
       },
     });
     expect(command.fields.merge).toBe("緊急マージ（事後レビュー必須）");
+    expect(command.fields.hierarchy).toBe("トップレベル成果");
+  });
+
+  test("workとbusinessはトップレベルか親Issue付きの子を明示する", () => {
+    const schema = {
+      id: "work",
+      name: "作業",
+      titlePrefix: "[Work] ",
+      labels: ["type/work"],
+      fields: [{ id: "outcome", label: "成果", kind: "textarea" as const, required: true }],
+    };
+    expect(() =>
+      buildCreateIssueCommand({
+        repository: "art-tra2021/service",
+        template: "work",
+        title: "階層なし",
+        fields: { outcome: "成果" },
+        actor: "U123",
+        schema,
+      }),
+    ).toThrow("階層を選択してください");
+    expect(() =>
+      buildCreateIssueCommand({
+        repository: "art-tra2021/service",
+        template: "work",
+        title: "親なしの子",
+        fields: { hierarchy: "既存Issueの子", outcome: "成果" },
+        actor: "U123",
+        schema,
+      }),
+    ).toThrow("既存Issueの子には親Issueを指定してください");
+    expect(() =>
+      buildCreateIssueCommand({
+        repository: "art-tra2021/service",
+        template: "work",
+        title: "親付きトップレベル",
+        fields: { hierarchy: "トップレベル成果", outcome: "成果" },
+        relationships: { parent: "42" },
+        actor: "U123",
+        schema,
+      }),
+    ).toThrow("トップレベル成果には親Issueを指定できません");
+
+    const child = buildCreateIssueCommand({
+      repository: "art-tra2021/service",
+      template: "work",
+      title: "親付きの子",
+      fields: { hierarchy: "既存Issueの子", outcome: "成果" },
+      relationships: { parent: "42" },
+      actor: "U123",
+      schema,
+    });
+    expect(child.relationships?.parent?.number).toBe(42);
   });
 
   test("親Issueとブロック関係を構造化してcommandへ保持する", () => {

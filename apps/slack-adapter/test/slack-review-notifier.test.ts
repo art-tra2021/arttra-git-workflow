@@ -42,6 +42,7 @@ describe("SlackReviewNotifier", () => {
           state: "open",
           authorLogin: "requester",
           assigneeLogins: ["owner"],
+          labels: ["type/work", "merge/review"],
         },
       ],
       requiredApprovals: 1,

@@ -58,6 +58,9 @@ export function slackDivider() {
 
 export function lifecycleTone(kind: LifecycleNotificationKind): SlackMessageTone {
   const tones: Record<LifecycleNotificationKind, SlackMessageTone> = {
+    "issue-opened": "work",
+    "issue-reopened": "work",
+    "issue-assignment-changed": "action",
     "comment-created": "comment",
     "issue-completed": "completed",
     "pr-merged": "merged",
@@ -67,6 +70,8 @@ export function lifecycleTone(kind: LifecycleNotificationKind): SlackMessageTone
     "review-dismissed": "warning",
     "review-requested": "review",
     "revision-pushed": "revision",
+    "self-merge-scheduled": "warning",
+    "self-merge-ready": "warning",
   };
   return tones[kind];
 }
