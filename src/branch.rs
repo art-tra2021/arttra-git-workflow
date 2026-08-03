@@ -1,4 +1,5 @@
 use std::env;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail};
@@ -77,11 +78,121 @@ pub fn create(draft: &BranchDraft, from: Option<&str>) -> Result<()> {
         .output()
         .context("gh issue developを起動できませんでした")?;
     ensure_success(&output, "Issueに紐づくbranch作成")?;
-    println!(
-        "✓ Issue #{}に紐づくbranchを作成しました: {}",
-        draft.issue, draft.name
-    );
     Ok(())
+}
+
+pub fn has_changes() -> Result<bool> {
+    has_changes_in(Path::new("."))
+}
+
+fn has_changes_in(root: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(root)
+        .output()
+        .context("branch移動前の変更状態を確認できませんでした")?;
+    ensure_success(&output, "変更状態の確認")?;
+    Ok(!output.stdout.is_empty())
+}
+
+pub fn create_transferring_changes(draft: &BranchDraft, from: Option<&str>) -> Result<()> {
+    transfer_changes_in(Path::new("."), &draft.name, || create(draft, from))
+}
+
+fn transfer_changes_in<F>(root: &Path, target_branch: &str, create_branch: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    if !has_changes_in(root)? {
+        return create_branch();
+    }
+
+    let original_branch = current_branch_in(root)?;
+    let previous_stash = stash_head_in(root)?;
+    let output = Command::new("git")
+        .args([
+            "stash",
+            "push",
+            "--include-untracked",
+            "--message",
+            &format!("git-ar branch transfer: {target_branch}"),
+        ])
+        .current_dir(root)
+        .output()
+        .context("branch移動のために変更を一時退避できませんでした")?;
+    ensure_success(&output, "変更の一時退避")?;
+    let Some(created_stash) = stash_head_in(root)? else {
+        bail!("変更を一時退避したはずですがstashを確認できませんでした");
+    };
+    if previous_stash.as_deref() == Some(created_stash.as_str()) {
+        bail!("新しいstashが作成されなかったためbranch作成を中止しました");
+    }
+
+    if let Err(create_error) = create_branch() {
+        let current_branch = current_branch_in(root).with_context(|| {
+            format!(
+                "{create_error:#}\nbranch作成失敗後の現在地を確認できませんでした。変更はstash `{created_stash}` に残しています。`git switch {original_branch}`の後、stash先頭が同じことを確認して`git stash pop --index stash@{{0}}`を実行してください"
+            )
+        })?;
+        if current_branch != original_branch {
+            let switch = Command::new("git")
+                .args(["switch", &original_branch])
+                .current_dir(root)
+                .output()
+                .context("元のbranchへ戻す処理を起動できませんでした")?;
+            if let Err(switch_error) = ensure_success(&switch, "元のbranchへの復帰") {
+                bail!(
+                    "{create_error:#}\n元のbranchへ戻せませんでした: {switch_error:#}\n変更はstash `{created_stash}` に残しています"
+                );
+            }
+        }
+        if let Err(restore_error) = restore_stash_in(root, &created_stash) {
+            bail!(
+                "{create_error:#}\n退避した変更も自動復元できませんでした: {restore_error:#}\n変更はstash `{created_stash}` に残しています"
+            );
+        }
+        return Err(create_error);
+    }
+
+    let current_branch = current_branch_in(root)?;
+    if current_branch != target_branch {
+        bail!(
+            "branch作成後の移動先が想定と異なります（現在: `{current_branch}`）。変更はstash `{created_stash}` に残しています"
+        );
+    }
+    restore_stash_in(root, &created_stash).with_context(|| {
+        format!(
+            "branchは作成済みですが変更を自動復元できませんでした。stash `{created_stash}` は削除していません"
+        )
+    })?;
+    Ok(())
+}
+
+fn stash_head_in(root: &Path) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--quiet", "--verify", "refs/stash"])
+        .current_dir(root)
+        .output()
+        .context("stashの状態を確認できませんでした")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+    ))
+}
+
+fn restore_stash_in(root: &Path, expected: &str) -> Result<()> {
+    let current = stash_head_in(root)?;
+    if current.as_deref() != Some(expected) {
+        bail!("退避後に別のstashが追加されたため、自動popを中止しました（復元対象: `{expected}`）");
+    }
+    let output = Command::new("git")
+        .args(["stash", "pop", "--index", "stash@{0}"])
+        .current_dir(root)
+        .output()
+        .context("退避した変更の復元を起動できませんでした")?;
+    ensure_success(&output, "退避した変更の復元")
 }
 
 pub fn validate_push_input(input: &str, policy: &BranchPolicy) -> Result<()> {
@@ -163,8 +274,13 @@ pub fn validate_or_report(branch: &str, policy: &BranchPolicy, json: bool) -> Re
 }
 
 pub fn current_branch() -> Result<String> {
+    current_branch_in(Path::new("."))
+}
+
+fn current_branch_in(root: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["branch", "--show-current"])
+        .current_dir(root)
         .output()
         .context("現在のbranchを確認できませんでした")?;
     ensure_success(&output, "branch確認")?;
@@ -256,7 +372,16 @@ fn ensure_success(output: &Output, action: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{draft, validate, validate_push_input};
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    use anyhow::{Result, bail};
+    use tempfile::TempDir;
+
+    use super::{
+        current_branch_in, draft, stash_head_in, transfer_changes_in, validate, validate_push_input,
+    };
     use crate::policy::{BranchPolicy, ValidationMode};
 
     fn policy(mode: ValidationMode) -> BranchPolicy {
@@ -266,6 +391,32 @@ mod tests {
             protected_branches: vec!["main".into()],
             bypass_prefixes: vec!["dependabot/".into()],
         }
+    }
+
+    fn git(root: &Path, args: &[&str]) -> Result<String> {
+        let output = Command::new("git").args(args).current_dir(root).output()?;
+        if !output.status.success() {
+            bail!(
+                "git {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn repository() -> Result<TempDir> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        git(root, &["init", "-b", "main"])?;
+        git(root, &["config", "user.name", "ART-TRA Test"])?;
+        git(root, &["config", "user.email", "arttra@example.test"])?;
+        git(root, &["config", "commit.gpgsign", "false"])?;
+        git(root, &["config", "core.hooksPath", ".git/no-hooks"])?;
+        fs::write(root.join("tracked.txt"), "base\n")?;
+        git(root, &["add", "tracked.txt"])?;
+        git(root, &["commit", "-m", "initial"])?;
+        Ok(directory)
     }
 
     #[test]
@@ -315,5 +466,55 @@ mod tests {
         assert!(!validation.valid);
         assert_eq!(validation.error_code, Some("AR-BRANCH-001"));
         assert_eq!(validation.fix_command.as_deref(), Some("git ar branch"));
+    }
+
+    #[test]
+    fn stash_transfer_restores_staged_and_untracked_changes_on_new_branch() -> Result<()> {
+        let repository = repository()?;
+        let root = repository.path();
+        fs::write(root.join("tracked.txt"), "changed\n")?;
+        git(root, &["add", "tracked.txt"])?;
+        fs::write(root.join("untracked.txt"), "new\n")?;
+
+        transfer_changes_in(root, "feature/82-transfer-test", || {
+            git(root, &["switch", "-c", "feature/82-transfer-test"])?;
+            Ok(())
+        })?;
+
+        assert_eq!(current_branch_in(root)?, "feature/82-transfer-test");
+        let status = git(root, &["status", "--porcelain=v1", "--untracked-files=all"])?;
+        assert!(status.lines().any(|line| line == "M  tracked.txt"));
+        assert!(status.lines().any(|line| line == "?? untracked.txt"));
+        assert_eq!(
+            git(root, &["diff", "--cached", "--name-only"])?.trim(),
+            "tracked.txt"
+        );
+        assert_eq!(stash_head_in(root)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_branch_creation_restores_original_branch_and_changes() -> Result<()> {
+        let repository = repository()?;
+        let root = repository.path();
+        fs::write(root.join("tracked.txt"), "changed\n")?;
+        fs::write(root.join("untracked.txt"), "new\n")?;
+
+        let error = transfer_changes_in(root, "feature/82-failure-test", || {
+            bail!("simulated branch creation failure")
+        })
+        .expect_err("branch creation should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("simulated branch creation failure")
+        );
+        assert_eq!(current_branch_in(root)?, "main");
+        let status = git(root, &["status", "--porcelain=v1", "--untracked-files=all"])?;
+        assert!(status.lines().any(|line| line == " M tracked.txt"));
+        assert!(status.lines().any(|line| line == "?? untracked.txt"));
+        assert_eq!(stash_head_in(root)?, None);
+        Ok(())
     }
 }
