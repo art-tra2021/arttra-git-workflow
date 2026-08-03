@@ -153,6 +153,7 @@ Repository固有変更と衝突したpathは自動上書きせず、理由、対
 - Repositoryのvisibility、owner team、Custom PropertiesがIssueと一致する
 - baseとwrapperのschema検証が成功する
 - `template.lock.json`にprofileとsource commitがある
+- `.gitignore`がAI連携・個人設定（`.agents/`、`.claude/`、`.codex/`、`CLAUDE.md`）をGit管理外にしている
 - secret scanに該当がない
 - RulesetとCIが期待するbranchへ適用される
 - shared Projectの保存Viewまたはisolated Projectが作成される

@@ -8,6 +8,7 @@
   "managed_paths": [
     "AGENTS.md",
     ".github",
+    ".gitignore",
     ".mise.toml",
     "hk.pkl",
     "arttra.toml",
@@ -16,8 +17,11 @@
   ],
   "local_paths": [
     ".arttra/local",
+    ".agents",
+    ".claude/skills/arttra-git-workflow",
     ".claude/settings.local.json",
-    ".codex"
+    ".codex",
+    "CLAUDE.md"
   ],
   "sync_policy": "pull-request",
   "secret_policy": "never-copy"

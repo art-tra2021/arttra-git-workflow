@@ -52,8 +52,8 @@ Rustは現時点では共通profileに含めない。必要なRepositoryだけ�
 
 ### 管理対象とローカル専用
 
-管理対象は`AGENTS.md`、`.github/`、`.mise.toml`、`hk.pkl`、`arttra.toml`、`governance/`、`template.lock.json`である。
-`.arttra/local/`、`.claude/settings.local.json`、`.codex/`はGit管理外のローカル専用である。
+管理対象は`AGENTS.md`、`.github/`、`.gitignore`、`.mise.toml`、`hk.pkl`、`arttra.toml`、`governance/`、`template.lock.json`である。
+`.arttra/local/`、`.agents/`、`.claude/skills/arttra-git-workflow/`、`.claude/settings.local.json`、`.codex/`、`CLAUDE.md`はGit管理外のローカル専用である。
 `.env`、credential、private key、service account、依存cache、build生成物はbaseにもwrapperにも含めてはならない。
 
 ## 初回セットアップ

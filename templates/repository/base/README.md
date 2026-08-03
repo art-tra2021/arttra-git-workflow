@@ -7,8 +7,11 @@
 - 日本語のdiagnosticを返すhook、AI command guard、Issue/PRの共通形式
 - 共通CIの呼び出し口
 - governance値と`template.lock.json`による生成元の追跡
+- `git ar status`が参照するOrganization Projectと、変更ファイルを共有するpresence
 
 Python、TypeScript、営業・業務文書などの差分は、同じbaseへwrapper profileを重ねて生成する。
 このbaseへsecret、token、個人のClaude/Codex設定、project固有のCD設定を含めてはならない。
 
 このディレクトリを直接GitHub Repository Templateとして公開するのではなく、管理者のprovision commandが選択したwrapperを決定的にmaterializeする。
+
+`mise run setup-ar`で生成される`.agents/`、`.claude/`、`.codex/`、`CLAUDE.md`は端末ごとのAI連携であり、`.gitignore`で管理対象から除外する。秘密、token、個人設定をtemplateへ追加してはならない。
