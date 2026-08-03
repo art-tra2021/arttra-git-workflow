@@ -198,6 +198,17 @@ impl CommitPolicy {
             ));
         }
 
+        if subject
+            .split_once(':')
+            .is_some_and(|(_, summary)| summary.trim().is_empty())
+        {
+            violations.push(
+                "変更内容が空です。例: `feat: ログイン画面を追加する` のように入力してください"
+                    .into(),
+            );
+            return violations;
+        }
+
         let pattern = Regex::new(r"^(?<kind>[a-z]+)(\([A-Za-z0-9._/-]+\))?!?: (?<summary>\S.*)$")
             .expect("commit pattern is valid");
         match pattern.captures(subject) {
@@ -281,6 +292,16 @@ mod tests {
             violations,
             vec!["commitの先頭行は `type(scope): summary` または `type: summary` にしてください"]
         );
+    }
+
+    #[test]
+    fn reports_blank_summary_with_actionable_example() {
+        for subject in ["feat: ", "feat(cli):    "] {
+            let violations = policy().violations(subject);
+            assert_eq!(violations.len(), 1);
+            assert!(violations[0].contains("変更内容が空です"));
+            assert!(violations[0].contains("feat: ログイン画面を追加する"));
+        }
     }
 
     #[test]

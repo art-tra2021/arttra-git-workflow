@@ -27,6 +27,8 @@
 - `mise run ar -- <args>`: インストール前のCLI実行
 - `git ar`: 人間向けTUI
 - `git ar branch`: Issue、種別、内容、担当者から規則準拠branchを作成
+- `git ar push --json`: push先、upstream、commit数、未commitファイル数を安全に確認
+- `git ar pr --json`: branchからIssueを判定し、Pull Request候補を構造化して確認
 - `git ar check --json`: AI向けに検査結果とdiagnosticsを一括取得
 - `git ar context --json`: AI向けの安全なリポジトリ状態
 - `git ar status --json`: Issue、PR、作業ツリーから次の行動を取得

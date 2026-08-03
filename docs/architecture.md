@@ -6,7 +6,7 @@
 
 ```text
 Human ── TUI ───────┐
-                    ├─ Commit / Issue use case ─ Validator ─ Git / GitHub
+                    ├─ Issue / Branch / Commit / Push / PR ─ Validator ─ Git / GitHub
 AI ─── CLI / JSON ──┘
 ```
 
@@ -19,6 +19,8 @@ TUIは便利な入力手段であり、正本ではありません。
 - `git ar status`はbranchに紐づくIssue、PR、Git作業ツリーを構造化し、固定優先度から次の行動を返す。
 - `git ar status --json`は人間向け表示と同じ判定結果をschema version付きで返す。
 - `git ar commit`はTUIと引数から同じcommit候補を生成する。
+- `git ar push`は送信先、upstream、commit数、未commitファイル数を表示し、force pushなしで同じpush計画を実行する。
+- `git ar pr`はbranchからIssueを判定し、TUIと引数から同じPull Request候補を生成する。
 - `git ar issue`はTUIと引数から同じIssue本文を生成する。
 - `git ar branch`はTUIと引数から同じbranch名を生成し、`pre-push`も同じvalidatorを呼ぶ。
 - `git ar presence`はdiff本文を送らず、branchと変更ファイルのメタデータだけを専用refへ共有する。

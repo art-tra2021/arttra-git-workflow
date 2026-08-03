@@ -1,4 +1,5 @@
 mod branch;
+mod delivery;
 mod governance;
 mod guard;
 mod policy;
@@ -8,13 +9,17 @@ mod setup;
 mod status;
 mod tasks;
 mod telemetry;
+mod tui;
 
+use std::fmt;
 use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use inquire::error::InquireError;
+use inquire::validator::Validation;
 use inquire::{Confirm, Select, Text};
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +62,10 @@ enum Commands {
     },
     /// Build and optionally create a commit.
     Commit(CommitArgs),
+    /// Push the current work branch after showing the exact destination.
+    Push(PushArgs),
+    /// Build and optionally create a Pull Request.
+    Pr(PullRequestArgs),
     /// Build and optionally create a policy-compliant branch.
     Branch(BranchArgs),
     /// Build and optionally create a GitHub Issue.
@@ -289,6 +298,53 @@ struct CommitArgs {
 }
 
 #[derive(Debug, Args, Default)]
+struct PushArgs {
+    /// Git remote. Defaults to origin.
+    #[arg(long)]
+    remote: Option<String>,
+    /// Show the push plan without writing to GitHub.
+    #[arg(long)]
+    dry_run: bool,
+    /// Push without an interactive confirmation.
+    #[arg(long)]
+    yes: bool,
+    /// Return the plan or result as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Default)]
+struct PullRequestArgs {
+    /// Pull Request title. Defaults to the related Issue or latest commit title.
+    #[arg(long)]
+    title: Option<String>,
+    /// Pull Request body. A standard body is generated when omitted.
+    #[arg(long)]
+    body: Option<String>,
+    /// Related GitHub Issue number. Defaults to the number in the branch name.
+    #[arg(long)]
+    issue: Option<u64>,
+    /// Base branch. Defaults to the first protected branch.
+    #[arg(long)]
+    base: Option<String>,
+    /// Create the Pull Request as a Draft.
+    #[arg(long)]
+    draft: bool,
+    /// GitHub reviewer login. May be repeated.
+    #[arg(long)]
+    reviewer: Vec<String>,
+    /// Create the Pull Request. Otherwise only preview it.
+    #[arg(long)]
+    create: bool,
+    /// Create without an interactive confirmation.
+    #[arg(long)]
+    yes: bool,
+    /// Return the draft or result as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Default)]
 struct BranchArgs {
     /// Branch type such as feature, fix, or hotfix.
     #[arg(long = "type", value_name = "TYPE")]
@@ -376,10 +432,10 @@ impl IssueKind {
 impl std::fmt::Display for IssueKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Intake => "相談・受付",
-            Self::Work => "作業チケット",
-            Self::Task => "小タスク",
-            Self::Business => "営業・業務変更",
+            Self::Intake => "相談・受付 — まだ整理できていない依頼やアイデア",
+            Self::Work => "作業チケット — 単独で目的と完了条件を持つ仕事",
+            Self::Task => "小タスク — 親Issueを分けた具体的な作業",
+            Self::Business => "営業・業務変更 — 開発以外の提案・契約・運用作業",
         })
     }
 }
@@ -406,10 +462,23 @@ impl MergeMode {
 impl std::fmt::Display for MergeMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Review => "通常レビュー",
-            Self::SelfMerge => "本人マージ可",
-            Self::Emergency => "緊急マージ（事後レビュー）",
+            Self::Review => "通常レビュー — 他の人の承認後にマージする",
+            Self::SelfMerge => "本人マージ可 — 権限がある本人がCI通過後にマージできる",
+            Self::Emergency => "緊急マージ — 先に反映し、理由を残して事後確認する",
         })
+    }
+}
+
+#[derive(Debug)]
+struct ExplainedChoice<T> {
+    value: T,
+    name: String,
+    description: &'static str,
+}
+
+impl<T> fmt::Display for ExplainedChoice<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} — {}", self.name, self.description)
     }
 }
 
@@ -540,6 +609,13 @@ struct HookToolInput {
 
 fn main() {
     if let Err(error) = run() {
+        if matches!(
+            error.downcast_ref::<InquireError>(),
+            Some(InquireError::OperationCanceled | InquireError::OperationInterrupted)
+        ) {
+            eprintln!("arttra: 操作を終了しました");
+            return;
+        }
         eprintln!("arttra: {error:#}");
         let exit_code = if error.downcast_ref::<GuardDenied>().is_some() {
             3
@@ -556,6 +632,8 @@ fn run() -> Result<()> {
         Some(Commands::Doctor { json }) => doctor(json),
         Some(Commands::Check { quick, json }) => check(quick, json),
         Some(Commands::Commit(args)) => commit(args),
+        Some(Commands::Push(args)) => push(args),
+        Some(Commands::Pr(args)) => pull_request(args),
         Some(Commands::Branch(args)) => branch_command(args),
         Some(Commands::Issue(args)) => issue(args),
         Some(Commands::Context { json }) => context(json),
@@ -604,39 +682,29 @@ fn run() -> Result<()> {
 
 fn tui() -> Result<()> {
     ensure_interactive()?;
-    let action = Select::new(
-        "何をしますか？",
-        vec![
-            "今やることを見る",
-            "commitを作る",
-            "branchを作る",
-            "Issueを作る",
-            "作業ファイルの重複を確認する",
-            "自分のタスクを見る",
-            "一括チェックする",
-            "Rules Insightsを見る",
-            "環境を診断する",
-            "AI向けコンテキストを見る",
-            "終了する",
-        ],
-    )
-    .prompt()?;
+    let policy = Policy::load()?;
+    let home = status::home(None, &policy.branch)?;
+    let Some(action) = tui::run(&home)? else {
+        return Ok(());
+    };
 
     match action {
-        "今やることを見る" => status::show(None, false, &Policy::load()?.branch),
-        "commitを作る" => commit(CommitArgs::default()),
-        "branchを作る" => branch_command(BranchArgs::default()),
-        "Issueを作る" => issue(IssueArgs::default()),
-        "作業ファイルの重複を確認する" => {
-            let policy = Policy::load()?;
-            presence::check(&policy.presence, false)
-        }
-        "自分のタスクを見る" => tasks::show(false, false, true, &Policy::load()?.tasks),
-        "一括チェックする" => check(false, false),
-        "Rules Insightsを見る" => governance::rules(10, None, false),
-        "環境を診断する" => doctor(false),
-        "AI向けコンテキストを見る" => context(false),
-        _ => Ok(()),
+        tui::Action::Status => status::show(None, false, &policy.branch),
+        tui::Action::Tasks => tasks::show(false, false, true, &policy.tasks),
+        tui::Action::Issue => issue(IssueArgs::default()),
+        tui::Action::Branch => branch_command(BranchArgs::default()),
+        tui::Action::Commit => commit(CommitArgs::default()),
+        tui::Action::Push => push(PushArgs::default()),
+        tui::Action::PullRequest => pull_request(PullRequestArgs {
+            create: true,
+            ..PullRequestArgs::default()
+        }),
+        tui::Action::Presence => presence::check(&policy.presence, false),
+        tui::Action::Check => check(false, false),
+        tui::Action::Rules => governance::rules(10, None, false),
+        tui::Action::Doctor => doctor(false),
+        tui::Action::Context => context(false),
+        tui::Action::Exit => Ok(()),
     }
 }
 
@@ -646,35 +714,55 @@ fn commit(mut args: CommitArgs) -> Result<()> {
 
     if args.kind.is_none() {
         ensure_interactive()?;
-        args.kind = Some(Select::new("変更の種類", policy.commit.allowed_types.clone()).prompt()?);
+        args.kind = Some(
+            Select::new(
+                "変更の種類",
+                policy
+                    .commit
+                    .allowed_types
+                    .iter()
+                    .cloned()
+                    .map(|kind| ExplainedChoice {
+                        description: commit_type_description(&kind),
+                        name: kind.clone(),
+                        value: kind,
+                    })
+                    .collect(),
+            )
+            .with_help_message("迷ったら、機能追加はfeat、不具合修正はfixを選びます")
+            .prompt()?
+            .value,
+        );
     }
     if args.summary.is_none() {
         ensure_interactive()?;
-        args.summary = Some(
-            Text::new("変更を一言で")
-                .with_help_message("例: add non-interactive commit input")
-                .prompt()?,
-        );
+        args.summary = Some(prompt_required_text(
+            "変更内容（必須）",
+            "日本語で構いません。例: 空白のcommit内容を拒否する",
+        )?);
     }
     if interactive && args.scope.is_none() {
-        let scope = Text::new("scope（任意）").prompt()?;
+        let scope = Text::new("変更範囲 scope（任意）")
+            .with_help_message("対象を短く指定します。例: cli / slack / docs。迷ったら空欄")
+            .prompt()?;
         if !scope.trim().is_empty() {
-            args.scope = Some(scope);
+            args.scope = Some(scope.trim().into());
         }
     }
     if interactive && args.issue.is_none() {
-        let issue = Text::new("Issue番号（任意）").prompt()?;
-        if !issue.trim().is_empty() {
-            args.issue = Some(issue.parse().context("Issue番号は整数で指定してください")?);
-        }
+        args.issue = prompt_optional_issue_number(
+            "関連Issue番号（任意）",
+            "例: 71。Issueがない小さな作業なら空欄にできます",
+        )?;
     }
 
-    let kind = required(args.kind, "--type")?;
-    let summary = required(args.summary, "--summary")?;
+    let kind = required(args.kind, "--type", "変更の種類")?;
+    let summary = required(args.summary, "--summary", "変更内容")?;
     let subject = match args
         .scope
         .as_deref()
-        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     {
         Some(scope) => format!("{kind}({scope}): {summary}"),
         None => format!("{kind}: {summary}"),
@@ -718,31 +806,218 @@ fn commit(mut args: CommitArgs) -> Result<()> {
     run_status(&mut command, "git commit")
 }
 
+fn push(args: PushArgs) -> Result<()> {
+    let policy = Policy::load()?;
+    let plan = delivery::build_push_plan(&policy.branch, args.remote.as_deref())?;
+
+    if args.json {
+        if args.dry_run || !args.yes {
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+            return Ok(());
+        }
+        delivery::execute_push(&plan)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "ok": true,
+                "action": "push",
+                "plan": plan,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("[PUSH] GitHubへの送信準備");
+    println!("  branch: {}", plan.branch);
+    println!("  送信先: {}", plan.remote);
+    match plan.commits_to_push {
+        Some(count) => println!("  送信予定: {count} commit"),
+        None => println!("  送信予定: 初回push（GitHub上にbranchを作成）"),
+    }
+    if plan.uncommitted_files > 0 {
+        println!(
+            "  WARN  未commit: {}ファイル（このpushには含まれません）",
+            plan.uncommitted_files
+        );
+    }
+    println!("  実行内容: {}", plan.command.join(" "));
+
+    if args.dry_run {
+        return Ok(());
+    }
+    if !args.yes {
+        ensure_interactive()?;
+        if !Confirm::new("このbranchをGitHubへpushしますか？")
+            .with_default(false)
+            .with_help_message("force pushは行いません")
+            .prompt()?
+        {
+            return Ok(());
+        }
+    }
+    delivery::execute_push(&plan)?;
+    println!("✓ GitHubへpushしました: {}", plan.branch);
+    Ok(())
+}
+
+fn pull_request(mut args: PullRequestArgs) -> Result<()> {
+    let policy = Policy::load()?;
+    let interactive = io::stdin().is_terminal();
+    let branch = branch::current_branch()?;
+    args.issue = args
+        .issue
+        .or_else(|| delivery::issue_number_from_branch(&branch));
+
+    let guided = interactive && args.title.is_none();
+    if guided {
+        let suggested = delivery::suggested_pull_request_title(args.issue)?;
+        args.title = Some(
+            Text::new("Pull Requestタイトル（必須）")
+                .with_default(&suggested)
+                .with_help_message("何を変え、何が良くなるかを一文で書きます")
+                .with_validator(non_blank_validator)
+                .prompt()?,
+        );
+        args.draft = Confirm::new("作業途中のDraft Pull Requestにしますか？")
+            .with_default(true)
+            .with_help_message("Draftなら早めに共有でき、完成までレビュー要求を保留できます")
+            .prompt()?;
+        let reviewers = Text::new("reviewerのGitHubユーザー名（任意、カンマ区切り）")
+            .with_help_message("空欄ならCODEOWNERSやIssueの方針に従って自動選定されます")
+            .prompt()?;
+        args.reviewer = reviewers
+            .split(',')
+            .map(str::trim)
+            .filter(|reviewer| !reviewer.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+    }
+
+    let draft = delivery::build_pull_request_draft(
+        &policy.branch,
+        args.title,
+        args.body,
+        args.issue,
+        args.base,
+        args.draft,
+        args.reviewer,
+    )?;
+
+    if args.json && (!args.create || !args.yes) {
+        println!("{}", serde_json::to_string_pretty(&draft)?);
+        return Ok(());
+    }
+    if !args.json {
+        println!("[PULL REQUEST] 作成準備");
+        println!("  branch: {} → {}", draft.branch, draft.base);
+        match draft.issue {
+            Some(issue) => println!("  関連Issue: #{issue}"),
+            None => println!("  関連Issue: なし"),
+        }
+        println!(
+            "  状態: {}",
+            if draft.draft {
+                "Draft"
+            } else {
+                "レビュー可能"
+            }
+        );
+        println!("  タイトル: {}", draft.title);
+        if let Some(count) = draft.commits_ahead_of_base {
+            println!("  含まれるcommit: {count}件");
+        }
+        if draft.uncommitted_files > 0 {
+            println!(
+                "  WARN  未commit: {}ファイル（PRにはまだ含まれません）",
+                draft.uncommitted_files
+            );
+        }
+        if !draft.reviewers.is_empty() {
+            println!("  reviewer: {}", draft.reviewers.join(", "));
+        }
+    }
+
+    if !args.create {
+        return Ok(());
+    }
+    if !args.yes {
+        ensure_interactive()?;
+        if !Confirm::new("この内容でPull Requestを作成しますか？")
+            .with_default(false)
+            .prompt()?
+        {
+            return Ok(());
+        }
+    }
+
+    let url = delivery::create_pull_request(&draft)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "ok": true,
+                "action": "pull-request-created",
+                "url": url,
+                "draft": draft,
+            }))?
+        );
+    } else {
+        println!("✓ Pull Requestを作成しました: {url}");
+    }
+    Ok(())
+}
+
 fn branch_command(mut args: BranchArgs) -> Result<()> {
     let policy = Policy::load()?;
     let interactive = io::stdin().is_terminal();
     if args.kind.is_none() {
         ensure_interactive()?;
-        args.kind =
-            Some(Select::new("branchの種類", policy.branch.allowed_types.clone()).prompt()?);
+        args.kind = Some(
+            Select::new(
+                "branchの種類",
+                policy
+                    .branch
+                    .allowed_types
+                    .iter()
+                    .cloned()
+                    .map(|kind| ExplainedChoice {
+                        description: branch_type_description(&kind),
+                        name: kind.clone(),
+                        value: kind,
+                    })
+                    .collect(),
+            )
+            .with_help_message("通常の機能追加はfeature、不具合修正はfixを選びます")
+            .prompt()?
+            .value,
+        );
     }
     if args.issue.is_none() {
         ensure_interactive()?;
-        let issue = Text::new("関連Issue番号").prompt()?;
-        args.issue = Some(issue.parse().context("Issue番号は整数で指定してください")?);
+        args.issue = Some(prompt_required_issue_number(
+            "関連Issue番号（必須）",
+            "このbranchで対応するIssue番号です。例: 71",
+        )?);
     }
     if args.slug.is_none() {
         ensure_interactive()?;
-        args.slug = Some(
-            Text::new("内容（英数字。空白はハイフンへ変換）")
-                .with_help_message("例: login screen")
-                .prompt()?,
-        );
+        args.slug = Some(prompt_required_text(
+            "作業内容（英数字）",
+            "短い英単語で入力します。例: tui content help（空白は-になります）",
+        )?);
     }
     if args.owner.is_none() {
         ensure_interactive()?;
         let default_owner = branch::detect_owner();
-        args.owner = Some(Text::new("担当者").with_default(&default_owner).prompt()?);
+        args.owner = Some(
+            Text::new("担当者（GitHubのユーザー名）")
+                .with_default(&default_owner)
+                .with_help_message("通常は自動入力された値のままで構いません")
+                .with_validator(non_blank_validator)
+                .prompt()?,
+        );
     }
     if interactive && args.from.is_none() {
         let from = Text::new("作成元branch（任意。空欄はGitHubのdefault branch）").prompt()?;
@@ -753,10 +1028,12 @@ fn branch_command(mut args: BranchArgs) -> Result<()> {
 
     let draft = branch::draft(
         &policy.branch,
-        required(args.kind, "--type")?,
-        args.issue.context("--issue is required")?,
-        required(args.slug, "--slug")?,
-        required(args.owner, "--owner")?,
+        required(args.kind, "--type", "branchの種類")?,
+        args.issue.ok_or_else(|| {
+            anyhow!("関連Issue番号が必要です。`--issue <番号>`を指定してください")
+        })?,
+        required(args.slug, "--slug", "作業内容")?,
+        required(args.owner, "--owner", "担当者")?,
     )?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&draft)?);
@@ -789,6 +1066,7 @@ fn issue(mut args: IssueArgs) -> Result<()> {
                     IssueKind::Business,
                 ],
             )
+            .with_help_message("迷ったら、完了条件が決まっている仕事は作業チケットを選びます")
             .prompt()?,
         );
     }
@@ -803,6 +1081,7 @@ fn issue(mut args: IssueArgs) -> Result<()> {
                     MergeMode::Emergency,
                 ],
             )
+            .with_help_message("速さだけでなく、変更の影響と権限に合わせて選びます")
             .prompt()?,
         );
     }
@@ -811,19 +1090,31 @@ fn issue(mut args: IssueArgs) -> Result<()> {
         .then_some(args.merge.unwrap_or(MergeMode::Review));
     if args.title.is_none() {
         ensure_interactive()?;
-        args.title = Some(Text::new("Issueタイトル").prompt()?);
+        args.title = Some(prompt_required_text(
+            "Issueタイトル（必須）",
+            "何を実現する仕事かを一文で書きます。例: Slackから営業Issueを登録できるようにする",
+        )?);
     }
     if args.background.is_none() {
         ensure_interactive()?;
-        args.background = Some(Text::new("背景").prompt()?);
+        args.background = Some(prompt_required_text(
+            "背景（必須）",
+            "なぜ今この仕事が必要なのかを書きます。例: 営業担当がGitHubを開かず依頼したい",
+        )?);
     }
     if args.goal.is_none() {
         ensure_interactive()?;
-        args.goal = Some(Text::new("目的").prompt()?);
+        args.goal = Some(prompt_required_text(
+            "目的（必須）",
+            "完了後に誰がどう助かるかを書きます。例: Slack内で依頼登録を完結できる",
+        )?);
     }
     if args.done.is_none() {
         ensure_interactive()?;
-        args.done = Some(Text::new("完了条件").prompt()?);
+        args.done = Some(prompt_required_text(
+            "完了条件（必須）",
+            "確認できる状態を書きます。例: /ar newからIssueが1件作成される",
+        )?);
     }
     if interactive
         && args.parent.is_none()
@@ -834,21 +1125,23 @@ fn issue(mut args: IssueArgs) -> Result<()> {
             .with_default(false)
             .prompt()?
     {
-        let parent = Text::new("親Issue番号（任意）").prompt()?;
-        if !parent.trim().is_empty() {
-            args.parent = Some(
-                parent
-                    .trim()
-                    .parse()
-                    .context("親Issue番号は整数で指定してください")?,
-            );
-        }
-        args.blocked_by =
-            parse_issue_numbers(&Text::new("ブロック元Issue番号（任意、カンマ区切り）").prompt()?)?;
-        args.blocking = parse_issue_numbers(
-            &Text::new("このIssueがブロックするIssue番号（任意、カンマ区切り）").prompt()?,
+        args.parent = prompt_optional_issue_number(
+            "親Issue番号（任意）",
+            "このIssueをまとめる上位Issueです。例: 60",
         )?;
-        let target_date = Text::new("目標日 YYYY-MM-DD（任意）").prompt()?;
+        args.blocked_by = parse_issue_numbers(
+            &Text::new("先に終わる必要があるIssue（任意、カンマ区切り）")
+                .with_help_message("このIssueを止めている仕事です。例: 12, 34")
+                .prompt()?,
+        )?;
+        args.blocking = parse_issue_numbers(
+            &Text::new("このIssueの完了を待っているIssue（任意、カンマ区切り）")
+                .with_help_message("このIssueが止めている後続の仕事です。例: 56")
+                .prompt()?,
+        )?;
+        let target_date = Text::new("目標日 YYYY-MM-DD（任意）")
+            .with_help_message("GitHub Projectsと自分のカレンダーへ反映されます。例: 2026-08-05")
+            .prompt()?;
         if !target_date.trim().is_empty() {
             args.target_date = Some(target_date.trim().to_owned());
         }
@@ -857,10 +1150,10 @@ fn issue(mut args: IssueArgs) -> Result<()> {
     let draft = IssueDraft {
         kind,
         merge,
-        title: required(args.title, "--title")?,
-        background: required(args.background, "--background")?,
-        goal: required(args.goal, "--goal")?,
-        done: required(args.done, "--done")?,
+        title: required(args.title, "--title", "Issueタイトル")?,
+        background: required(args.background, "--background", "背景")?,
+        goal: required(args.goal, "--goal", "目的")?,
+        done: required(args.done, "--done", "完了条件")?,
         parent: args.parent,
         blocked_by: args.blocked_by,
         blocking: args.blocking,
@@ -1510,14 +1803,115 @@ fn ensure_interactive() -> Result<()> {
     if io::stdin().is_terminal() {
         Ok(())
     } else {
-        bail!("non-interactive execution requires complete command arguments")
+        bail!(
+            "対話入力を使えません。AIや自動処理では必要な引数と書き込み確認の`--yes`を指定してください"
+        )
     }
 }
 
-fn required(value: Option<String>, flag: &str) -> Result<String> {
+fn required(value: Option<String>, flag: &str, label: &str) -> Result<String> {
     value
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow!("{flag} is required"))
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("{label}は空にできません。`{flag} <内容>`を指定してください"))
+}
+
+fn prompt_required_text(prompt: &str, help: &str) -> Result<String> {
+    Ok(Text::new(prompt)
+        .with_help_message(help)
+        .with_validator(non_blank_validator)
+        .prompt()?
+        .trim()
+        .to_owned())
+}
+
+fn prompt_required_issue_number(prompt: &str, help: &str) -> Result<u64> {
+    let value = Text::new(prompt)
+        .with_help_message(help)
+        .with_validator(required_issue_number_validator)
+        .prompt()?;
+    value
+        .trim()
+        .parse()
+        .context("Issue番号は1以上の整数で指定してください")
+}
+
+fn prompt_optional_issue_number(prompt: &str, help: &str) -> Result<Option<u64>> {
+    let value = Text::new(prompt)
+        .with_help_message(help)
+        .with_validator(optional_issue_number_validator)
+        .prompt()?;
+    let value = value.trim();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(
+            value
+                .parse()
+                .context("Issue番号は1以上の整数で指定してください")?,
+        ))
+    }
+}
+
+fn non_blank_validator(
+    input: &str,
+) -> std::result::Result<Validation, inquire::error::CustomUserError> {
+    Ok(if input.trim().is_empty() {
+        Validation::Invalid("入力が空です。具体的な内容を1文字以上入力してください".into())
+    } else {
+        Validation::Valid
+    })
+}
+
+fn required_issue_number_validator(
+    input: &str,
+) -> std::result::Result<Validation, inquire::error::CustomUserError> {
+    Ok(match input.trim().parse::<u64>() {
+        Ok(number) if number > 0 => Validation::Valid,
+        _ => Validation::Invalid("Issue番号を1以上の整数で入力してください。例: 71".into()),
+    })
+}
+
+fn optional_issue_number_validator(
+    input: &str,
+) -> std::result::Result<Validation, inquire::error::CustomUserError> {
+    let input = input.trim();
+    Ok(
+        if input.is_empty() || input.parse::<u64>().is_ok_and(|number| number > 0) {
+            Validation::Valid
+        } else {
+            Validation::Invalid("空欄または1以上の整数を入力してください。例: 71".into())
+        },
+    )
+}
+
+fn commit_type_description(kind: &str) -> &'static str {
+    match kind {
+        "feat" => "新しい機能を追加する",
+        "fix" => "不具合を修正する",
+        "docs" => "文書だけを変更する",
+        "refactor" => "動作を変えず内部構造を改善する",
+        "test" => "テストを追加・修正する",
+        "build" => "依存関係やビルド方法を変更する",
+        "ci" => "CI/CDや自動化を変更する",
+        "chore" => "保守作業や雑務を行う",
+        "revert" => "過去の変更を取り消す",
+        _ => "このリポジトリで定義された変更種別",
+    }
+}
+
+fn branch_type_description(kind: &str) -> &'static str {
+    match kind {
+        "feature" => "新しい機能を作る通常の作業",
+        "fix" => "不具合を修正する通常の作業",
+        "hotfix" => "本番障害などを緊急修正する",
+        "chore" => "依存更新や保守作業を行う",
+        "docs" => "文書だけを変更する",
+        "refactor" => "動作を変えず内部構造を改善する",
+        "test" => "テストだけを追加・修正する",
+        "release" => "リリース準備をまとめる",
+        _ => "このリポジトリで定義されたbranch種別",
+    }
 }
 
 fn parse_issue_numbers(value: &str) -> Result<Vec<u64>> {
@@ -1634,8 +2028,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        IssueDraft, IssueKind, MergeMode, is_hk_commit_msg_command, parse_issue_numbers,
-        path_is_mise_managed,
+        IssueDraft, IssueKind, MergeMode, branch_type_description, commit_type_description,
+        is_hk_commit_msg_command, parse_issue_numbers, path_is_mise_managed, required,
     };
 
     #[test]
@@ -1666,6 +2060,26 @@ mod tests {
         );
         assert!(parse_issue_numbers("0").is_err());
         assert!(parse_issue_numbers("issue").is_err());
+    }
+
+    #[test]
+    fn required_text_rejects_empty_and_whitespace_values() {
+        assert!(required(None, "--summary", "変更内容").is_err());
+        assert!(required(Some("   ".into()), "--summary", "変更内容").is_err());
+        assert_eq!(
+            required(Some("  内容  ".into()), "--summary", "変更内容").expect("non-blank value"),
+            "内容"
+        );
+    }
+
+    #[test]
+    fn common_git_types_have_japanese_explanations() {
+        assert_eq!(commit_type_description("feat"), "新しい機能を追加する");
+        assert_eq!(commit_type_description("fix"), "不具合を修正する");
+        assert_eq!(
+            branch_type_description("feature"),
+            "新しい機能を作る通常の作業"
+        );
     }
 
     #[test]

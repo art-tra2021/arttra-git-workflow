@@ -30,13 +30,16 @@ Codexではセットアップ後に`/hooks`を一度開き、リポジトリhook
 git ar
 ```
 
-メニューからcommit、Issue作成、診断、AI向けコンテキスト確認を選べます。
+メニューからIssue、branch、commit、push、Pull Request作成までを順に進められます。
+各選択肢には`feat`などの意味と具体例が表示され、必須項目は空白のまま進めません。
 branch作成では種類、Issue番号、内容、担当者を選ぶだけで、英数字の規則準拠名を生成します。
 作成時は`gh issue develop`を使うため、branchとIssueの関係もGitHubへ記録されます。
 
 ```console
 git ar status
 git ar branch
+git ar push --dry-run
+git ar pr
 mise run tasks
 ```
 
@@ -66,6 +69,8 @@ git ar branch \
   --owner roz
 git ar guard command --command "npm install" --agent codex --json
 git ar commit --type feat --scope cli --summary "add deterministic input" --issue 1 --dry-run
+git ar push --dry-run --json
+git ar pr --issue 123 --title "ログイン画面を追加する" --draft --json
 git ar issue \
   --title "非対話commitを検証する" \
   --background "AIは対話TUIを安定して操作できない" \
@@ -74,9 +79,10 @@ git ar issue \
   --json
 ```
 
-実際にcommitする場合は、完全な引数に加えて`--yes`を指定します。
+実際にcommitやpushをする場合は、完全な引数に加えて`--yes`を指定します。
 IssueをGitHubへ登録する場合は`--create`を指定します。
-どちらも明示しなければプレビューだけなので、安全に試せます。
+Pull Requestは`--create --yes`を両方指定した場合だけ作成します。
+pushの`--json`、Pull Requestの`--json`は、書き込み確認がない限りプレビューだけなので安全に試せます。
 
 ClaudeとCodexは、shell commandの実行前に同じ`arttra.toml`を評価します。
 たとえば`npm install`は日本語の修正案付きで拒否され、`bun install`へ誘導されます。
