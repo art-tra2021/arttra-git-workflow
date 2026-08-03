@@ -36,15 +36,8 @@ const SPLIT_PANE_BREAKPOINT: u16 = 86;
 const MIN_DETAIL_HEIGHT: u16 = 18;
 const LOGO_METADATA_PADDING: u16 = 20;
 
-const LOGO_WIDTH: u16 = 10;
-const LOGO_HEIGHT: u16 = 5;
-const LOGO_OUTLINE: [&str; LOGO_HEIGHT as usize] = [
-    "  ╭────╮  ",
-    " ╱      ╲ ",
-    "│        │",
-    " ╲      ╱ ",
-    "  ╰────╯  ",
-];
+const LOGO_WIDTH: u16 = 7;
+const LOGO_HEIGHT: u16 = 4;
 
 // Sampled from the supplied marumado brand mark.
 const BRAND_GREEN: Color = Color::Rgb(144, 227, 166);
@@ -372,7 +365,7 @@ fn render(frame: &mut Frame<'_>, app: &mut HomeApp, status: &HomeStatus) {
     }
 
     let compact = area.width < NARROW_TERMINAL_BREAKPOINT || area.height < MIN_DETAIL_HEIGHT;
-    let header_height = if compact { 9 } else { 5 };
+    let header_height = if compact { 8 } else { 5 };
     let [header_area, content_area, footer_area] = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Min(3),
@@ -398,7 +391,7 @@ fn render_action_shell(frame: &mut Frame<'_>, action: Action, status: &HomeStatu
     }
 
     let compact = area.width < NARROW_TERMINAL_BREAKPOINT || area.height < MIN_DETAIL_HEIGHT;
-    let header_height = if compact { 9 } else { 5 };
+    let header_height = if compact { 8 } else { 5 };
     let [header_area, workflow_area, _output_area] = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Length(5),
@@ -734,19 +727,15 @@ fn section_block(title: &'static str) -> Block<'static> {
 
 fn marumado_logo() -> Text<'static> {
     Text::from(
-        LOGO_OUTLINE
-            .iter()
-            .enumerate()
-            .map(|(row, line)| {
+        (0..LOGO_HEIGHT as usize)
+            .map(|row| {
                 Line::from(
-                    line.chars()
-                        .enumerate()
-                        .map(|(column, character)| {
-                            let mut style = Style::default().fg(PRIMARY);
-                            if let Some(background) = logo_background(row, column) {
-                                style = style.bg(background);
-                            }
-                            Span::styled(character.to_string(), style)
+                    (0..LOGO_WIDTH as usize)
+                        .map(|column| {
+                            logo_color(row, column).map_or_else(
+                                || Span::raw(" "),
+                                |color| Span::styled("█", Style::default().fg(color)),
+                            )
                         })
                         .collect::<Vec<_>>(),
                 )
@@ -755,13 +744,12 @@ fn marumado_logo() -> Text<'static> {
     )
 }
 
-fn logo_background(row: usize, column: usize) -> Option<Color> {
+fn logo_color(row: usize, column: usize) -> Option<Color> {
     match (row, column) {
-        (0, 0 | 9) | (4, 0 | 9) => None,
-        (0..=1, 0..=5) => Some(BRAND_GREEN),
-        (0..=2, 6..=9) => Some(BRAND_YELLOW),
-        (2..=4, 0..=2) => Some(BRAND_CORAL),
-        (3..=4, 3..=9) => Some(BRAND_BLUE),
+        (0, 0..=3) => Some(BRAND_GREEN),
+        (0..=1, 5..=6) => Some(BRAND_YELLOW),
+        (2..=3, 0..=1) => Some(BRAND_CORAL),
+        (3, 3..=6) => Some(BRAND_BLUE),
         _ => None,
     }
 }
@@ -822,8 +810,9 @@ mod tests {
     use ratatui::style::Color;
 
     use super::{
-        Action, BRAND_BLUE, BRAND_CORAL, BRAND_GREEN, BRAND_YELLOW, HomeApp, LOGO_OUTLINE,
-        NARROW_TERMINAL_BREAKPOINT, logo_background, render, render_action_shell,
+        Action, BRAND_BLUE, BRAND_CORAL, BRAND_GREEN, BRAND_YELLOW, HomeApp, LOGO_HEIGHT,
+        LOGO_WIDTH, NARROW_TERMINAL_BREAKPOINT, logo_color, render, render_action_shell,
+        render_logo,
     };
     use crate::status::{
         HomeAction, HomeChanges, HomeIssue, HomePullRequest, HomeStatus, HomeUpstream,
@@ -919,15 +908,41 @@ mod tests {
     #[test]
     fn header_keeps_gemini_breakpoint_and_uses_sampled_marumado_brand_colors() {
         assert_eq!(NARROW_TERMINAL_BREAKPOINT, 60);
-        assert!(LOGO_OUTLINE.iter().all(|line| line.chars().count() == 10));
+        assert_eq!((LOGO_WIDTH, LOGO_HEIGHT), (7, 4));
         assert_eq!(BRAND_GREEN, Color::Rgb(144, 227, 166));
         assert_eq!(BRAND_YELLOW, Color::Rgb(241, 202, 90));
         assert_eq!(BRAND_CORAL, Color::Rgb(255, 146, 137));
         assert_eq!(BRAND_BLUE, Color::Rgb(129, 165, 225));
-        assert_eq!(logo_background(1, 2), Some(BRAND_GREEN));
-        assert_eq!(logo_background(1, 8), Some(BRAND_YELLOW));
-        assert_eq!(logo_background(3, 1), Some(BRAND_CORAL));
-        assert_eq!(logo_background(3, 7), Some(BRAND_BLUE));
-        assert_eq!(logo_background(2, 4), None);
+        assert_eq!(logo_color(0, 3), Some(BRAND_GREEN));
+        assert_eq!(logo_color(1, 6), Some(BRAND_YELLOW));
+        assert_eq!(logo_color(2, 1), Some(BRAND_CORAL));
+        assert_eq!(logo_color(3, 6), Some(BRAND_BLUE));
+        assert_eq!(logo_color(1, 3), None);
+        assert_eq!(logo_color(2, 3), None);
+        assert_eq!(
+            (0..LOGO_HEIGHT as usize)
+                .flat_map(|row| (0..LOGO_WIDTH as usize).map(move |column| (row, column)))
+                .filter(|&(row, column)| logo_color(row, column).is_some())
+                .count(),
+            16
+        );
+    }
+
+    #[test]
+    fn logo_is_four_rectangles_without_circle_or_outline_glyphs() {
+        let backend = TestBackend::new(LOGO_WIDTH, LOGO_HEIGHT);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render_logo(frame, frame.area()))
+            .expect("logo render");
+        let buffer = terminal.backend().buffer();
+        let expected = ["████ ██", "     ██", "██     ", "██ ████"];
+        for (row, line) in expected.iter().enumerate() {
+            for (column, symbol) in line.chars().enumerate() {
+                let cell = buffer.cell((column as u16, row as u16)).expect("logo cell");
+                assert_eq!(cell.symbol(), symbol.to_string());
+                assert_eq!(cell.fg, logo_color(row, column).unwrap_or(Color::Reset));
+            }
+        }
     }
 }
