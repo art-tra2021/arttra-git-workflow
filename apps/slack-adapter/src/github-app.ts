@@ -1,6 +1,15 @@
 import { createPrivateKey, sign } from "node:crypto";
 import type { SlackAdapterDependencies } from "./app.ts";
 import { buildIssueCreateInput, parseIssueForm } from "./github-shared.ts";
+import {
+  hasIssueRelationships,
+  type IssueReference,
+  type IssueRelationships,
+  issueReferenceKey,
+  issueReferenceLabel,
+  normalizeIssueRelationships,
+  parseIssueRelationships,
+} from "./issue-relationships.ts";
 import type { IssueTemplateSchema } from "./issue-schema.ts";
 import {
   ORGANIZATION_PROJECT_ITEMS_QUERY,
@@ -89,6 +98,7 @@ interface ApiRepository {
 }
 
 interface ApiIssue {
+  id?: number;
   number: number;
   title: string;
   html_url: string;
@@ -318,12 +328,162 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     if (!schema) {
       throw new Error(`Issue templateが見つかりません: ${command.template}`);
     }
+    const relationships = command.relationships
+      ? normalizeIssueRelationships(command.relationships, command.repository)
+      : parseIssueRelationships(undefined, command.fields, command.repository);
+    const relationTargets = hasIssueRelationships(relationships)
+      ? await this.validateIssueRelationships(command.repository, relationships, viewer)
+      : new Map<string, ApiIssue>();
     const input = buildIssueCreateInput(command, schema);
     const issue = await this.api<ApiIssue>(`/repos/${command.repository}/issues`, {
       method: "POST",
       body: JSON.stringify(input),
     });
-    return { number: issue.number, title: issue.title, url: issue.html_url };
+    const created = { number: issue.number, title: issue.title, url: issue.html_url };
+    if (!hasIssueRelationships(relationships)) {
+      return created;
+    }
+    if (!Number.isSafeInteger(issue.id)) {
+      return {
+        ...created,
+        relationshipStatus: {
+          status: "partial",
+          attached: [],
+          failed: [
+            {
+              relation: "all",
+              reference: "(作成したIssue)",
+              message:
+                "GitHubのIssue IDを作成応答から読み取れず、native関係を付与できませんでした。",
+            },
+          ],
+        },
+      };
+    }
+    const relationshipStatus = await this.attachIssueRelationships(
+      command.repository,
+      issue,
+      relationships,
+      relationTargets,
+    );
+    return relationshipStatus ? { ...created, relationshipStatus } : created;
+  }
+
+  private async validateIssueRelationships(
+    currentRepository: string,
+    relationships: IssueRelationships,
+    viewerGitHubLogin: string | null,
+  ): Promise<Map<string, ApiIssue>> {
+    const references = [
+      ...(relationships.parent ? [relationships.parent] : []),
+      ...relationships.blockedBy,
+      ...relationships.blocking,
+    ];
+    const unique = new Map(
+      references.map((reference) => [issueReferenceKey(reference), reference]),
+    );
+    const installed = await this.installationRepositories();
+    const currentOwner = currentRepository.split("/")[0]?.toLowerCase();
+    const targets = new Map<string, ApiIssue>();
+    for (const reference of unique.values()) {
+      const repository = installed.find(
+        (candidate) => candidate.full_name.toLowerCase() === reference.repository.toLowerCase(),
+      );
+      if (!repository) {
+        throw new Error(`Issue関係のrepository ${reference.repository} はAppの対象外です。`);
+      }
+      if (
+        relationships.parent &&
+        issueReferenceKey(reference) === issueReferenceKey(relationships.parent)
+      ) {
+        const parentOwner = reference.repository.split("/")[0]?.toLowerCase();
+        if (parentOwner !== currentOwner) {
+          throw new Error("親Issueは同じGitHub ownerのrepositoryから指定してください。");
+        }
+      }
+      if (viewerGitHubLogin) {
+        await this.assertRepositoryAccess(reference.repository, viewerGitHubLogin);
+      }
+      const issue = await this.api<ApiIssue>(
+        `/repos/${reference.repository}/issues/${reference.number}`,
+      );
+      if (issue.pull_request) {
+        throw new Error(
+          `${issueReferenceLabel(reference)} はPull Requestです。Issueを指定してください。`,
+        );
+      }
+      if (!Number.isSafeInteger(issue.id)) {
+        throw new Error(
+          `${issueReferenceLabel(reference)} のGitHub Issue IDを読み取れませんでした。`,
+        );
+      }
+      targets.set(issueReferenceKey(reference), issue);
+    }
+    return targets;
+  }
+
+  private async attachIssueRelationships(
+    currentRepository: string,
+    created: ApiIssue,
+    relationships: IssueRelationships,
+    targets: Map<string, ApiIssue>,
+  ): Promise<NonNullable<CreatedIssue["relationshipStatus"]> | null> {
+    const attached: string[] = [];
+    const failed: Array<{ relation: string; reference: string; message: string }> = [];
+    const attach = async (
+      relation: string,
+      reference: IssueReference,
+      operation: () => Promise<void>,
+    ) => {
+      try {
+        await operation();
+        attached.push(`${relation}:${issueReferenceLabel(reference)}`);
+      } catch (error) {
+        failed.push({
+          relation,
+          reference: issueReferenceLabel(reference),
+          message:
+            error instanceof Error ? error.message : "GitHub native関係の付与に失敗しました。",
+        });
+      }
+    };
+
+    if (relationships.parent) {
+      const parent = relationships.parent;
+      await attach("parent", parent, async () => {
+        await this.api(`/repos/${parent.repository}/issues/${parent.number}/sub_issues`, {
+          method: "POST",
+          body: JSON.stringify({ sub_issue_id: created.id }),
+        });
+      });
+    }
+    for (const blocker of relationships.blockedBy) {
+      const target = targets.get(issueReferenceKey(blocker));
+      if (!target?.id) continue;
+      await attach("blocked-by", blocker, async () => {
+        await this.api(
+          `/repos/${currentRepository}/issues/${created.number}/dependencies/blocked_by`,
+          {
+            method: "POST",
+            body: JSON.stringify({ issue_id: target.id }),
+          },
+        );
+      });
+    }
+    for (const blocked of relationships.blocking) {
+      const target = targets.get(issueReferenceKey(blocked));
+      if (!target?.id) continue;
+      await attach("blocking", blocked, async () => {
+        await this.api(
+          `/repos/${blocked.repository}/issues/${blocked.number}/dependencies/blocked_by`,
+          {
+            method: "POST",
+            body: JSON.stringify({ issue_id: created.id }),
+          },
+        );
+      });
+    }
+    return failed.length > 0 ? { status: "partial", attached, failed } : null;
   }
 
   async validateIssueAuthorization(
