@@ -7,7 +7,7 @@
   "ci_profile": "documents",
   "repo_kind": "business",
   "overlay_paths": [".github/ISSUE_TEMPLATE/business.yml", "README.md"],
-  "managed_paths": ["AGENTS.md", ".github", ".mise.toml", "hk.pkl", "arttra.toml", "governance", "template.lock.json"],
+  "managed_paths": ["AGENTS.md", ".github", ".gitignore", ".mise.toml", "hk.pkl", "arttra.toml", "governance", "template.lock.json"],
   "optional_tools": [],
   "post_create": ["replace_placeholders", "mise_trust", "setup_ar", "ready"]
 }

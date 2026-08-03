@@ -1,13 +1,13 @@
-# 個人環境・認証情報・生成物はテンプレートへ含めない。
-.env
-.env.*
-!.env.example
+# Repository固有の秘密・生成物・個人AI設定はGit管理外にする。
 .arttra/local/
 .agents/
 .claude/skills/arttra-git-workflow/
 .claude/settings.local.json
 .codex/
 CLAUDE.md
+.env
+.env.*
+!.env.example
 *.pem
 *.key
 credentials.json

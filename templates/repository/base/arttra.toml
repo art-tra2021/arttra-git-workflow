@@ -1,5 +1,8 @@
+version = 1
+
 [commit]
-mode = "warn"
+# 新規Repositoryは`git ar commit`を入口にする。
+mode = "block"
 require_ar_trailer = true
 max_subject_length = 72
 allowed_types = ["feat", "fix", "docs", "refactor", "test", "build", "ci", "chore", "revert"]
@@ -15,6 +18,19 @@ javascript_package_manager = "bun"
 python_package_manager = "uv"
 runtime_manager = "mise"
 
+[tasks]
+# Issueと期限の正本はOrganization Projectである。
+project_owner = "art-tra2021"
+project_number = 8
+
+[presence]
+# diff本文を送らず、変更ファイルの共有だけを行う。
+enabled = true
+remote = "origin"
+ref_prefix = "ar-presence"
+interval_seconds = 300
+max_age_minutes = 30
+
 [doctor]
 managed_commands = ["gh", "hk", "jq", "yq", "actionlint", "gitleaks", "rumdl", "shellcheck", "shfmt", "taplo", "typos", "zizmor"]
 
@@ -22,6 +38,7 @@ managed_commands = ["gh", "hk", "jq", "yq", "actionlint", "gitleaks", "rumdl", "
 mode = "block"
 allowed_types = ["feature", "fix", "hotfix", "chore", "docs", "refactor", "test", "release"]
 protected_branches = ["main"]
+bypass_prefixes = ["dependabot/", "renovate/", "ar-presence/"]
 
 [telemetry]
 mode = "local"

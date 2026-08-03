@@ -19,6 +19,6 @@
   "sync": {
     "mode": "pull-request",
     "managed_paths": ["templates/", "governance/"],
-    "never_copy": [".env", "*.pem", "*.key", "credentials.json", ".arttra/local/", ".claude/settings.local.json", ".codex/"]
+    "never_copy": [".env", "*.pem", "*.key", "credentials.json", ".arttra/local/", ".agents/", ".claude/skills/arttra-git-workflow/", ".claude/settings.local.json", ".codex/", "CLAUDE.md"]
   }
 }

@@ -72,7 +72,11 @@ run = "typos"
 
 [tasks.verify]
 description = "Run every local and CI quality gate"
-depends = ["fmt:check", "check", "test", "clippy", "lint", "security:actions", "slack:check"]
+depends = ["fmt:check", "check", "test", "clippy", "lint", "security:actions", "slack:check", "templates:check"]
+
+[tasks."templates:check"]
+description = "Validate repository template profiles and local-only paths"
+run = "bash scripts/template-check.sh"
 
 [tasks."slack:install"]
 description = "Install the locked Slack adapter dependencies"
