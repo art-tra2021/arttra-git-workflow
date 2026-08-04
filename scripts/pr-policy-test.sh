@@ -7,6 +7,18 @@ test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT
 
 gh() {
+	if [[ "$1" == "api" ]]; then
+		if [[ "$*" == *"/collaborators/"*"/permission"* ]]; then
+			printf '%s\n' "$MOCK_REPO_PERMISSION"
+		elif [[ "$*" == *"/pulls/1/files"* ]]; then
+			printf '%s\n' "$MOCK_CHANGED_PATHS"
+		else
+			printf 'unexpected gh api invocation: %s\n' "$*" >&2
+			return 99
+		fi
+		printf 'called\n' >>"$MOCK_API_CALL_LOG"
+		return 0
+	fi
 	case "$1 $2" in
 	"pr view")
 		printf '%s\n' "$MOCK_PR_JSON"
@@ -48,12 +60,14 @@ make_pr_json() {
 	local closing_issues="$3"
 	local body="${4:-Closes #42
 Relates to https://github.com/test/repo/issues/41}"
+	local changed_files="${5:-1}"
 	jq -cn \
 		--arg author "$author" \
 		--arg head_ref "$head_ref" \
 		--arg body "$body" \
+		--argjson changed_files "$changed_files" \
 		--argjson closing_issues "$closing_issues" \
-		'{author: {login: $author}, body: $body, headRefName: $head_ref, closingIssuesReferences: $closing_issues, reviews: []}'
+		'{author: {login: $author}, body: $body, changedFiles: $changed_files, headRefName: $head_ref, closingIssuesReferences: $closing_issues, reviews: []}'
 }
 
 run_policy() {
@@ -86,6 +100,8 @@ export MOCK_GRANDPARENT_URL="https://github.com/test/repo/issues/40"
 export MOCK_TASK_CHILD_COUNT=0
 export MOCK_TASK_CLOSING_PRS='[{"number": 1}]'
 export MOCK_PARENT_CLOSING_PRS='[]'
+export MOCK_REPO_PERMISSION="admin"
+export MOCK_CHANGED_PATHS="src/lib.rs"
 export MOCK_PR_JSON
 
 MOCK_PR_JSON="$(make_pr_json "alice" "feature/86-policy" '[]' 'No linked Task')"
@@ -102,21 +118,21 @@ if [[ -e "$MOCK_API_CALL_LOG" ]]; then
 	exit 1
 fi
 
-MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[{"number": 42}]')"
+MOCK_PR_JSON="$(make_pr_json "rozwer" "feature/42-policy" '[{"number": 42}]')"
 run_policy "single-primary-task" 0 "Issue #42: 本人マージ可"
-if [[ "$(wc -l <"$MOCK_API_CALL_LOG" | tr -d ' ')" -ne 3 ]]; then
-	printf 'not ok - single-primary-task: expected Task, parent, and Intake ancestor queries\n' >&2
+if [[ "$(wc -l <"$MOCK_API_CALL_LOG" | tr -d ' ')" -ne 5 ]]; then
+	printf 'not ok - single-primary-task: expected hierarchy, permission, and changed-path queries\n' >&2
 	exit 1
 fi
 
 MOCK_TASK_CLOSING_PRS='[]'
-MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[]')"
+MOCK_PR_JSON="$(make_pr_json "rozwer" "feature/42-policy" '[]')"
 run_policy "stacked-pr-bare-closing-task" 0 "Issue #42: 本人マージ可"
 
-MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[]' $'Closes test/repo#42\nRelates to https://github.com/test/repo/issues/41')"
+MOCK_PR_JSON="$(make_pr_json "rozwer" "feature/42-policy" '[]' $'Closes test/repo#42\nRelates to https://github.com/test/repo/issues/41')"
 run_policy "stacked-pr-same-repo-short-reference" 0 "Issue #42: 本人マージ可"
 
-MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[]' $'Resolves https://github.com/test/repo/issues/42\nRelates to https://github.com/test/repo/issues/41')"
+MOCK_PR_JSON="$(make_pr_json "rozwer" "feature/42-policy" '[]' $'Resolves https://github.com/test/repo/issues/42\nRelates to https://github.com/test/repo/issues/41')"
 run_policy "stacked-pr-same-repo-url" 0 "Issue #42: 本人マージ可"
 
 MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[]' 'Closes other/repo#42')"
@@ -183,7 +199,34 @@ MOCK_GRANDPARENT_LABELS="type/work"
 run_policy "reject-invalid-intake-ancestor" 1 "AR-ISSUE-005"
 MOCK_GRANDPARENT_LABELS="type/intake"
 
+MOCK_PR_JSON="$(make_pr_json "rozwer" "feature/42-policy" '[{"number": 42}]')"
 run_policy "accept-complete-ancestor-chain" 0 "本人マージ可"
+
+MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[{"number": 42}]')"
+run_policy "reject-unauthorized-self-label" 1 "AR-PR-014"
+
+MOCK_PR_JSON="$(make_pr_json "rozwer" "feature/42-policy" '[{"number": 42}]')"
+MOCK_REPO_PERMISSION="read"
+run_policy "reject-self-without-required-permission" 1 "AR-PR-015"
+MOCK_REPO_PERMISSION="admin"
+
+MOCK_CHANGED_PATHS="governance/ruleset.json"
+run_policy "reject-high-risk-self-merge" 1 "AR-PR-016"
+MOCK_CHANGED_PATHS="src/lib.rs"
+
+MOCK_PR_JSON="$(make_pr_json "rozwer" "feature/42-policy" '[{"number": 42}]' '' 2)"
+run_policy "reject-incomplete-changed-path-list" 1 "AR-PR-017"
+
+MOCK_ISSUE_LABELS=$'type/task\nmerge/emergency'
+MOCK_CHANGED_PATHS="governance/ruleset.json"
+MOCK_PR_JSON="$(make_pr_json "rozwer" "hotfix/42-policy" '[{"number": 42}]')"
+run_policy "accept-authorized-high-risk-emergency" 0 "緊急マージ"
+
+MOCK_PR_JSON="$(make_pr_json "alice" "hotfix/42-policy" '[{"number": 42}]')"
+run_policy "reject-unauthorized-emergency-label" 1 "AR-PR-014"
+
+MOCK_ISSUE_LABELS=$'type/task\nmerge/self'
+MOCK_CHANGED_PATHS="src/lib.rs"
 
 MOCK_PR_JSON="$(make_pr_json "app/dependabot" "dependabot/cargo/serde-1" '[]')"
 run_policy "dependabot-exception" 0 "Issue関連付けを免除"

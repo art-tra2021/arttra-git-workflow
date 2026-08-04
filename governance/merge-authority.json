@@ -1,0 +1,25 @@
+{
+  "$schema": "./merge-authority.schema.json",
+  "schema_version": 1,
+  "merge_modes": {
+    "self": {
+      "allowed_actors": ["rozwer"],
+      "minimum_repository_permission": "write",
+      "high_risk_action": "deny"
+    },
+    "emergency": {
+      "allowed_actors": ["rozwer"],
+      "minimum_repository_permission": "admin",
+      "high_risk_action": "allow"
+    }
+  },
+  "high_risk_paths": [
+    ".github/workflows/**",
+    "governance/**",
+    "scripts/*policy*.sh",
+    "AGENTS.md",
+    "arttra.toml",
+    ".mise.toml",
+    "hk.pkl"
+  ]
+}

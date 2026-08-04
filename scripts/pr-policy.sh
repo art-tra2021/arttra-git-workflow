@@ -9,14 +9,22 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The library is resolved from this script's directory at runtime.
 # shellcheck disable=SC1091
 source "${script_dir}/issue-policy-lib.sh"
+# shellcheck source=./merge-authority-policy-lib.sh
+# The library is resolved from this script's directory at runtime.
+# shellcheck disable=SC1091
+source "${script_dir}/merge-authority-policy-lib.sh"
+
+merge_authority_config="${MERGE_AUTHORITY_CONFIG_PATH:-${script_dir}/../governance/merge-authority.json}"
+merge_authority_schema="${MERGE_AUTHORITY_SCHEMA_PATH:-${script_dir}/../governance/merge-authority.schema.json}"
 
 pr_json="$(
 	gh pr view "$PR_NUMBER" --repo "$GH_REPO" \
-		--json author,body,closingIssuesReferences,headRefName,reviews
+		--json author,body,changedFiles,closingIssuesReferences,headRefName,reviews
 )"
 author="$(jq -r '.author.login' <<<"$pr_json")"
 body="$(jq -r '.body // ""' <<<"$pr_json")"
 head_ref="$(jq -r '.headRefName' <<<"$pr_json")"
+changed_file_count="$(jq -r '.changedFiles' <<<"$pr_json")"
 closing_issue_count="$(jq -r '(.closingIssuesReferences // []) | length' <<<"$pr_json")"
 closing_issue_source="native"
 
@@ -109,6 +117,8 @@ if [[ "$mode_count" -ne 1 || ! "$mode" =~ ^merge/(review|self|emergency)$ ]]; th
 	echo "AR-PR-002: Issue #${issue_number} に merge/review, merge/self, merge/emergency のどれか一つを付けてください。" >&2
 	exit 1
 fi
+merge_authority_validate_schema "$merge_authority_schema"
+merge_authority_validate_config "$merge_authority_config"
 
 parent_url="$(jq -r '.parent.url // empty' <<<"$issue_json")"
 if [[ -z "$parent_url" ]]; then
@@ -139,6 +149,7 @@ fi
 
 case "$mode" in
 merge/self)
+	merge_authority_validate_route "$mode" "$author" "$changed_file_count" "$merge_authority_config"
 	echo "✓ Issue #${issue_number}: 本人マージ可"
 	;;
 merge/emergency)
@@ -146,6 +157,7 @@ merge/emergency)
 		echo "AR-PR-003: 緊急マージは hotfix/ で始まるbranchから行ってください。" >&2
 		exit 1
 	fi
+	merge_authority_validate_route "$mode" "$author" "$changed_file_count" "$merge_authority_config"
 	echo "✓ Issue #${issue_number}: 緊急マージ（事後レビュー対象）"
 	;;
 merge/review)
