@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   issueDetailModal,
   issueFieldValues,
+  issueProjectFieldValues,
   issueRelationshipValues,
   issueRepositoryPickerModal,
   openIssueRepositoryFlow,
@@ -160,6 +161,29 @@ describe("Slack Issue modal flow", () => {
     expect(rendered).toContain("自分でマージ可");
     expect(rendered).toContain("緊急マージ（事後レビュー必須）");
     expect(rendered).toContain("セルフマージは事前承認を待ちません");
+    expect(rendered).toContain("project-priority");
+    expect(rendered).toContain("project-size");
+    expect(rendered).toContain("project-start-date");
+    expect(rendered).toContain("project-target-date");
+    expect(rendered).toContain("project-status");
+  });
+
+  test("Slack native入力をProject field commandへ変換する", () => {
+    expect(
+      issueProjectFieldValues({
+        "project-priority": { value: { selected_option: { value: "P1" } } },
+        "project-size": { value: { selected_option: { value: "L" } } },
+        "project-start-date": { value: { value: "2026-08-04" } },
+        "project-target-date": { value: { value: "2026-08-10" } },
+        "project-status": { value: { selected_option: { value: "Ready" } } },
+      }),
+    ).toEqual({
+      priority: "P1",
+      size: "L",
+      startDate: "2026-08-04",
+      targetDate: "2026-08-10",
+      status: "Ready",
+    });
   });
 
   test("task templateのmerge項目を送信時に二重読取しない", () => {

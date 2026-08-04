@@ -21,6 +21,7 @@ import {
   type IssueTemplateSchema,
 } from "./issue-schema.ts";
 import { workItemBlocks } from "./presentation.ts";
+import type { ProjectFieldInput, ProjectStatus } from "./project-field-sync.ts";
 import { allAccessibleScope, type RepositoryScope, repositoryScope } from "./project-scope.ts";
 import {
   approvalDecisionMessage,
@@ -458,11 +459,16 @@ export function createSlackApp(
         throw new Error(`Issue templateが見つかりません: ${metadata.template}`);
       }
       const fields = issueFieldValues(view.state.values, schema);
+      const projectFields = issueProjectFieldValues(view.state.values);
+      if (schema.fields.some((field) => field.id === "target_date")) {
+        fields.target_date = projectFields.targetDate ?? "";
+      }
       const command = buildCreateIssueCommand({
         repository: metadata.repository,
         template: metadata.template,
         title: inputValue(view.state.values, "title", "value"),
         fields,
+        projectFields,
         relationships: issueRelationshipValues(view.state.values),
         actor: body.user.id,
         slackTeamId: metadata.slackTeamId,
@@ -1175,6 +1181,7 @@ export function issueDetailModal(metadata: IssueModalMetadata, schema: IssueTemp
           (field) =>
             field.id !== "merge" &&
             field.id !== "hierarchy" &&
+            !["priority", "size", "start_date", "target_date", "status"].includes(field.id) &&
             !ISSUE_RELATIONSHIP_FIELD_IDS.has(field.id),
         )
         .map((field) =>
@@ -1189,6 +1196,7 @@ export function issueDetailModal(metadata: IssueModalMetadata, schema: IssueTemp
               ),
         ),
       ...issueRelationshipInputs(schema),
+      ...issueProjectFieldInputs(metadata.template),
       ...(schema.id === "task" ? [issueMergePolicy()] : []),
       issueMembers("assignees", "担当者"),
       issueMembers("reviewers", "予定レビュワー"),
@@ -1330,6 +1338,33 @@ function issueMembers(blockId: string, label: string) {
   };
 }
 
+function issueProjectFieldInputs(template: string) {
+  const initialStatus: ProjectStatus = template === "intake" ? "Intake" : "Ready";
+  return [
+    issueSelect("project-priority", "Priority", ["P2", "P0", "P1", "P3"], true),
+    issueSelect("project-size", "Size", ["M", "S", "L", "XL"], true),
+    issueInput("project-start-date", "Start date (YYYY-MM-DD)", false, true),
+    issueInput("project-target-date", "Target date (YYYY-MM-DD)", false, true),
+    issueSelect(
+      "project-status",
+      "Status",
+      [
+        initialStatus,
+        ...[
+          "Intake",
+          "Ready",
+          "Urgent (unstarted)",
+          "In progress",
+          "Blocked",
+          "In review",
+          "Done",
+        ].filter((value) => value !== initialStatus),
+      ],
+      true,
+    ),
+  ];
+}
+
 function option(text: string, value: string) {
   return { text: { type: "plain_text" as const, text }, value };
 }
@@ -1387,6 +1422,27 @@ export function issueRelationshipValues(
   if (blockedBy !== undefined) input.blockedBy = blockedBy;
   if (blocking !== undefined) input.blocking = blocking;
   return input;
+}
+
+export function issueProjectFieldValues(
+  values: Record<
+    string,
+    Record<string, { value?: string | null; selected_option?: { value: string } | null }>
+  >,
+): ProjectFieldInput {
+  const startDate = inputValue(values, "project-start-date", "value").trim();
+  const targetDate = inputValue(values, "project-target-date", "value").trim();
+  return {
+    priority: selectedValue(values, "project-priority", "value") as NonNullable<
+      ProjectFieldInput["priority"]
+    >,
+    size: selectedValue(values, "project-size", "value") as NonNullable<ProjectFieldInput["size"]>,
+    ...(startDate ? { startDate } : {}),
+    ...(targetDate ? { targetDate } : {}),
+    status: selectedValue(values, "project-status", "value") as NonNullable<
+      ProjectFieldInput["status"]
+    >,
+  };
 }
 
 function inputValueOrUndefined(
@@ -1457,15 +1513,30 @@ function issueCreateNotification(
   successTone: "success" | "approved",
 ): { tone: "success" | "approved" | "warning"; text: string } {
   const status = issue.relationshipStatus;
-  if (!status) {
+  const projectStatus = issue.projectFieldStatus;
+  if (!status && (!projectStatus || projectStatus.status === "synced")) {
     return { tone: successTone, text };
   }
-  const failed = status.failed
-    .map((item) => `${item.relation} ${item.reference}: ${item.message}`)
-    .join("\n");
+  const relationshipFailure = status
+    ? `親Issue・依存関係の一部を反映できませんでした。\n未反映:\n${status.failed
+        .map((item) => `${item.relation} ${item.reference}: ${item.message}`)
+        .join("\n")}`
+    : "";
+  const projectFailure =
+    projectStatus && projectStatus.status !== "synced"
+      ? `Project field同期は${projectStatus.status}です。\n${projectStatus.fields
+          .filter((field) => field.status === "failed")
+          .map((field) => `${field.field}: ${field.message ?? "read-back不一致"}`)
+          .join("\n")}\n復旧: ${projectStatus.recovery.instructions.join(" ")}`
+      : "";
   return {
     tone: "warning",
-    text: `${text}\n⚠️ Issueは作成済みですが、親Issue・依存関係の一部を反映できませんでした。\n未反映:\n${failed}`,
+    text: `${text}\n⚠️ Issueは作成済みです。新しいIssueを作らず、未完了処理だけを再実行してください。\n${[
+      relationshipFailure,
+      projectFailure,
+    ]
+      .filter(Boolean)
+      .join("\n")}`,
   };
 }
 
