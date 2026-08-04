@@ -49,6 +49,31 @@ describe("Issue作成command", () => {
     });
   });
 
+  test("Project #8のfield入力をversion付きcommandへ保持する", () => {
+    const command = buildCreateIssueCommand({
+      repository: "art-tra2021/arttra-git-workflow",
+      template: "intake",
+      title: "Project field入力",
+      fields: { summary: "同期する", urgency: "通常" },
+      actor: "U123",
+      projectFields: {
+        priority: "P1",
+        size: "L",
+        startDate: "2026-08-04",
+        targetDate: "2026-08-10",
+        status: "Intake",
+      },
+      schema: issueTemplate("intake"),
+    });
+    expect(command.projectFields).toEqual({
+      priority: "P1",
+      size: "L",
+      startDate: "2026-08-04",
+      targetDate: "2026-08-10",
+      status: "Intake",
+    });
+  });
+
   test("templateの必須項目がないIssueを拒否する", () => {
     expect(() =>
       buildCreateIssueCommand({

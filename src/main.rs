@@ -4,6 +4,7 @@ mod governance;
 mod guard;
 mod policy;
 mod presence;
+mod project_sync;
 mod revert;
 mod scheduler;
 mod setup;
@@ -76,6 +77,8 @@ enum Commands {
     Branch(BranchArgs),
     /// Build and optionally create a GitHub Issue.
     Issue(Box<IssueArgs>),
+    /// Idempotently write and read back an existing Issue's Organization Project fields.
+    ProjectSync(ProjectSyncArgs),
     /// Emit minimal repository context for AI or automation.
     Context {
         /// Return machine-readable output.
@@ -505,10 +508,48 @@ struct IssueArgs {
     /// Target date written to the Issue for Projects ingestion.
     #[arg(long)]
     target_date: Option<String>,
+    /// Priority in Organization Project #8: P0, P1, P2, or P3.
+    #[arg(long, value_parser = ["P0", "P1", "P2", "P3"])]
+    priority: Option<String>,
+    /// Size in Organization Project #8: S, M, L, or XL.
+    #[arg(long, value_parser = ["S", "M", "L", "XL"])]
+    size: Option<String>,
+    /// Start date written to Organization Project #8.
+    #[arg(long)]
+    start_date: Option<String>,
+    /// Status option name in Organization Project #8.
+    #[arg(long, value_parser = ["Intake", "Ready", "Urgent (unstarted)", "In progress", "Blocked", "In review", "Done"])]
+    status: Option<String>,
+    /// GitHub Issue assignee. May be repeated. Defaults to @me outside Intake.
+    #[arg(long)]
+    assignee: Vec<String>,
     /// Create the Issue with GitHub CLI. Otherwise only preview it.
     #[arg(long)]
     create: bool,
     /// Return the draft as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ProjectSyncArgs {
+    /// Existing Issue number, URL, or owner/repo#number. Never creates another Issue.
+    #[arg(long)]
+    issue: String,
+    #[arg(long, value_parser = ["P0", "P1", "P2", "P3"])]
+    priority: Option<String>,
+    #[arg(long, value_parser = ["S", "M", "L", "XL"])]
+    size: Option<String>,
+    #[arg(long)]
+    start_date: Option<String>,
+    #[arg(long)]
+    target_date: Option<String>,
+    #[arg(long, value_parser = ["Intake", "Ready", "Urgent (unstarted)", "In progress", "Blocked", "In review", "Done"])]
+    status: Option<String>,
+    /// Exact GitHub Issue assignee set. May be repeated. Omit to preserve current assignees.
+    #[arg(long)]
+    assignee: Vec<String>,
+    /// Return a versioned structured result.
     #[arg(long)]
     json: bool,
 }
@@ -632,6 +673,8 @@ struct IssueDraft {
     blocked_by: Vec<u64>,
     blocking: Vec<u64>,
     target_date: Option<String>,
+    project_fields: project_sync::ProjectFieldValues,
+    assignees: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -861,6 +904,7 @@ fn run() -> Result<()> {
         Some(Commands::Pr(args)) => pull_request(args),
         Some(Commands::Branch(args)) => branch_command(args),
         Some(Commands::Issue(args)) => issue(*args),
+        Some(Commands::ProjectSync(args)) => project_sync_command(args),
         Some(Commands::Context { json }) => context(json),
         Some(Commands::Status { issue, json }) => {
             status::show(issue, json, &Policy::load()?.branch)
@@ -2953,6 +2997,82 @@ fn issue(mut args: IssueArgs) -> Result<()> {
         args.parent = Some(parent_metadata.url);
     }
 
+    if interactive {
+        if args.priority.is_none() {
+            args.priority = Some(
+                Select::new("Priority", vec!["P2", "P0", "P1", "P3"])
+                    .prompt()?
+                    .into(),
+            );
+        }
+        if args.size.is_none() {
+            args.size = Some(
+                Select::new("Size", vec!["M", "S", "L", "XL"])
+                    .prompt()?
+                    .into(),
+            );
+        }
+        if args.start_date.is_none() {
+            args.start_date = prompt_optional_text(
+                "Start date YYYY-MM-DD（任意）",
+                "Organization Project #8へ反映します",
+            )?;
+        }
+        if args.status.is_none() {
+            let default_status = if matches!(kind, IssueKind::Intake) {
+                "Intake"
+            } else {
+                "Ready"
+            };
+            let mut statuses = vec![default_status];
+            statuses.extend(
+                [
+                    "Intake",
+                    "Ready",
+                    "Urgent (unstarted)",
+                    "In progress",
+                    "Blocked",
+                    "In review",
+                    "Done",
+                ]
+                .into_iter()
+                .filter(|status| *status != default_status),
+            );
+            args.status = Some(Select::new("Status", statuses).prompt()?.into());
+        }
+        if args.assignee.is_empty() {
+            let value = Text::new("Assignee GitHub login（任意、カンマ区切り）")
+                .with_help_message("空欄の場合、Intake以外は現在のGitHub利用者を担当者にします")
+                .prompt()?;
+            args.assignee = value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+    }
+
+    let project_fields = project_sync::ProjectFieldValues {
+        priority: Some(args.priority.unwrap_or_else(|| "P2".into())),
+        size: Some(args.size.unwrap_or_else(|| "M".into())),
+        start_date: optional_trimmed(args.start_date),
+        target_date: optional_trimmed(args.target_date.clone()),
+        status: Some(args.status.unwrap_or_else(|| {
+            if matches!(kind, IssueKind::Intake) {
+                "Intake".into()
+            } else {
+                "Ready".into()
+            }
+        })),
+    };
+    project_fields.validate()?;
+    let requested_assignees = if args.assignee.is_empty() && !matches!(kind, IssueKind::Intake) {
+        vec!["@me".into()]
+    } else {
+        args.assignee
+    };
+
     let draft = IssueDraft {
         kind,
         merge,
@@ -2962,11 +3082,13 @@ fn issue(mut args: IssueArgs) -> Result<()> {
         blocked_by: args.blocked_by,
         blocking: args.blocking,
         target_date: args.target_date,
+        project_fields,
+        assignees: requested_assignees,
     };
 
-    if args.json {
+    if !args.create && args.json {
         println!("{}", serde_json::to_string_pretty(&draft)?);
-    } else {
+    } else if !args.create || !args.json {
         println!("# {}\n\n{}", draft.title, draft.body());
     }
 
@@ -3010,14 +3132,96 @@ fn issue(mut args: IssueArgs) -> Result<()> {
             .join(",");
         command.args(["--blocking", &blocking]);
     }
-    if !matches!(draft.kind, IssueKind::Intake) {
-        command.args(["--assignee", "@me"]);
+    for assignee in &draft.assignees {
+        command.args(["--assignee", assignee]);
     }
     let output = command
         .output()
         .context("gh issue createを起動できませんでした")?;
     ensure_success(&output, "gh issue create")?;
-    print!("{}", String::from_utf8_lossy(&output.stdout));
+    let issue_url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let policy = Policy::load()?;
+    let (issue, project_field_status) = match project_sync::read_issue(&issue_url) {
+        Ok(issue) => {
+            let expected = issue.assignee_logins();
+            let report =
+                project_sync::sync(&policy.tasks, &issue, &draft.project_fields, &expected);
+            (Some(issue), report)
+        }
+        Err(error) => (
+            None,
+            project_sync::readback_failure(
+                &policy.tasks,
+                &issue_url,
+                &draft.project_fields,
+                &draft.assignees,
+                error.to_string(),
+            ),
+        ),
+    };
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "status": project_field_status.status,
+                "issue": issue,
+                "issue_url": issue_url,
+                "draft": draft,
+                "project_field_status": project_field_status,
+            }))?
+        );
+    } else {
+        println!("{issue_url}");
+        println!("{}", serde_json::to_string_pretty(&project_field_status)?);
+    }
+    Ok(())
+}
+
+fn project_sync_command(args: ProjectSyncArgs) -> Result<()> {
+    let mut issue = project_sync::read_issue(&args.issue)?;
+    if !args.assignee.is_empty() {
+        let desired = args
+            .assignee
+            .iter()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .collect::<std::collections::BTreeSet<_>>();
+        let current = issue
+            .assignee_logins()
+            .into_iter()
+            .map(|value| value.to_ascii_lowercase())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut command = Command::new("gh");
+        command.args(["issue", "edit", &args.issue]);
+        for login in current.difference(&desired) {
+            command.args(["--remove-assignee", login]);
+        }
+        for login in desired.difference(&current) {
+            command.args(["--add-assignee", login]);
+        }
+        let output = command
+            .output()
+            .context("Issue Assigneeの更新を起動できませんでした")?;
+        ensure_success(&output, "Issue Assigneeの更新")?;
+        issue = project_sync::read_issue(&args.issue)?;
+    }
+    let expected_assignees = issue.assignee_logins();
+    let values = project_sync::ProjectFieldValues {
+        priority: args.priority,
+        size: args.size,
+        start_date: optional_trimmed(args.start_date),
+        target_date: optional_trimmed(args.target_date),
+        status: args.status,
+    };
+    values.validate()?;
+    let report = project_sync::sync(&Policy::load()?.tasks, &issue, &values, &expected_assignees);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Project field同期結果: {:?}", report.status);
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
     Ok(())
 }
 
@@ -3901,7 +4105,7 @@ mod tests {
     use super::{
         IntakeUrgency, IssueContent, IssueDraft, IssueKind, MergeMode, branch_type_description,
         commit_type_description, is_hk_commit_msg_command, parse_issue_numbers,
-        path_is_mise_managed, required, validate_issue_hierarchy,
+        path_is_mise_managed, project_sync, required, validate_issue_hierarchy,
     };
 
     #[test]
@@ -3924,6 +4128,8 @@ mod tests {
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
+            project_fields: project_sync::ProjectFieldValues::default(),
+            assignees: Vec::new(),
         };
         assert_eq!(
             draft.body(),
@@ -3945,6 +4151,8 @@ mod tests {
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
+            project_fields: project_sync::ProjectFieldValues::default(),
+            assignees: Vec::new(),
         };
         assert!(intake.body().contains("## 何がありましたか"));
         assert!(intake.body().contains("判断できない"));
@@ -3962,6 +4170,8 @@ mod tests {
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
+            project_fields: project_sync::ProjectFieldValues::default(),
+            assignees: Vec::new(),
         };
         assert!(task.body().contains("## やること"));
         assert!(task.body().contains("## 親Issue\n\n#86"));
@@ -3984,6 +4194,8 @@ mod tests {
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
+            project_fields: project_sync::ProjectFieldValues::default(),
+            assignees: Vec::new(),
         };
         assert!(business.body().contains("## 現状"));
         assert!(business.body().contains("## 変更する文書・条件・運用"));

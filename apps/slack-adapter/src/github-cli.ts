@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import type { SlackAdapterDependencies } from "./app.ts";
 import { buildIssueCreateInput, parseIssueForm } from "./github-shared.ts";
@@ -9,6 +9,7 @@ import {
   parseIssueRelationships,
 } from "./issue-relationships.ts";
 import { type IssueTemplateSchema, resolveIssueTemplate } from "./issue-schema.ts";
+import { projectFieldSyncFailure, syncProjectFields } from "./project-field-sync.ts";
 import {
   ORGANIZATION_PROJECT_ITEMS_QUERY,
   type OrganizationProjectItemsResponse,
@@ -28,6 +29,7 @@ import type {
 } from "./types.ts";
 
 interface GhIssue {
+  id?: string;
   number: number;
   title: string;
   url: string;
@@ -247,15 +249,37 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
         ...relationshipArgs,
       ])
     ).trim();
-    return ghJson<CreatedIssue>([
+    const created = await ghJson<CreatedIssue & { id?: string }>([
       "issue",
       "view",
       url,
       "--repo",
       command.repository,
       "--json",
-      "number,title,url",
+      "id,number,title,url",
     ]);
+    if (!command.projectFields) return created;
+    const project = this.project ?? { owner: "(未設定)", number: 0 };
+    const projectFieldStatus =
+      this.project && created.id
+        ? await syncProjectFields({
+            request: <T>(query: string, variables: Record<string, unknown>) =>
+              ghJsonInput<T>(["api", "graphql", "--input", "-"], { query, variables }),
+            project: this.project,
+            issue: { id: created.id, url: created.url },
+            values: command.projectFields,
+            assignees: input.assignees,
+          })
+        : projectFieldSyncFailure({
+            project,
+            issue: { id: created.id ?? "(unknown)", url: created.url },
+            values: command.projectFields,
+            assignees: input.assignees,
+            message: this.project
+              ? "Issue node IDをread-backできず、Project fieldを同期できませんでした。"
+              : "AR_GITHUB_PROJECT_OWNER / AR_GITHUB_PROJECT_NUMBERが未設定です。",
+          });
+    return { ...created, projectFieldStatus };
   }
 
   async validateIssueAuthorization(command: CreateIssueCommand): Promise<void> {
@@ -407,6 +431,37 @@ async function gh(args: string[]): Promise<string> {
 
 async function ghJson<T>(args: string[]): Promise<T> {
   return JSON.parse(await gh(args)) as T;
+}
+
+async function ghJsonInput<T>(args: string[], input: unknown): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const child = spawn("gh", args, { stdio: ["pipe", "pipe", "pipe"] });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.on("error", (error) =>
+      reject(new Error(`GitHub GraphQL操作に失敗しました: ${error.message}`)),
+    );
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(
+          new Error(`GitHub GraphQL操作に失敗しました: ${Buffer.concat(stderr).toString().trim()}`),
+        );
+        return;
+      }
+      try {
+        resolve(JSON.parse(Buffer.concat(stdout).toString()) as T);
+      } catch (error) {
+        reject(
+          new Error(
+            `GitHub GraphQL応答を解析できませんでした: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+      }
+    });
+    child.stdin.end(JSON.stringify(input));
+  });
 }
 
 function isMissingIssueTemplateDirectory(error: unknown): boolean {

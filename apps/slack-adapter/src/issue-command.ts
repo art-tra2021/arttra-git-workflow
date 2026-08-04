@@ -5,6 +5,7 @@ import {
   parseIssueRelationships,
 } from "./issue-relationships.ts";
 import type { IssueTemplateId, IssueTemplateSchema } from "./issue-schema.ts";
+import { normalizeProjectFieldInput, type ProjectFieldInput } from "./project-field-sync.ts";
 import type { CreateIssueCommand } from "./types.ts";
 
 export const MERGE_MODES = [
@@ -26,6 +27,7 @@ export interface CreateIssueInput {
   reviewerSlackUserIds?: string[];
   mergeMode?: string;
   relationships?: IssueRelationshipInput;
+  projectFields?: ProjectFieldInput;
   schema: IssueTemplateSchema;
 }
 
@@ -93,6 +95,9 @@ export function buildCreateIssueCommand(input: CreateIssueInput): CreateIssueCom
   };
   if (hasIssueRelationships(relationships)) {
     command.relationships = relationships;
+  }
+  if (input.projectFields) {
+    command.projectFields = normalizeProjectFieldInput(input.projectFields);
   }
   return command;
 }
