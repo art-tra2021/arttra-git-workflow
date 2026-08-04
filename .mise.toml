@@ -81,6 +81,7 @@ depends = [
   "security:actions",
   "slack:check",
   "setup-ui:test",
+  "issue-policy:test",
   "pr-policy:test",
   "pr-health:test",
   "templates:check",
@@ -208,6 +209,10 @@ run = "bash scripts/setup-ui-test.sh"
 [tasks."pr-policy:test"]
 description = "Test deterministic Pull Request to primary Issue policy"
 run = "bash scripts/pr-policy-test.sh"
+
+[tasks."issue-policy:test"]
+description = "Test deterministic Issue hierarchy policy"
+run = "bash scripts/issue-policy-test.sh"
 
 [tasks."pr-health:test"]
 description = "Test deterministic PR health labels and summary"
