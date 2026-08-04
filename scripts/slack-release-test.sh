@@ -84,14 +84,14 @@ bash scripts/slack-release.sh deploy \
 	--commit "${ar_main}" \
 	--main-commit "${ar_main}" \
 	--yes >/dev/null
-rg -q "^run deploy arttra-work-slack --image .*:${ar_main}-amd64 --update-labels ar-build-revision=${ar_main} " "${FAKE_GCLOUD_LOG}"
+grep -Eq "^run deploy arttra-work-slack --image .*:${ar_main}-amd64 --update-labels ar-build-revision=${ar_main} " "${FAKE_GCLOUD_LOG}"
 
 : >"${FAKE_GCLOUD_LOG}"
 if bash scripts/slack-release.sh deploy --commit "${ar_main}" --main-commit "${ar_main}" >/dev/null 2>&1; then
 	printf 'deploy without --yes unexpectedly succeeded\n' >&2
 	exit 1
 fi
-if rg -q '^run deploy ' "${FAKE_GCLOUD_LOG}"; then
+if grep -Eq '^run deploy ' "${FAKE_GCLOUD_LOG}"; then
 	printf 'deploy without --yes mutated Cloud Run\n' >&2
 	exit 1
 fi
@@ -101,7 +101,7 @@ if bash scripts/slack-release.sh rollback --revision "${FAKE_ROLLBACK_REVISION}"
 	printf 'rollback without --yes unexpectedly succeeded\n' >&2
 	exit 1
 fi
-if rg -q '^run services update-traffic ' "${FAKE_GCLOUD_LOG}"; then
+if grep -Eq '^run services update-traffic ' "${FAKE_GCLOUD_LOG}"; then
 	printf 'rollback without --yes mutated Cloud Run\n' >&2
 	exit 1
 fi
