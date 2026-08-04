@@ -44,6 +44,44 @@ describe("Slack Canvas projection", () => {
     expect(creates).toHaveLength(1);
     expect(edits).toHaveLength(0);
     expect(access).toEqual([{ canvas_id: "F_CANVAS_1", access_level: "read", user_ids: ["U123"] }]);
+    const states = await service.listExistingStates();
+    expect(states).toHaveLength(1);
+    expect(states[0]).toMatchObject({
+      stateKey: first.stateKey,
+      state: { canvasId: "F_CANVAS_1", contentHash: first.contentHash },
+    });
+  });
+
+  test("定期同期用のexisting-only指定ではstate消失時にCanvasを新規作成しない", async () => {
+    const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-canvas-")));
+    let createCount = 0;
+    const service = new CanvasProjectionService(
+      {
+        canvases: {
+          create: async () => {
+            createCount += 1;
+            return { canvas_id: "F_NEVER" };
+          },
+          edit: async () => {},
+          access: { set: async () => {} },
+        },
+      },
+      store,
+    );
+
+    await expect(
+      service.sync({
+        teamId: "T123",
+        viewerId: "U123",
+        target: { kind: "user", id: "U123" },
+        scope: allAccessibleScope(),
+        accessibleRepositories: ["art-tra2021/work"],
+        items: [item("https://github.com/art-tra2021/work/issues/1")],
+        createIfMissing: false,
+      }),
+    ).rejects.toMatchObject({ code: "canvas_projection_missing" });
+    expect(createCount).toBe(0);
+    expect(await service.listExistingStates()).toEqual([]);
   });
 
   test("repository scopeは対象repository以外をCanvasへ投影しない", async () => {

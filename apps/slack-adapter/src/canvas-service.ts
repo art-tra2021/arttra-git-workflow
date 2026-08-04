@@ -9,6 +9,7 @@ import {
   type RepositoryScope,
   validateProjectionBinding,
 } from "./project-scope.ts";
+import { RetryableWorkError } from "./retryable-error.ts";
 import type { StateStore } from "./state-store.ts";
 import type { HumanWorkItem } from "./types.ts";
 
@@ -70,6 +71,8 @@ export interface CanvasProjectionInput {
   title?: string;
   /** Existing ID can be supplied when adopting a manually-created Canvas. */
   canvasId?: string;
+  /** 定期同期ではfalseにし、state消失時の新規Canvas作成を禁止する。 */
+  createIfMissing?: boolean;
 }
 
 export interface CanvasProjectionState {
@@ -80,6 +83,20 @@ export interface CanvasProjectionState {
   accessKey: string;
   binding: ProjectionBinding;
   stateKey: string;
+}
+
+export interface CanvasProjectionStateEntry {
+  stateKey: string;
+  state: CanvasProjectionState;
+}
+
+export class CanvasProjectionMissingError extends Error {
+  readonly code = "canvas_projection_missing";
+
+  constructor() {
+    super("既存のSlack Canvas stateが見つからないため、定期同期では新規作成しません。");
+    this.name = "CanvasProjectionMissingError";
+  }
 }
 
 export interface CanvasProjectionResult {
@@ -107,6 +124,14 @@ export class CanvasProjectionService {
   constructor(client: CanvasClient, store: StateStore) {
     this.client = client;
     this.store = store;
+  }
+
+  /** 保存済みstateを変更せず、state storeのkey順に列挙する。 */
+  async listExistingStates(): Promise<ReadonlyArray<CanvasProjectionStateEntry>> {
+    const entries = await this.store.listEntries<CanvasProjectionState>(STATE_NAMESPACE);
+    return entries
+      .map((entry) => ({ stateKey: entry.key, state: entry.value }))
+      .sort((left, right) => left.stateKey.localeCompare(right.stateKey));
   }
 
   async revokeViewerAccess(teamId: string, viewerId: string): Promise<number> {
@@ -173,6 +198,9 @@ export class CanvasProjectionService {
     let unchanged = false;
 
     if (!canvasId) {
+      if (input.createIfMissing === false) {
+        throw new CanvasProjectionMissingError();
+      }
       const response = await this.client.canvases.create({
         title,
         document_content: { type: "markdown", markdown },
@@ -270,14 +298,20 @@ export class CanvasProjectionService {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const current = await this.store.get<CanvasProjectionLease>(LEASE_NAMESPACE, stateKey);
       if (!current || Date.parse(current.expiresAt) > Date.now()) {
-        throw new Error("Slack Canvasの同期処理が進行中です。完了後にもう一度実行してください。");
+        throw new RetryableWorkError(
+          "project_canvas_sync_in_progress",
+          "Slack Canvasの同期処理が進行中です。完了後にもう一度実行してください。",
+        );
       }
       const next = { ...fresh, revision: current.revision + 1 };
       if (await this.store.compareAndSet(LEASE_NAMESPACE, stateKey, current.revision, next)) {
         return owner;
       }
     }
-    throw new Error("Slack Canvasの同期処理が競合しました。少し待って再実行してください。");
+    throw new RetryableWorkError(
+      "project_canvas_sync_conflict",
+      "Slack Canvasの同期処理が競合しました。少し待って再実行してください。",
+    );
   }
 
   private async releaseLease(stateKey: string, owner: string): Promise<void> {

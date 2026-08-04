@@ -284,6 +284,13 @@ Webhookの取りこぼしを修復する定期同期は、固定JSON `{"schemaVe
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
 定期同期と`/ar project sync`は同じ同期serviceと決定的なrow変換を使用する。
 
+本人が`/ar canvas`で作成済みの個人Canvasは、固定JSON `{"schemaVersion":1,"kind":"project-canvas.sync"}` を`/internal/project-canvas-sync`へ15分ごとに送って同期する。
+このendpointは保存済みの`user` target bindingだけをstate key順に列挙し、`/ar canvas`と同じGitHub identity・repository access再検証経路へ流す。
+定期処理はCanvasを新規作成せず、channel Canvas、ACL拡張、Notion本文の複製を行わない。
+access喪失時は既存の個人投影失効処理を適用し、内容hashとACLが同じ場合は`canvases.edit`と`canvases.access.set`を呼ばない。
+応答はbindingごとの`success`、`unchanged`、`skipped`、`error`をstate key順のversion付きJSONで返す。
+署名、再試行、deploy後のread-back手順は[個人Canvas定期同期runbook](../../docs/project-canvas-sync-runbook.md)に記載する。
+
 Issue作成metadataの定期同期は、固定JSON `{"schemaVersion":1,"kind":"issue-metadata.sync"}` を`/internal/issue-metadata-sync`へ送る。
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
 同期はrepository一覧、既定repository、一度利用されたrepositoryのIssue templateをGitHubから再取得し、Firestore cacheを更新する。

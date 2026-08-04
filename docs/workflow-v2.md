@@ -110,6 +110,9 @@ mise run slack:canvas:json -- --user U0123456789
 ```
 
 Canvas同期は内容のhashを保存し、Projectの表示内容が変わらない限り`canvases.edit`を呼びません。
+作成済みの本人専用Canvasだけは、署名付きinternal endpointから15分ごとに同じ同期処理へ流します。
+定期処理はGitHub identityとrepository accessを再検証し、新しいCanvasやchannel共有を作らず、ACLと内容が同じ場合はSlack APIの書換えを行いません。
+運用手順は[個人Canvas定期同期runbook](project-canvas-sync-runbook.md)を参照してください。
 これにより、定期同期が更新履歴と通知を増やす問題を避けます。
 
 ## 新規repositoryの開設
