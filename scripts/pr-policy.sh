@@ -4,6 +4,12 @@ set -euo pipefail
 : "${GH_REPO:?GH_REPO is required}"
 : "${PR_NUMBER:?PR_NUMBER is required}"
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./issue-policy-lib.sh
+# The library is resolved from this script's directory at runtime.
+# shellcheck disable=SC1091
+source "${script_dir}/issue-policy-lib.sh"
+
 pr_json="$(
 	gh pr view "$PR_NUMBER" --repo "$GH_REPO" \
 		--json author,body,closingIssuesReferences,headRefName,reviews
@@ -12,6 +18,46 @@ author="$(jq -r '.author.login' <<<"$pr_json")"
 body="$(jq -r '.body // ""' <<<"$pr_json")"
 head_ref="$(jq -r '.headRefName' <<<"$pr_json")"
 closing_issue_count="$(jq -r '(.closingIssuesReferences // []) | length' <<<"$pr_json")"
+closing_issue_source="native"
+
+resolve_body_closing_issue() {
+	local match reference reference_lower repository number repository_lower
+	local -a matches=()
+	while IFS= read -r match; do
+		if [[ -n "$match" ]]; then
+			matches+=("$match")
+		fi
+	done < <(
+		grep -Eio '(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+(#[1-9][0-9]*|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*)' <<<"$body" || true
+	)
+
+	closing_issue_count="${#matches[@]}"
+	if [[ "$closing_issue_count" -ne 1 ]]; then
+		return 0
+	fi
+	reference="$(sed -E 's/^[^[:space:]]+[[:space:]]+//' <<<"${matches[0]}")"
+	reference_lower="$(tr '[:upper:]' '[:lower:]' <<<"$reference")"
+	if [[ "$reference_lower" =~ ^#([1-9][0-9]*)$ ]]; then
+		repository="$GH_REPO"
+		number="${BASH_REMATCH[1]}"
+	elif [[ "$reference_lower" =~ ^https://github\.com/([^/]+)/([^/]+)/issues/([1-9][0-9]*)$ ]]; then
+		repository="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+		number="${BASH_REMATCH[3]}"
+	elif [[ "$reference_lower" =~ ^([^/]+)/([^#]+)#([1-9][0-9]*)$ ]]; then
+		repository="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+		number="${BASH_REMATCH[3]}"
+	else
+		closing_issue_count=0
+		return 0
+	fi
+	repository_lower="$(tr '[:upper:]' '[:lower:]' <<<"$GH_REPO")"
+	if [[ "$repository" != "$repository_lower" ]]; then
+		echo "AR-PR-018: stacked PRのclosing keywordは同一repositoryのTaskだけを指定できます（現在: ${reference}）。このPRのTaskを \`Closes #<Task番号>\` で1件だけ指定し、cross-repository IssueはRelates toへ変更してください。" >&2
+		return 1
+	fi
+	issue_number="$number"
+	closing_issue_source="body"
+}
 
 # GitHubが検証した依存更新Appだけは、Issueを別途作らずCIを正本にする。
 # branch名だけでは信用せず、Appのloginとprefixの両方を照合する。
@@ -21,8 +67,13 @@ if [[ "$author" == "app/dependabot" && "$head_ref" == dependabot/* ]] ||
 	exit 0
 fi
 
+issue_number=""
 if [[ "$closing_issue_count" -eq 0 ]]; then
-	echo "AR-PR-001: PRにIssueが関連付いていません。本文へ \`Closes #123\` を追加してください。" >&2
+	resolve_body_closing_issue
+fi
+
+if [[ "$closing_issue_count" -eq 0 ]]; then
+	echo "AR-PR-001: PRにIssueが関連付いていません。本文へ \`Closes #123\` を追加してください。stacked PRではGitHubのclosingIssuesReferencesが空になるため、同一repositoryのTaskをclosing keywordで明記してください。" >&2
 	exit 1
 fi
 
@@ -31,7 +82,9 @@ if [[ "$closing_issue_count" -ne 1 ]]; then
 	exit 1
 fi
 
-issue_number="$(jq -r '.closingIssuesReferences[0].number' <<<"$pr_json")"
+if [[ -z "$issue_number" ]]; then
+	issue_number="$(jq -r '.closingIssuesReferences[0].number' <<<"$pr_json")"
+fi
 branch_issue="${head_ref#*/}"
 branch_issue="${branch_issue%%-*}"
 if [[ ! "$branch_issue" =~ ^[1-9][0-9]*$ || "$branch_issue" != "$issue_number" ]]; then
@@ -39,7 +92,7 @@ if [[ ! "$branch_issue" =~ ^[1-9][0-9]*$ || "$branch_issue" != "$issue_number" ]
 	exit 1
 fi
 
-issue_json="$(gh issue view "$issue_number" --repo "$GH_REPO" --json labels,parent)"
+issue_json="$(issue_policy_load_issue "$issue_number")"
 labels="$(jq -r '.labels[].name' <<<"$issue_json")"
 issue_types="$(grep -E '^type/' <<<"$labels" || true)"
 issue_type_count="$(grep -Ec '^type/' <<<"$labels" || true)"
@@ -62,7 +115,7 @@ if [[ -z "$parent_url" ]]; then
 	echo "AR-PR-008: Task #${issue_number}にnative parentがありません。親WorkまたはBusinessを設定してください。" >&2
 	exit 1
 fi
-parent_json="$(gh issue view "$parent_url" --json labels,url)"
+parent_json="$(issue_policy_load_issue "$parent_url")"
 parent_labels="$(jq -r '.labels[].name' <<<"$parent_json")"
 parent_types="$(grep -E '^type/' <<<"$parent_labels" || true)"
 parent_type_count="$(wc -l <<<"$parent_types" | tr -d ' ')"
@@ -77,6 +130,8 @@ if grep -Eq '^merge/' <<<"$parent_labels"; then
 	echo "AR-PR-011: Task #${issue_number}の親にmergeラベルがあります。merge方針はtype/taskだけに設定し、親Work / Businessからmergeラベルを外してください。" >&2
 	exit 1
 fi
+issue_policy_validate_task_terminal "$issue_json" "$PR_NUMBER" "$closing_issue_source"
+issue_policy_validate_hierarchy_json "$parent_json"
 if ! grep -Fxq "Relates to ${parent_url}" <<<"$body"; then
 	echo "AR-PR-010: PR本文へTaskの実際の親を \`Relates to ${parent_url}\` と記載してください。" >&2
 	exit 1

@@ -13,11 +13,24 @@ gh() {
 		;;
 	"issue view")
 		if [[ "$3" == "$MOCK_PARENT_URL" ]]; then
-			jq -cn --argjson labels "$(jq -Rn '[inputs | {name: .}]' <<<"$MOCK_PARENT_LABELS")" --arg url "$MOCK_PARENT_URL" \
-				'{labels: $labels, url: $url}'
+			jq -cn \
+				--argjson labels "$(jq -Rn '[inputs | {name: .}]' <<<"$MOCK_PARENT_LABELS")" \
+				--arg url "$MOCK_PARENT_URL" \
+				--arg grandparent "$MOCK_GRANDPARENT_URL" \
+				--argjson closing_prs "$MOCK_PARENT_CLOSING_PRS" \
+				'{number: 41, labels: $labels, url: $url, parent: (if $grandparent == "" then null else {url: $grandparent} end), subIssues: {nodes: [], totalCount: 1}, closedByPullRequestsReferences: $closing_prs}'
+		elif [[ "$3" == "$MOCK_GRANDPARENT_URL" ]]; then
+			jq -cn \
+				--argjson labels "$(jq -Rn '[inputs | {name: .}]' <<<"$MOCK_GRANDPARENT_LABELS")" \
+				--arg url "$MOCK_GRANDPARENT_URL" \
+				'{number: 40, labels: $labels, url: $url, parent: null, subIssues: {nodes: [], totalCount: 1}, closedByPullRequestsReferences: []}'
 		else
-			jq -cn --argjson labels "$(jq -Rn '[inputs | {name: .}]' <<<"$MOCK_ISSUE_LABELS")" --arg parent "$MOCK_PARENT_URL" \
-				'{labels: $labels, parent: (if $parent == "" then null else {url: $parent} end)}'
+			jq -cn \
+				--argjson labels "$(jq -Rn '[inputs | {name: .}]' <<<"$MOCK_ISSUE_LABELS")" \
+				--arg parent "$MOCK_PARENT_URL" \
+				--argjson child_count "$MOCK_TASK_CHILD_COUNT" \
+				--argjson closing_prs "$MOCK_TASK_CLOSING_PRS" \
+				'{number: 42, labels: $labels, url: "https://github.com/test/repo/issues/42", parent: (if $parent == "" then null else {url: $parent} end), subIssues: {nodes: [], totalCount: $child_count}, closedByPullRequestsReferences: $closing_prs}'
 		fi
 		printf 'called\n' >>"$MOCK_API_CALL_LOG"
 		;;
@@ -68,9 +81,14 @@ export MOCK_API_CALL_LOG="${test_dir}/api-calls"
 export MOCK_ISSUE_LABELS=$'type/task\nmerge/self'
 export MOCK_PARENT_LABELS="type/work"
 export MOCK_PARENT_URL="https://github.com/test/repo/issues/41"
+export MOCK_GRANDPARENT_LABELS="type/intake"
+export MOCK_GRANDPARENT_URL="https://github.com/test/repo/issues/40"
+export MOCK_TASK_CHILD_COUNT=0
+export MOCK_TASK_CLOSING_PRS='[{"number": 1}]'
+export MOCK_PARENT_CLOSING_PRS='[]'
 export MOCK_PR_JSON
 
-MOCK_PR_JSON="$(make_pr_json "alice" "feature/86-policy" '[]')"
+MOCK_PR_JSON="$(make_pr_json "alice" "feature/86-policy" '[]' 'No linked Task')"
 run_policy "missing-closing-issue" 1 "AR-PR-001"
 
 MOCK_PR_JSON="$(make_pr_json "alice" "feature/86-policy" '[{"number": 42}, {"number": 43}]')"
@@ -86,10 +104,27 @@ fi
 
 MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[{"number": 42}]')"
 run_policy "single-primary-task" 0 "Issue #42: 本人マージ可"
-if [[ "$(wc -l <"$MOCK_API_CALL_LOG" | tr -d ' ')" -ne 2 ]]; then
-	printf 'not ok - single-primary-task: expected Task and parent queries\n' >&2
+if [[ "$(wc -l <"$MOCK_API_CALL_LOG" | tr -d ' ')" -ne 3 ]]; then
+	printf 'not ok - single-primary-task: expected Task, parent, and Intake ancestor queries\n' >&2
 	exit 1
 fi
+
+MOCK_TASK_CLOSING_PRS='[]'
+MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[]')"
+run_policy "stacked-pr-bare-closing-task" 0 "Issue #42: 本人マージ可"
+
+MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[]' $'Closes test/repo#42\nRelates to https://github.com/test/repo/issues/41')"
+run_policy "stacked-pr-same-repo-short-reference" 0 "Issue #42: 本人マージ可"
+
+MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[]' $'Resolves https://github.com/test/repo/issues/42\nRelates to https://github.com/test/repo/issues/41')"
+run_policy "stacked-pr-same-repo-url" 0 "Issue #42: 本人マージ可"
+
+MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[]' 'Closes other/repo#42')"
+run_policy "reject-stacked-cross-repo-closing-task" 1 "AR-PR-018"
+
+MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[]' $'Closes #42\nFixes #43')"
+run_policy "reject-ambiguous-stacked-closing-tasks" 1 "AR-PR-005"
+MOCK_TASK_CLOSING_PRS='[{"number": 1}]'
 
 MOCK_PR_JSON="$(make_pr_json "alice" "feature/41-policy" '[{"number": 42}]')"
 run_policy "reject-branch-task-mismatch" 1 "AR-PR-007"
@@ -130,6 +165,25 @@ run_policy "reject-merge-mode-on-parent" 1 "AR-PR-011"
 MOCK_PARENT_LABELS="type/work"
 MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[{"number": 42}]' 'Closes #42')"
 run_policy "require-actual-parent-relation" 1 "AR-PR-010"
+
+MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[{"number": 42}]')"
+MOCK_TASK_CHILD_COUNT=1
+run_policy "reject-task-with-children" 1 "AR-ISSUE-006"
+MOCK_TASK_CHILD_COUNT=0
+
+MOCK_TASK_CLOSING_PRS='[{"number": 1}, {"number": 2}]'
+run_policy "reject-second-task-closing-pr" 1 "AR-PR-012"
+MOCK_TASK_CLOSING_PRS='[{"number": 1}]'
+
+MOCK_GRANDPARENT_URL=""
+run_policy "reject-work-without-intake-ancestor" 1 "AR-ISSUE-004"
+MOCK_GRANDPARENT_URL="https://github.com/test/repo/issues/40"
+
+MOCK_GRANDPARENT_LABELS="type/work"
+run_policy "reject-invalid-intake-ancestor" 1 "AR-ISSUE-005"
+MOCK_GRANDPARENT_LABELS="type/intake"
+
+run_policy "accept-complete-ancestor-chain" 0 "本人マージ可"
 
 MOCK_PR_JSON="$(make_pr_json "app/dependabot" "dependabot/cargo/serde-1" '[]')"
 run_policy "dependabot-exception" 0 "Issue関連付けを免除"
