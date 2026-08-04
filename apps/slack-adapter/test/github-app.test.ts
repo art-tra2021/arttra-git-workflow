@@ -975,6 +975,50 @@ describe("GitHub App adapter", () => {
     }
   });
 
+  test("check annotationからPolicy codeと診断完全性を決定的に取得する", async () => {
+    const client = dependencies(async (input) => {
+      if (input.endsWith("/app/installations/99/access_tokens")) {
+        return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
+      }
+      if (input.includes("/check-runs/501/annotations?")) {
+        return json([
+          {
+            title: "AR-PR-004",
+            message: "AR-PR-004: merge/reviewでは第三者承認が必要です。",
+          },
+        ]);
+      }
+      if (input.includes("/check-suites/601/check-runs?")) {
+        return json({
+          total_count: 3,
+          check_runs: [
+            { id: 502, conclusion: "failure" },
+            { id: 503, conclusion: "timed_out" },
+            { id: 504, conclusion: "success" },
+          ],
+        });
+      }
+      if (input.includes("/check-runs/502/annotations?")) {
+        return json([{ title: "AR-PR-004", message: "approval wait" }]);
+      }
+      if (input.includes("/check-runs/503/annotations?")) return json([]);
+      throw new Error(`予期しないrequest: ${input}`);
+    });
+
+    expect(
+      await client.loadCheckFailureDiagnostics("art-tra2021/arttra-git-workflow", {
+        kind: "check_run",
+        id: 501,
+      }),
+    ).toEqual({ policyCodes: ["AR-PR-004"], complete: true });
+    expect(
+      await client.loadCheckFailureDiagnostics("art-tra2021/arttra-git-workflow", {
+        kind: "check_suite",
+        id: 601,
+      }),
+    ).toEqual({ policyCodes: ["AR-PR-004"], complete: false });
+  });
+
   test("セルフマージ停止はreview labelへ切り替えて停止者と理由をIssueへ記録する", async () => {
     const requests: Array<{ url: string; method: string; body: unknown }> = [];
     let loadCount = 0;

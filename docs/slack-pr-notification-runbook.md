@@ -62,11 +62,15 @@ Issue作成時点の担当者は最初のIssue概要に含め、初期`assigned`
 | 差し戻し後の修正push | 差し戻したreviewer |
 | 承認 | PR作成者 |
 | CI失敗・timeout・cancel・要操作 | PR作成者とIssue担当者 |
+| PR Policyが`AR-PR-004`だけでreviewer指定済み | 追加通知なし（既存のレビュー依頼へ一本化） |
+| PR Policyが`AR-PR-004`だけでreviewer未指定 | PR作成者へreviewer指定を一度依頼 |
 | マージ | Issue担当者 |
 | Issue完了 | Issue担当者 |
 
 実行者は通知先ではなく出来事の帰属表示なので、常にplainな`@github-login`で表示する。
 native mentionは、確認や対応が必要なrecipientだけに付け、Issue作成、自己assignment、自己reviewer指定、自己コメントなどの実行者本人には付けない。
+PR PolicyはGitHub Actionsのerror annotationへ`AR-PR-*` codeを出し、Slack adapterはChecks read APIで失敗runのannotationを再取得する。
+失敗runのすべてを`AR-PR-004`だけで説明できる場合に限り承認待ちとして扱い、annotationを取得できない場合、別codeがある場合、codeのない失敗runが混在する場合は通常のCI失敗通知を維持する。
 Issueの表示はIntake、Work、Task、Businessごとに見出し、説明、次の操作を変えるが、Taskは親WorkまたはBusinessのthread返信として表示する。
 セルフマージ対象になった最初の警告だけはWorkまたはBusiness threadへのTask返信をchannelにも展開し、停止機会を作る。
 ただし`AR_GITHUB_CAPABILITY_GRANTS_JSON`で`suppress_self_merge_channel_broadcast`を明示grantされたGitHub利用者は、初回警告も親WorkまたはBusiness thread内だけに留める。
@@ -106,7 +110,7 @@ fallback textにも同じ絵文字と見出しを含めるが、本文中の装�
 4. Issueコメント、PR会話コメント、レビューコメントを一つずつ追加する。
 5. 差し戻し、修正push、承認の順に実施する。
 6. PRをsquash mergeし、Issueを完了させる。
-7. CI失敗を一度発生させ、primary Taskの親WorkまたはBusiness threadへ通知されることを確認する。
+7. CI失敗を一度発生させ、primary Taskの親WorkまたはBusiness threadへ通知されることを確認する。続けて`AR-PR-004`だけの失敗を発生させ、reviewer指定済みでは追加mentionがなく、未指定ではPR作成者へのreviewer指定依頼が一度だけ届くことを確認する。
 8. 通常のセルフマージ実行者では初回だけchannelへ展開され、`suppress_self_merge_channel_broadcast`のgrant対象者では初回からthread内だけになることを確認する。どちらも停止ボタンがあり、CI通過通知はthread内だけであることを確認する。
 9. Intake、Work、Business、Taskの作成時に、担当者表示を含む最初の概要とは別の初期assignment返信がないことを確認する。その後のunassignmentと再assignmentは通知されることを確認する。
 10. Task作成からPR完了までの通知が同じWorkまたはBusinessスレッドにあり、WorkまたはBusiness概要、Task概要、後続eventの順で、同じイベントの重複通知がないことを確認する。

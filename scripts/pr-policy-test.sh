@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 policy_script="${script_dir}/pr-policy.sh"
+annotation_lib="${script_dir}/pr-policy-annotation-lib.sh"
 test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT
 
@@ -103,6 +104,18 @@ export MOCK_PARENT_CLOSING_PRS='[]'
 export MOCK_REPO_PERMISSION="admin"
 export MOCK_CHANGED_PATHS="src/lib.rs"
 export MOCK_PR_JSON
+
+annotation_output="$({
+	GITHUB_ACTIONS=true bash -c '
+		source "$1"
+		pr_policy_error "AR-PR-004" $'"'"'line 1%\r\nline 2'"'"'
+	' _ "$annotation_lib"
+} 2>&1)"
+if ! grep -Fq '::error title=AR-PR-004::AR-PR-004: line 1%25%0D%0Aline 2' <<<"$annotation_output"; then
+	printf 'not ok - policy-annotation-escaping\n%s\n' "$annotation_output" >&2
+	exit 1
+fi
+printf 'ok - policy-annotation-escaping\n'
 
 MOCK_PR_JSON="$(make_pr_json "alice" "feature/86-policy" '[]' 'No linked Task')"
 run_policy "missing-closing-issue" 1 "AR-PR-001"
@@ -227,6 +240,12 @@ run_policy "reject-unauthorized-emergency-label" 1 "AR-PR-014"
 
 MOCK_ISSUE_LABELS=$'type/task\nmerge/self'
 MOCK_CHANGED_PATHS="src/lib.rs"
+
+MOCK_ISSUE_LABELS=$'type/task\nmerge/review'
+MOCK_PR_JSON="$(make_pr_json "alice" "feature/42-policy" '[{"number": 42}]')"
+GITHUB_ACTIONS=true run_policy "review-approval-wait-annotation" 1 "::error title=AR-PR-004::AR-PR-004: merge/review"
+
+MOCK_ISSUE_LABELS=$'type/task\nmerge/self'
 
 MOCK_PR_JSON="$(make_pr_json "app/dependabot" "dependabot/cargo/serde-1" '[]')"
 run_policy "dependabot-exception" 0 "Issue関連付けを免除"

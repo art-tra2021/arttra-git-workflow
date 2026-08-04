@@ -429,6 +429,46 @@ describe("LifecycleNotificationService", () => {
       },
     });
   });
+
+  test("AR-PR-004だけでreviewer指定済みならCI失敗mentionを重ねない", async () => {
+    const harness = await createHarness();
+    harness.github.checkDiagnostics = { policyCodes: ["AR-PR-004"], complete: true };
+
+    expect(await harness.service.process(checkRunFailedJob("github-actions[bot]"))).toBe(0);
+    expect(harness.sent).toHaveLength(0);
+  });
+
+  test("AR-PR-004だけでreviewer未指定ならauthorへ指定依頼を一度送る", async () => {
+    const harness = await createHarness();
+    harness.github.checkDiagnostics = { policyCodes: ["AR-PR-004"], complete: true };
+    harness.github.pullRequest = {
+      ...harness.github.pullRequest,
+      requestedReviewerLogins: [],
+      requestedTeamSlugs: [],
+    };
+
+    expect(await harness.service.process(checkRunFailedJob("github-actions[bot]"))).toBe(1);
+    expect(await harness.service.process(checkSuiteFailedJob())).toBe(0);
+    expect(harness.sent[2]?.notification).toMatchObject({
+      slackUserIds: ["UAUTHOR"],
+      summary: "PRのreviewer指定が必要です。",
+      nextAction: "PR作成者以外のreviewerを指定してレビューを依頼する",
+    });
+  });
+
+  test("AR-PR-004と別失敗が混在する場合は通常CI通知を維持する", async () => {
+    const harness = await createHarness();
+    harness.github.checkDiagnostics = {
+      policyCodes: ["AR-PR-004", "AR-PR-016"],
+      complete: true,
+    };
+
+    expect(await harness.service.process(checkRunFailedJob("github-actions[bot]"))).toBe(1);
+    expect(harness.sent[2]?.notification).toMatchObject({
+      slackUserIds: ["UAUTHOR", "UOWNER"],
+      summary: "PRのCIに対応が必要です。",
+    });
+  });
 });
 
 async function createHarness(
@@ -464,6 +504,7 @@ async function createHarness(
 }
 
 class FakeLifecycleClient implements GitHubLifecycleClient {
+  checkDiagnostics = { policyCodes: [] as string[], complete: false };
   issue: GitHubIssueContext = {
     number: 44,
     title: "ライフサイクル通知",
@@ -526,6 +567,10 @@ class FakeLifecycleClient implements GitHubLifecycleClient {
           ? (this.pullRequest.linkedIssues[0] ?? null)
           : null,
     };
+  }
+
+  async loadCheckFailureDiagnostics() {
+    return this.checkDiagnostics;
   }
 }
 
@@ -611,6 +656,7 @@ function checkRunFailedJob(actor = "merger") {
       sender: { login: actor },
       action: "completed",
       check_run: {
+        id: 501,
         name: "verify",
         conclusion: "failure",
         html_url: "https://github.example/checks/501",
@@ -653,7 +699,7 @@ function checkSuiteFailedJob() {
     payload: {
       ...basePayload(),
       action: "completed",
-      check_suite: { conclusion: "failure", pull_requests: [{ number: 45 }] },
+      check_suite: { id: 601, conclusion: "failure", pull_requests: [{ number: 45 }] },
     },
   };
 }

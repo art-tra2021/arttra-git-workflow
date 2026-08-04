@@ -24,6 +24,8 @@ import {
 } from "./project-read-model.ts";
 import { toHumanWorkItem } from "./read-model.ts";
 import type {
+  GitHubCheckFailure,
+  GitHubCheckFailureDiagnostics,
   GitHubIssueContext,
   GitHubReviewClient,
   GitHubReviewerIdentity,
@@ -729,6 +731,30 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     };
   }
 
+  async loadCheckFailureDiagnostics(
+    repository: string,
+    check: GitHubCheckFailure,
+  ): Promise<GitHubCheckFailureDiagnostics> {
+    const failedRunIds =
+      check.kind === "check_run"
+        ? [check.id]
+        : await this.loadFailedCheckRunIds(repository, check.id);
+    if (failedRunIds.length === 0) return { policyCodes: [], complete: false };
+
+    const codesByRun = await Promise.all(
+      failedRunIds.map(async (checkRunId) => {
+        const annotations = await this.paginate<
+          Array<{ title?: string | null; message?: string | null; raw_details?: string | null }>
+        >(`/repos/${repository}/check-runs/${checkRunId}/annotations`);
+        return policyCodesFromAnnotations(annotations);
+      }),
+    );
+    return {
+      policyCodes: [...new Set(codesByRun.flat())].sort(),
+      complete: codesByRun.every((codes) => codes.length > 0),
+    };
+  }
+
   async loadIssueContext(repository: string, issueNumber: number): Promise<GitHubIssueContext> {
     const issue = await this.api<ApiIssue>(`/repos/${repository}/issues/${issueNumber}`);
     if (issue.pull_request) {
@@ -870,6 +896,31 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       if (pageResults.length < 100) {
         return results as T;
       }
+    }
+  }
+
+  private async loadFailedCheckRunIds(repository: string, checkSuiteId: number): Promise<number[]> {
+    const failedConclusions = new Set([
+      "failure",
+      "timed_out",
+      "cancelled",
+      "action_required",
+      "stale",
+    ]);
+    const ids: number[] = [];
+    for (let page = 1; ; page += 1) {
+      const response = await this.api<{
+        total_count: number;
+        check_runs: Array<{ id: number; conclusion?: string | null }>;
+      }>(
+        `/repos/${repository}/check-suites/${checkSuiteId}/check-runs?filter=latest&per_page=100&page=${page}`,
+      );
+      ids.push(
+        ...response.check_runs
+          .filter((run) => failedConclusions.has((run.conclusion ?? "").toLowerCase()))
+          .map((run) => run.id),
+      );
+      if (page * 100 >= response.total_count) return ids;
     }
   }
 
@@ -1053,6 +1104,25 @@ export function createAppJwt(appId: string, privateKey: string, nowMilliseconds:
 
 function base64Url(value: string): string {
   return Buffer.from(value).toString("base64url");
+}
+
+function policyCodesFromAnnotations(
+  annotations: Array<{
+    title?: string | null;
+    message?: string | null;
+    raw_details?: string | null;
+  }>,
+): string[] {
+  const codes = new Set<string>();
+  for (const annotation of annotations) {
+    const text = [annotation.title, annotation.message, annotation.raw_details]
+      .filter((value): value is string => typeof value === "string")
+      .join("\n");
+    for (const match of text.matchAll(/\bAR-PR-[0-9]{3}\b/g)) {
+      if (match[0]) codes.add(match[0]);
+    }
+  }
+  return [...codes].sort();
 }
 
 async function githubError(response: Response): Promise<Error> {
