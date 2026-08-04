@@ -15,6 +15,7 @@ import type {
 import type { StateStore } from "./state-store.ts";
 
 const NOTIFICATION_NAMESPACE = "lifecycle-notification";
+const ISSUE_CREATION_SETUP_NAMESPACE = "issue-creation-setup";
 const SUPPRESS_ACTOR_MENTION_KINDS = new Set<LifecycleNotificationKind>([
   "issue-opened",
   "issue-reopened",
@@ -98,6 +99,13 @@ interface LifecycleNotificationState {
   notifiedAt: string;
 }
 
+interface IssueCreationSetupState {
+  schemaVersion: 1;
+  revision: number;
+  issueUrl: string;
+  pendingAssigneeLogins: string[];
+}
+
 export class LifecycleNotificationService {
   private readonly github: GitHubLifecycleClient;
   private readonly store: StateStore;
@@ -162,20 +170,7 @@ export class LifecycleNotificationService {
     const actor = nestedString(payload, "sender", "login");
     const issue = await this.github.loadIssueContext(repository, issueNumber);
     if (action === "opened") {
-      const copy = issueOpenedCopy(issue);
-      const opened = await this.send(
-        issue,
-        null,
-        "issue-opened",
-        issueRootActorLogin(issue),
-        issueRootMentionLogins(issue),
-        copy.summary,
-        issueOverview(issue),
-        copy.nextAction,
-        issue.url,
-        fingerprint({ action, url: issue.url }),
-        job.deliveryId,
-      );
+      const opened = await this.ensureIssueOpened(issue, job.deliveryId);
       return (
         opened +
         (await this.notifySelfMergeScheduled(issue, repository, issueRootActorLogin(issue), job))
@@ -197,18 +192,29 @@ export class LifecycleNotificationService {
       );
     }
     if (action === "assigned" || action === "unassigned") {
-      return this.send(
-        issue,
-        null,
-        "issue-assignment-changed",
-        actor,
-        [...issue.assigneeLogins, issue.authorLogin],
-        "Issueの担当者が変更されました。",
-        `現在の担当: ${issue.assigneeLogins.map((login) => `@${login}`).join("、") || "未設定"}`,
-        "担当と次の操作を確認する",
-        issue.url,
-        fingerprint({ action, assignees: issue.assigneeLogins }),
-        job.deliveryId,
+      const assignee = nestedString(payload, "assignee", "login");
+      const opened = await this.ensureIssueOpened(issue, job.deliveryId);
+      if (action === "assigned" && (await this.consumeInitialAssignee(issue.url, assignee))) {
+        return opened;
+      }
+      if (action === "unassigned") {
+        await this.discardInitialAssignee(issue.url, assignee);
+      }
+      return (
+        opened +
+        (await this.send(
+          issue,
+          null,
+          "issue-assignment-changed",
+          actor,
+          [...issue.assigneeLogins, issue.authorLogin],
+          "Issueの担当者が変更されました。",
+          `現在の担当: ${issue.assigneeLogins.map((login) => `@${login}`).join("、") || "未設定"}`,
+          "担当と次の操作を確認する",
+          issue.url,
+          fingerprint({ action, assignees: issue.assigneeLogins }),
+          job.deliveryId,
+        ))
       );
     }
     if (action === "labeled" && nestedString(payload, "label", "name") === "merge/self") {
@@ -557,6 +563,9 @@ export class LifecycleNotificationService {
       stateKey,
     );
     if (previous?.fingerprint === eventFingerprint) return 0;
+    if (kind !== "issue-opened" && issueNotificationType(issue) === "task") {
+      await this.ensureIssueOpened(issue, sourceDeliveryId);
+    }
     const suppressActorMention = shouldSuppressActorMention(kind);
     const recipientLogins = suppressActorMention
       ? withoutLogin(mentionLogins, actorLogin)
@@ -621,6 +630,76 @@ export class LifecycleNotificationService {
       notifiedAt: new Date(this.now()).toISOString(),
     });
     return 1;
+  }
+
+  private async ensureIssueOpened(
+    issue: GitHubIssueContext,
+    sourceDeliveryId: string,
+  ): Promise<number> {
+    const copy = issueOpenedCopy(issue);
+    const opened = await this.send(
+      issue,
+      null,
+      "issue-opened",
+      issueRootActorLogin(issue),
+      issueRootMentionLogins(issue),
+      copy.summary,
+      issueOverview(issue),
+      copy.nextAction,
+      issue.url,
+      issueOpenedEventFingerprint(issue),
+      sourceDeliveryId,
+    );
+    if (opened > 0) {
+      await this.store.create<IssueCreationSetupState>(ISSUE_CREATION_SETUP_NAMESPACE, issue.url, {
+        schemaVersion: 1,
+        revision: 1,
+        issueUrl: issue.url,
+        pendingAssigneeLogins: uniqueNormalizedLogins(issue.assigneeLogins),
+      });
+    }
+    return opened;
+  }
+
+  private async consumeInitialAssignee(issueUrl: string, assigneeLogin: string): Promise<boolean> {
+    return this.updateInitialAssignee(issueUrl, assigneeLogin, true);
+  }
+
+  private async discardInitialAssignee(issueUrl: string, assigneeLogin: string): Promise<void> {
+    await this.updateInitialAssignee(issueUrl, assigneeLogin, false);
+  }
+
+  private async updateInitialAssignee(
+    issueUrl: string,
+    assigneeLogin: string,
+    reportConsumption: boolean,
+  ): Promise<boolean> {
+    const normalizedAssignee = assigneeLogin.toLowerCase();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await this.store.get<IssueCreationSetupState>(
+        ISSUE_CREATION_SETUP_NAMESPACE,
+        issueUrl,
+      );
+      if (!current?.pendingAssigneeLogins.includes(normalizedAssignee)) return false;
+      const next: IssueCreationSetupState = {
+        ...current,
+        revision: current.revision + 1,
+        pendingAssigneeLogins: current.pendingAssigneeLogins.filter(
+          (login) => login !== normalizedAssignee,
+        ),
+      };
+      if (
+        await this.store.compareAndSet(
+          ISSUE_CREATION_SETUP_NAMESPACE,
+          issueUrl,
+          current.revision,
+          next,
+        )
+      ) {
+        return reportConsumption;
+      }
+    }
+    throw new Error("Issue作成時の初期担当者状態が競合しました。");
   }
 
   private async createIssueRoot(
@@ -726,6 +805,10 @@ export function issueRootMentionLogins(issue: GitHubIssueContext): string[] {
   return withoutLogin([issue.authorLogin, ...issue.assigneeLogins], issueRootActorLogin(issue));
 }
 
+export function issueOpenedEventFingerprint(issue: GitHubIssueContext): string {
+  return fingerprint({ action: "opened", url: issue.url });
+}
+
 export function issueRootActorLogin(issue: GitHubIssueContext): string {
   return parseIssueRequester(issue.body)?.login ?? issue.authorLogin;
 }
@@ -803,6 +886,10 @@ function mentionedLogins(body: string): string[] {
   return [...body.matchAll(/(?:^|[^A-Za-z0-9_.+-])@([A-Za-z0-9-]{1,39})\b/g)]
     .flatMap((match) => (match[1] ? [match[1]] : []))
     .filter((login, index, values) => values.indexOf(login) === index);
+}
+
+function uniqueNormalizedLogins(logins: string[]): string[] {
+  return [...new Set(logins.map((login) => login.toLowerCase()))];
 }
 
 function excerpt(value: string): string {

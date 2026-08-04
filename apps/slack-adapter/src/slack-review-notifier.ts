@@ -3,6 +3,7 @@ import type {
   ResolveLifecycleSlackUserId,
 } from "./lifecycle-notification-service.ts";
 import {
+  issueOpenedEventFingerprint,
   issueRootMentionLogins,
   issueRootNotification,
   resolveNotificationThreadRootIssue,
@@ -46,9 +47,10 @@ export class SlackReviewNotifier {
     if (!threadRootIssue) return;
     const assigneeLogins = issue.assigneeLogins;
     const assigneeSlackIds = await Promise.all(assigneeLogins.map(this.resolveSlackUserId));
-    const [actorSlackUserId, ...rootResolvedUserIds] = await Promise.all([
+    const [actorSlackUserId, rootResolvedUserIds, taskResolvedUserIds] = await Promise.all([
       this.resolveSlackUserId(model.authorLogin),
-      ...issueRootMentionLogins(threadRootIssue).map(this.resolveSlackUserId),
+      Promise.all(issueRootMentionLogins(threadRootIssue).map(this.resolveSlackUserId)),
+      Promise.all(issueRootMentionLogins(issue).map(this.resolveSlackUserId)),
     ]);
     const slackUserIds = [
       ...new Set([
@@ -86,48 +88,62 @@ export class SlackReviewNotifier {
       [...new Set(rootResolvedUserIds.filter((value): value is string => value !== null))],
       null,
     );
-    await this.threads.publishReply(
-      threadRootIssue.url,
-      () =>
-        this.notifier.notify(rootNotification, null, {
+    const taskOpenedNotification = issueRootNotification(
+      issue,
+      [...new Set(taskResolvedUserIds.filter((value): value is string => value !== null))],
+      null,
+    );
+    const createRoot = () =>
+      this.notifier.notify(rootNotification, null, {
+        intentId: notificationIntentId({
+          kind: "lifecycle",
+          resourceUrl: threadRootIssue.url,
+          notificationKind: "issue-opened",
+          eventFingerprint: "issue-root-v1",
+        }),
+        ...(context.sourceDeliveryId ? { sourceDeliveryId: context.sourceDeliveryId } : {}),
+      });
+    await this.threads.publishReply(threadRootIssue.url, createRoot, (threadTs) =>
+      this.notifier.notify(taskOpenedNotification, threadTs, {
+        intentId: notificationIntentId({
+          kind: "lifecycle",
+          resourceUrl: issue.url,
+          notificationKind: "issue-opened",
+          eventFingerprint: issueOpenedEventFingerprint(issue),
+        }),
+        ...(context.sourceDeliveryId ? { sourceDeliveryId: context.sourceDeliveryId } : {}),
+      }),
+    );
+    await this.threads.publishReply(threadRootIssue.url, createRoot, (threadTs) =>
+      this.notifier.notify(
+        {
+          schemaVersion: 1,
+          kind: "review-requested",
+          resource,
+          pullRequest,
+          actorLogin: model.authorLogin,
+          actorSlackUserId: shouldSuppressActorMention("review-requested")
+            ? null
+            : actorSlackUserId,
+          slackUserIds,
+          issueType: taskOpenedNotification.issueType,
+          summary: "PRが作成され、レビュー依頼が設定されました。",
+          detail,
+          nextAction: model.nextAction,
+          actionUrl: model.pullRequest.url,
+        },
+        threadTs,
+        {
           intentId: notificationIntentId({
-            kind: "lifecycle",
-            resourceUrl: threadRootIssue.url,
-            notificationKind: "issue-opened",
-            eventFingerprint: "issue-root-v1",
+            kind: "review-request",
+            repository: model.repository,
+            pullRequestNumber: model.pullRequest.number,
+            resourceUrl: resource.url,
+            updatedAt: model.updatedAt,
           }),
           ...(context.sourceDeliveryId ? { sourceDeliveryId: context.sourceDeliveryId } : {}),
-        }),
-      (threadTs) =>
-        this.notifier.notify(
-          {
-            schemaVersion: 1,
-            kind: "review-requested",
-            resource,
-            pullRequest,
-            actorLogin: model.authorLogin,
-            actorSlackUserId: shouldSuppressActorMention("review-requested")
-              ? null
-              : actorSlackUserId,
-            slackUserIds,
-            issueType: rootNotification.issueType,
-            summary: "PRが作成され、レビュー依頼が設定されました。",
-            detail,
-            nextAction: model.nextAction,
-            actionUrl: model.pullRequest.url,
-          },
-          threadTs,
-          {
-            intentId: notificationIntentId({
-              kind: "review-request",
-              repository: model.repository,
-              pullRequestNumber: model.pullRequest.number,
-              resourceUrl: resource.url,
-              updatedAt: model.updatedAt,
-            }),
-            ...(context.sourceDeliveryId ? { sourceDeliveryId: context.sourceDeliveryId } : {}),
-          },
-        ),
+        },
+      ),
     );
   }
 }
