@@ -53,7 +53,7 @@ GitHub Ruleset側の承認数は0にし、`policy` checkがこの差を機械判
 
 - 競合するPRへ`status/conflict`
 - baseより遅れている、または3日更新がないPRへ`status/needs-update`
-- 差分量に応じた`size/S`〜`size/XL`
+- PRごとの追加・削除・合計行数をworkflow summaryへ参考表示
 - open PR同士で同じファイルを触っている組をworkflow summaryへ出力
 
 未commitを含む手元の重複は`git ar presence`が担当します。
