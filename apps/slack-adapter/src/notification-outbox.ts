@@ -866,15 +866,46 @@ function validateReplayCommand(command: NotificationReplayCommand): void {
 
 function assertSameIntent(current: NotificationOutboxState, intent: NotificationIntent): void {
   if (
-    current.intentId !== intent.metadata.intentId ||
-    current.payloadHash !== payloadHash(intent.payload) ||
-    current.channelId.length === 0
+    current.intentId === intent.metadata.intentId &&
+    current.channelId.length > 0 &&
+    (current.payloadHash === payloadHash(intent.payload) ||
+      isSentFlatTaskIssueOpenedMigration(current, intent))
   ) {
-    throw new NotificationOutboxError(
-      "notification_intent_collision",
-      "同じ通知intent IDに異なる内容が保存されています。自動送信を停止しました。",
-    );
+    return;
   }
+  throw new NotificationOutboxError(
+    "notification_intent_collision",
+    "同じ通知intent IDに異なる内容が保存されています。自動送信を停止しました。",
+  );
+}
+
+function isSentFlatTaskIssueOpenedMigration(
+  current: NotificationOutboxState,
+  intent: NotificationIntent,
+): boolean {
+  if (
+    current.status !== "sent" ||
+    !current.messageTs ||
+    current.payload.kind !== "lifecycle" ||
+    intent.payload.kind !== "lifecycle" ||
+    current.payload.notification.kind !== "issue-opened" ||
+    intent.payload.notification.kind !== "issue-opened" ||
+    current.payload.notification.issueType !== "task" ||
+    intent.payload.notification.issueType !== "task" ||
+    current.payload.threadTs !== null ||
+    !isSlackMessageTs(intent.payload.threadTs) ||
+    !isSlackMessageTs(current.messageTs)
+  ) {
+    return false;
+  }
+
+  // Work thread集約前に送信済みのTask概要は再投稿しない。
+  // sourceDeliveryIdを除き、threadTsだけが旧平投稿から変わる場合に限って既送信とみなす。
+  return current.payloadHash === payloadHash({ ...intent.payload, threadTs: null });
+}
+
+function isSlackMessageTs(value: string | null | undefined): value is string {
+  return typeof value === "string" && /^\d+\.\d+$/.test(value);
 }
 
 function isNotificationOutboxState(value: unknown): value is NotificationOutboxState {
