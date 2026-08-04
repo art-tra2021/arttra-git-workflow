@@ -205,7 +205,7 @@ Cloud Runのinstanceが切り替わっても同じcacheを利用し、操作の�
 本番では`AR_SLACK_TRANSPORT=http`を指定し、`/slack/events`でSlash Commandとinteractionを受信する。
 `AR_GITHUB_BACKEND=app`を指定し、GitHub Appのinstallation token経由でGitHub REST APIを利用する。
 production imageに`gh`は含めず、個人のGitHub tokenにも依存しない。
-`/health`はCloud Runのstartup、liveness、readiness確認に利用できる。
+`/health`はCloud Runのstartup、liveness、readiness確認に利用でき、image build時の完全なGit commitを`commit`として返す。
 Cloud Runでは一部の末尾`z`パスが予約されるため、health endpointに`/healthz`を使わない。
 Slackのrequest署名は`SLACK_SIGNING_SECRET`で検証する。
 
@@ -213,7 +213,8 @@ Slackのrequest署名は`SLACK_SIGNING_SECRET`で検証する。
 mise run slack:container
 ```
 
-このtaskは非root userで動くproduction imageをbuildし、実際にcontainerを起動して`/health`を検証する。
+このtaskは現在の完全なGit commitをimageのOCI revision labelと`AR_BUILD_REVISION`へ埋め込み、非root userで動くproduction imageをbuildする。
+実際にcontainerを起動し、`/health`の`commit`がbuild対象と一致することも検証する。
 imageへ`.env`、local state、AI設定、文書を含めない。
 
 本番の状態保存には`AR_STATE_BACKEND=firestore`を指定する。
