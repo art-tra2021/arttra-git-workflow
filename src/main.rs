@@ -2,6 +2,7 @@ mod branch;
 mod delivery;
 mod governance;
 mod guard;
+mod issue_audit;
 mod policy;
 mod presence;
 mod revert;
@@ -632,6 +633,7 @@ struct IssueDraft {
     blocked_by: Vec<u64>,
     blocking: Vec<u64>,
     target_date: Option<String>,
+    diagnostics: Vec<issue_audit::IssueAuditDiagnostic>,
 }
 
 #[derive(Debug, Serialize)]
@@ -809,6 +811,9 @@ struct VerificationReport {
     stdout: String,
     stderr: String,
     fix_command: &'static str,
+    issue_diagnostics: Vec<issue_audit::IssueAuditDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issue_audit_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2941,6 +2946,7 @@ fn issue(mut args: IssueArgs) -> Result<()> {
             args.target_date = Some(target_date.trim().to_owned());
         }
     }
+    let mut diagnostics = Vec::new();
     if let Some(parent) = args.parent.clone() {
         let parent_metadata = delivery::github_issue_metadata(&parent)?;
         let allowed = match kind {
@@ -2950,6 +2956,21 @@ fn issue(mut args: IssueArgs) -> Result<()> {
         };
         delivery::require_issue_kind(&parent_metadata, allowed, "親")?;
         delivery::require_no_merge_mode(&parent_metadata, "親")?;
+        if matches!(kind, IssueKind::Task) {
+            let child_count = parent_metadata.sub_issues.len() + 1;
+            let open_child_count = parent_metadata
+                .sub_issues
+                .iter()
+                .filter(|child| child.state.eq_ignore_ascii_case("open"))
+                .count()
+                + 1;
+            diagnostics = issue_audit::parent_diagnostics(
+                &parent_metadata.kind,
+                &parent_metadata.state,
+                child_count,
+                open_child_count,
+            );
+        }
         args.parent = Some(parent_metadata.url);
     }
 
@@ -2962,12 +2983,19 @@ fn issue(mut args: IssueArgs) -> Result<()> {
         blocked_by: args.blocked_by,
         blocking: args.blocking,
         target_date: args.target_date,
+        diagnostics,
     };
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&draft)?);
     } else {
         println!("# {}\n\n{}", draft.title, draft.body());
+    }
+    for diagnostic in &draft.diagnostics {
+        eprintln!(
+            "arttra: {}: {}\n  対応: {}",
+            diagnostic.code, diagnostic.message_ja, diagnostic.fix
+        );
     }
 
     if !args.create {
@@ -3310,6 +3338,10 @@ fn check(quick: bool, json: bool) -> Result<()> {
             .env("CARGO_TERM_COLOR", "never")
             .output()
             .context("miseを起動できませんでした")?;
+        let (issue_diagnostics, issue_audit_error) = match status::current_issue_diagnostics() {
+            Ok(diagnostics) => (diagnostics, None),
+            Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+        };
         let report = VerificationReport {
             schema_version: 1,
             task,
@@ -3318,6 +3350,8 @@ fn check(quick: bool, json: bool) -> Result<()> {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             fix_command,
+            issue_diagnostics,
+            issue_audit_error,
         };
         println!("{}", serde_json::to_string_pretty(&report)?);
         if !report.ok {
@@ -3331,6 +3365,17 @@ fn check(quick: bool, json: bool) -> Result<()> {
         .status()
         .context("miseを起動できませんでした")?;
     if status.success() {
+        match status::current_issue_diagnostics() {
+            Ok(diagnostics) => {
+                for diagnostic in diagnostics {
+                    eprintln!(
+                        "arttra: {}: {}\n  対応: {}",
+                        diagnostic.code, diagnostic.message_ja, diagnostic.fix
+                    );
+                }
+            }
+            Err(error) => eprintln!("arttra: Issue監査を実行できませんでした: {error:#}"),
+        }
         println!("✓ 検査に合格しました: {fix_command}");
         Ok(())
     } else {
@@ -3924,6 +3969,7 @@ mod tests {
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
+            diagnostics: Vec::new(),
         };
         assert_eq!(
             draft.body(),
@@ -3945,6 +3991,7 @@ mod tests {
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
+            diagnostics: Vec::new(),
         };
         assert!(intake.body().contains("## 何がありましたか"));
         assert!(intake.body().contains("判断できない"));
@@ -3962,6 +4009,7 @@ mod tests {
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
+            diagnostics: Vec::new(),
         };
         assert!(task.body().contains("## やること"));
         assert!(task.body().contains("## 親Issue\n\n#86"));
@@ -3984,6 +4032,7 @@ mod tests {
             blocked_by: Vec::new(),
             blocking: Vec::new(),
             target_date: None,
+            diagnostics: Vec::new(),
         };
         assert!(business.body().contains("## 現状"));
         assert!(business.body().contains("## 変更する文書・条件・運用"));

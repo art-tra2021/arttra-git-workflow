@@ -92,7 +92,8 @@ ClaudeとCodexは、shell commandの実行前に同じ`arttra.toml`を評価し�
 判定結果には安定したerror codeが含まれます。
 
 `git ar check`は全検査を実行し、人間には通常の診断と日本語の再実行コマンドを表示します。
-`git ar check --json`は同じ検査のexit code、stdout、stderrを一つのschemaで返します。
+`git ar check --json`は同じ検査のexit code、stdout、stderrと、現在のWork / Businessに対する非ブロッキングの`issue_diagnostics`を一つのschemaで返します。
+直属Taskが10件以上なら分割粒度の見直し、20件超なら強い分割警告、閉じた親に未完了Taskが残る場合は再openまたは親の付け替えを案内します。
 編集途中は`--quick`を付けて短い検査だけを実行できます。
 
 GitHub CLI 2.94以降を固定しているため、Issueの親子・blocked-by関係はGitHub本体の構造として扱えます。

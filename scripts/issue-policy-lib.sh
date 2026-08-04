@@ -5,7 +5,7 @@
 
 issue_policy_load_issue() {
 	local reference="$1"
-	local fields="number,url,labels,parent,subIssues,closedByPullRequestsReferences"
+	local fields="number,url,state,labels,parent,subIssues,closedByPullRequestsReferences"
 
 	if [[ "$reference" == https://github.com/* ]]; then
 		gh issue view "$reference" --json "$fields"
@@ -135,6 +135,33 @@ issue_policy_validate_non_task_closing_prs() {
 	return 1
 }
 
+issue_policy_emit_parent_advisories() {
+	local issue_json="$1"
+	local issue_type number state child_count open_child_count
+	issue_type="$(issue_policy_read_type "$issue_json")" || return 0
+	if [[ "$issue_type" != "work" && "$issue_type" != "business" ]]; then
+		return 0
+	fi
+
+	number="$(jq -r '.number' <<<"$issue_json")"
+	state="$(jq -r '.state // "OPEN"' <<<"$issue_json")"
+	child_count="$(jq -r '(.subIssues.totalCount // ((.subIssues.nodes // []) | length))' <<<"$issue_json")"
+	open_child_count="$(jq -r '[((.subIssues.nodes // [])[]) | select(.state == "OPEN")] | length' <<<"$issue_json")"
+
+	if [[ "$child_count" -gt 20 ]]; then
+		printf '::warning title=AR-ISSUE-022::Issue #%s type/%sの直属Taskが%s件あります。20件を超えているため、独立して調整できるWorkまたはBusinessへ分割してください。Task作成自体は拒否しません。\n' \
+			"$number" "$issue_type" "$child_count"
+	elif [[ "$child_count" -ge 10 ]]; then
+		printf '::notice title=AR-ISSUE-020::Issue #%s type/%sの直属Taskが%s件あります。10件に達したため、親Issueの責務と分割粒度を見直してください。Task作成自体は拒否しません。\n' \
+			"$number" "$issue_type" "$child_count"
+	fi
+
+	if [[ "$state" == "CLOSED" && "$open_child_count" -gt 0 ]]; then
+		printf '::warning title=AR-ISSUE-021::閉じたIssue #%s type/%sに未完了の直属Taskが%s件残っています。親を再openするか、未完了Taskを適切なopen親へ移してください。\n' \
+			"$number" "$issue_type" "$open_child_count"
+	fi
+}
+
 issue_policy_validate_hierarchy_json() {
 	local issue_json="$1"
 	local expected_pr="${2:-}"
@@ -152,6 +179,7 @@ issue_policy_validate_hierarchy_json() {
 
 	parent_url="$(jq -r '.parent.url // empty' <<<"$issue_json")"
 	if [[ -z "$parent_url" ]]; then
+		issue_policy_emit_parent_advisories "$issue_json"
 		return 0
 	fi
 	parent_json="$(issue_policy_load_issue "$parent_url")"
@@ -170,7 +198,8 @@ issue_policy_validate_hierarchy_json() {
 		fi
 	fi
 
-	issue_policy_validate_hierarchy_json "$parent_json"
+	issue_policy_validate_hierarchy_json "$parent_json" || return 1
+	issue_policy_emit_parent_advisories "$issue_json"
 }
 
 issue_policy_validate_hierarchy() {
