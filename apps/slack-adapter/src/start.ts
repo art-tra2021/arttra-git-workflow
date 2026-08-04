@@ -1,7 +1,11 @@
 import { ExpressReceiver } from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
 import { raw } from "express";
-import { createSlackApp } from "./app.ts";
+import {
+  createSlackApp,
+  type ProjectProjectionRequest,
+  type ProjectProjectionResult,
+} from "./app.ts";
 import { IssueApprovalService } from "./approval.ts";
 import { type CanvasClient, CanvasProjectionService } from "./canvas-service.ts";
 import { GitHubAppDependencies } from "./github-app.ts";
@@ -11,7 +15,11 @@ import { parseGitHubWebhookJob, verifyGitHubWebhookSignature } from "./github-we
 import { GitHubWebhookProcessor } from "./github-webhook-processor.ts";
 import { completeGoogleCalendarCallback } from "./google-calendar-callback.ts";
 import { GoogleCalendarService } from "./google-calendar-service.ts";
-import { type GitHubIdentity, GitHubIdentityService } from "./identity-service.ts";
+import {
+  type GitHubIdentity,
+  GitHubIdentityService,
+  MissingGitHubIdentityError,
+} from "./identity-service.ts";
 import { IssueMetadataCache } from "./issue-metadata-cache.ts";
 import {
   CloudTasksGitHubJobQueue,
@@ -28,6 +36,12 @@ import {
   OutboxWorkNotifier,
 } from "./notification-outbox.ts";
 import { NotificationThreadService } from "./notification-thread-service.ts";
+import {
+  ProjectProjectionAccessError,
+  parseProjectCanvasSyncCommand,
+  type ScheduledCanvasProjectionRequest,
+  syncExistingPersonalCanvases,
+} from "./project-canvas-schedule.ts";
 import type { ProjectListClient } from "./project-list.ts";
 import { ProjectListSyncService, parseProjectListSyncCommand } from "./project-list-service.ts";
 import { filterItemsByAccessibleRepositories, normalizeRepositoryScope } from "./project-scope.ts";
@@ -277,6 +291,81 @@ const webhookProcessor =
 const jobSecret = strongSecret("AR_JOB_SECRET");
 const githubWebhookSecret = strongSecret("GITHUB_WEBHOOK_SECRET");
 const jobQueue = createJobQueue(webhookProcessor, jobSecret);
+const revokeProjectProjections = async (teamId: string, userId: string) => {
+  await canvasProjectionService.revokeViewerAccess(teamId, userId);
+  await projectListService.revokeViewerAccess(teamId, userId);
+};
+const syncProjectProjection = async (
+  request: ProjectProjectionRequest | ScheduledCanvasProjectionRequest,
+): Promise<ProjectProjectionResult> => {
+  let githubViewer: string;
+  try {
+    githubViewer = await identityService.requireGitHubLogin(
+      request.slackTeamId,
+      request.slackUserId,
+    );
+  } catch (error) {
+    if (error instanceof MissingGitHubIdentityError) {
+      await revokeProjectProjections(request.slackTeamId, request.slackUserId);
+    }
+    throw error;
+  }
+  const accessibleRepositories = await issueMetadata.listRepositoriesForViewer(githubViewer);
+  const normalizedScope = normalizeRepositoryScope(request.scope);
+  if (
+    normalizedScope.kind === "repo" &&
+    !accessibleRepositories.some(
+      (candidate) => candidate.toLowerCase() === normalizedScope.repository?.toLowerCase(),
+    )
+  ) {
+    await revokeProjectProjections(request.slackTeamId, request.slackUserId);
+    throw new ProjectProjectionAccessError(
+      `GitHub @${githubViewer} は${normalizedScope.repository}を参照できません。`,
+    );
+  }
+  const items = filterItemsByAccessibleRepositories(
+    await dependencies.loadProjectItems(),
+    accessibleRepositories,
+  );
+  const target = { kind: "user" as const, id: request.slackUserId };
+  if (request.kind === "canvas") {
+    const result = await canvasProjectionService.sync({
+      teamId: request.slackTeamId,
+      viewerId: request.slackUserId,
+      target,
+      scope: request.scope,
+      items,
+      accessibleRepositories,
+      ...("createIfMissing" in request && request.createIfMissing === false
+        ? { createIfMissing: false }
+        : {}),
+    });
+    return {
+      kind: "canvas",
+      resourceId: result.canvasId,
+      itemCount: result.itemCount,
+      created: result.created ? 1 : 0,
+      updated: result.updated ? 1 : 0,
+      deleted: 0,
+      unchanged: result.unchanged,
+    };
+  }
+  const result = await projectListService.sync(request.channelId, request.slackUserId, {
+    teamId: request.slackTeamId,
+    viewerId: request.slackUserId,
+    scope: request.scope,
+    target,
+    accessibleRepositories,
+  });
+  return {
+    kind: "list",
+    resourceId: result.listId,
+    itemCount: result.itemCount,
+    created: result.created,
+    updated: result.updated,
+    deleted: result.deleted,
+  };
+};
 
 receiver?.router.get("/health", (_request, response) => {
   response.status(200).json({ ok: true, schemaVersion: 1 });
@@ -439,6 +528,48 @@ receiver?.router.post(
 );
 
 receiver?.router.post(
+  "/internal/project-canvas-sync",
+  raw({ type: "application/json", limit: "1kb" }),
+  async (request, response) => {
+    const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
+    if (!verifyJobSignature(body, request.header("x-ar-job-signature") ?? "", jobSecret)) {
+      response.status(401).json({ ok: false, error: "invalid_job_signature" });
+      return;
+    }
+    try {
+      parseProjectCanvasSyncCommand(body);
+    } catch {
+      response.status(400).json({ ok: false, error: "invalid_project_canvas_command" });
+      return;
+    }
+    try {
+      const result = await syncExistingPersonalCanvases(
+        await canvasProjectionService.listExistingStates(),
+        slackTeamId,
+        syncProjectProjection,
+      );
+      if (result.totals.error > 0) {
+        const retryable = result.results.some((item) => item.status === "error" && item.retryable);
+        response
+          .set("Retry-After", "5")
+          .status(retryable ? 429 : 500)
+          .json({
+            ok: false,
+            error: retryable ? "project_canvas_sync_retryable" : "project_canvas_sync_failed",
+            retryable,
+            ...result,
+          });
+        return;
+      }
+      response.status(200).json({ ok: true, ...result });
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "Project Canvas同期に失敗しました。");
+      response.status(500).json({ ok: false, error: "project_canvas_sync_failed" });
+    }
+  },
+);
+
+receiver?.router.post(
   "/internal/calendar-sync",
   raw({ type: "application/json", limit: "1kb" }),
   async (request, response) => {
@@ -594,70 +725,11 @@ const app = createSlackApp(dependencies, {
   requirementNotifier,
   issueMetadata,
   resolveSlackUserId,
-  revokeProjectProjections: async (teamId, userId) => {
-    await canvasProjectionService.revokeViewerAccess(teamId, userId);
-    await projectListService.revokeViewerAccess(teamId, userId);
-  },
+  revokeProjectProjections,
   ...(googleCalendarService ? { googleCalendarService } : {}),
   syncProjectList: (channelId, requesterUserId) =>
     projectListService.sync(channelId, requesterUserId),
-  syncProjectProjection: async (request) => {
-    const githubViewer = await identityService.requireGitHubLogin(
-      request.slackTeamId,
-      request.slackUserId,
-    );
-    const accessibleRepositories = await issueMetadata.listRepositoriesForViewer(githubViewer);
-    const normalizedScope = normalizeRepositoryScope(request.scope);
-    if (
-      normalizedScope.kind === "repo" &&
-      !accessibleRepositories.some(
-        (candidate) => candidate.toLowerCase() === normalizedScope.repository?.toLowerCase(),
-      )
-    ) {
-      await canvasProjectionService.revokeViewerAccess(request.slackTeamId, request.slackUserId);
-      await projectListService.revokeViewerAccess(request.slackTeamId, request.slackUserId);
-      throw new Error(`GitHub @${githubViewer} は${normalizedScope.repository}を参照できません。`);
-    }
-    const items = filterItemsByAccessibleRepositories(
-      await dependencies.loadProjectItems(),
-      accessibleRepositories,
-    );
-    const target = { kind: "user" as const, id: request.slackUserId };
-    if (request.kind === "canvas") {
-      const result = await canvasProjectionService.sync({
-        teamId: request.slackTeamId,
-        viewerId: request.slackUserId,
-        target,
-        scope: request.scope,
-        items,
-        accessibleRepositories,
-      });
-      return {
-        kind: "canvas" as const,
-        resourceId: result.canvasId,
-        itemCount: result.itemCount,
-        created: result.created ? 1 : 0,
-        updated: result.updated ? 1 : 0,
-        deleted: 0,
-        unchanged: result.unchanged,
-      };
-    }
-    const result = await projectListService.sync(request.channelId, request.slackUserId, {
-      teamId: request.slackTeamId,
-      viewerId: request.slackUserId,
-      scope: request.scope,
-      target,
-      accessibleRepositories,
-    });
-    return {
-      kind: "list" as const,
-      resourceId: result.listId,
-      itemCount: result.itemCount,
-      created: result.created,
-      updated: result.updated,
-      deleted: result.deleted,
-    };
-  },
+  syncProjectProjection,
   tokenVerificationEnabled: process.env.AR_SLACK_TOKEN_VERIFICATION !== "off",
 });
 
