@@ -83,6 +83,7 @@ depends = [
   "setup-ui:test",
   "pr-policy:test",
   "pr-health:test",
+  "project-status-audit:test",
   "templates:check",
 ]
 
@@ -212,6 +213,10 @@ run = "bash scripts/pr-policy-test.sh"
 [tasks."pr-health:test"]
 description = "Test deterministic PR health labels and summary"
 run = "bash scripts/pr-health-test.sh"
+
+[tasks."project-status-audit:test"]
+description = "Test read-only Project Status drift audit and scheduled gate"
+run = "bash scripts/project-status-audit-test.sh"
 
 [tasks.ar]
 description = "Run git-ar from source"
