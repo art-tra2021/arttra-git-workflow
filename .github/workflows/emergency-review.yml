@@ -10,22 +10,22 @@ permissions:
   pull-requests: read
 
 jobs:
-  create-review:
+  track-review:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      - name: Create post-review Issue
+      - name: Check out default branch implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Reopen the original Task for post-review
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_BODY: ${{ github.event.pull_request.body }}
-        run: |
-          issue_number="$(grep -Eio '(close[sd]?|fix(e[sd])?|resolve[sd]?|refs?)[[:space:]]*#[0-9]+' <<<"$PR_BODY" | grep -Eo '[0-9]+' | head -1 || true)"
-          [[ -n "$issue_number" ]] || exit 0
-          gh api "repos/${GH_REPO}/issues/${issue_number}" --jq '.labels[].name' | grep -qx 'merge/emergency' || exit 0
-          gh issue create --repo "$GH_REPO" \
-            --title "[Post-review] 緊急PR #${PR_NUMBER}" \
-            --label "type/task,status/urgent-unstarted,post-review-required,merge/review" \
-            --body "緊急マージした ${PR_URL} を翌営業日までに確認し、必要な修正と再発防止を記録します。"
+          PR_MERGED_AT: ${{ github.event.pull_request.merged_at }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: bash scripts/emergency-review.sh

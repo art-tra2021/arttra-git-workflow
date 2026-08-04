@@ -84,6 +84,7 @@ depends = [
   "issue-policy:test",
   "merge-authority-policy:test",
   "pr-policy:test",
+  "emergency-review:test",
   "pr-health:test",
   "templates:check",
 ]
@@ -218,6 +219,10 @@ run = "bash scripts/issue-policy-test.sh"
 [tasks."merge-authority-policy:test"]
 description = "Test deterministic privileged merge authority policy"
 run = "bash scripts/merge-authority-policy-test.sh"
+
+[tasks."emergency-review:test"]
+description = "Test idempotent emergency post-review tracking on the original Task"
+run = "bash scripts/emergency-review-test.sh"
 
 [tasks."pr-health:test"]
 description = "Test deterministic PR health labels and summary"
