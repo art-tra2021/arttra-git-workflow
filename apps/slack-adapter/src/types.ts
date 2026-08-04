@@ -1,4 +1,5 @@
 import type { IssueRelationships } from "./issue-relationships.ts";
+import type { ProjectFieldInput, ProjectFieldSyncResult } from "./project-field-sync.ts";
 
 export type WorkStatus =
   | "triage"
@@ -90,6 +91,8 @@ export interface CreateIssueCommand {
   requesterGitHubUser?: { id: number; login: string };
   /** GitHub native parent/blocked-by/blocking relations. Omitted in legacy commands. */
   relationships?: IssueRelationships;
+  /** Organization Project field values selected in Slack or supplied by an AI command. */
+  projectFields?: ProjectFieldInput;
 }
 
 export interface CreatedIssue {
@@ -102,4 +105,6 @@ export interface CreatedIssue {
     attached: string[];
     failed: Array<{ relation: string; reference: string; message: string }>;
   };
+  /** Issue creation and Project field synchronization are separate recoverable steps. */
+  projectFieldStatus?: ProjectFieldSyncResult;
 }

@@ -11,6 +11,7 @@ import {
   parseIssueRelationships,
 } from "./issue-relationships.ts";
 import { type IssueTemplateSchema, resolveIssueTemplate } from "./issue-schema.ts";
+import { projectFieldSyncFailure, syncProjectFields } from "./project-field-sync.ts";
 import {
   ORGANIZATION_PROJECT_ITEMS_QUERY,
   type OrganizationProjectItemsResponse,
@@ -99,6 +100,7 @@ interface ApiRepository {
 
 interface ApiIssue {
   id?: number;
+  node_id?: string;
   number: number;
   title: string;
   html_url: string;
@@ -398,34 +400,61 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
       method: "POST",
       body: JSON.stringify(input),
     });
-    const created = { number: issue.number, title: issue.title, url: issue.html_url };
-    if (!hasIssueRelationships(relationships)) {
-      return created;
+    let created: CreatedIssue = { number: issue.number, title: issue.title, url: issue.html_url };
+    if (hasIssueRelationships(relationships)) {
+      if (!Number.isSafeInteger(issue.id)) {
+        created = {
+          ...created,
+          relationshipStatus: {
+            status: "partial",
+            attached: [],
+            failed: [
+              {
+                relation: "all",
+                reference: "(作成したIssue)",
+                message:
+                  "GitHubのIssue IDを作成応答から読み取れず、native関係を付与できませんでした。",
+              },
+            ],
+          },
+        };
+      } else {
+        const relationshipStatus = await this.attachIssueRelationships(
+          command.repository,
+          issue,
+          relationships,
+          relationTargets,
+        );
+        if (relationshipStatus) created = { ...created, relationshipStatus };
+      }
     }
-    if (!Number.isSafeInteger(issue.id)) {
-      return {
-        ...created,
-        relationshipStatus: {
-          status: "partial",
-          attached: [],
-          failed: [
-            {
-              relation: "all",
-              reference: "(作成したIssue)",
-              message:
-                "GitHubのIssue IDを作成応答から読み取れず、native関係を付与できませんでした。",
-            },
-          ],
-        },
-      };
+    if (command.projectFields) {
+      const project = this.project ?? { owner: "(未設定)", number: 0 };
+      const projectFieldStatus =
+        this.project && issue.node_id
+          ? await syncProjectFields({
+              request: <T>(query: string, variables: Record<string, unknown>) =>
+                this.api<T>("/graphql", {
+                  method: "POST",
+                  body: JSON.stringify({ query, variables }),
+                }),
+              project: this.project,
+              issue: { id: issue.node_id, url: issue.html_url },
+              values: command.projectFields,
+              assignees: input.assignees,
+            })
+          : projectFieldSyncFailure({
+              project,
+              issue: { id: issue.node_id ?? "(unknown)", url: issue.html_url },
+              values: command.projectFields,
+              assignees: input.assignees,
+              message: this.project
+                ? "Issue node IDを作成応答から読み取れず、Project fieldを同期できませんでした。"
+                : "AR_GITHUB_PROJECT_OWNER / AR_GITHUB_PROJECT_NUMBERが未設定です。",
+            });
+      created = { ...created, projectFieldStatus };
     }
-    const relationshipStatus = await this.attachIssueRelationships(
-      command.repository,
-      issue,
-      relationships,
-      relationTargets,
-    );
-    return relationshipStatus ? { ...created, relationshipStatus } : created;
+    return created;
   }
 
   private async validateIssueRelationships(

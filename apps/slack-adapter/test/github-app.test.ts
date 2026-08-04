@@ -393,6 +393,83 @@ describe("GitHub App adapter", () => {
     expect((createdBody as { body: string }).body).toContain("テンプレート導入前の相談");
   });
 
+  test("Issue作成後にProject fieldを書き込みGraphQL read-backを返す", async () => {
+    let itemId: string | null = null;
+    let priority: string | null = null;
+    let status: string | null = null;
+    const client = new GitHubAppDependencies({
+      ...baseConfig(),
+      project: { owner: "art-tra2021", number: 8 },
+      fetch: async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/app/installations/99/access_tokens")) {
+          return json({
+            token: "installation-token",
+            expires_at: "2026-08-01T01:00:00Z",
+            permissions: { issues: "write", contents: "read", organization_projects: "write" },
+          });
+        }
+        if (url.endsWith("/contents/.github/ISSUE_TEMPLATE")) {
+          return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+        }
+        if (url.endsWith("/repos/art-tra2021/arttra-git-workflow/issues")) {
+          return json({
+            id: 42,
+            node_id: "I_issue",
+            number: 42,
+            title: "[Issue] Project同期",
+            html_url: "https://github.example/issues/42",
+            labels: ["type/intake"],
+            assignees: [],
+          });
+        }
+        if (url.endsWith("/graphql")) {
+          const body = JSON.parse(String(init?.body)) as {
+            query: string;
+            variables: Record<string, unknown>;
+          };
+          if (body.query.includes("query ArttraProjectFieldState")) {
+            return json({ data: projectFieldState(itemId, priority, status) });
+          }
+          if (body.query.includes("mutation ArttraAddProjectItem")) {
+            itemId = "PVTI_item";
+            return json({ data: { addProjectV2ItemById: { item: { id: itemId } } } });
+          }
+          if (body.query.includes("mutation ArttraUpdateProjectField")) {
+            const value = body.variables.value as { singleSelectOptionId: string };
+            if (body.variables.fieldId === "F_priority")
+              priority = value.singleSelectOptionId.slice(2);
+            if (body.variables.fieldId === "F_status") status = value.singleSelectOptionId.slice(2);
+            return json({
+              data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: itemId } } },
+            });
+          }
+        }
+        throw new Error(`予期しないrequest: ${url}`);
+      },
+    });
+
+    const issue = await client.createIssue({
+      schemaVersion: 1,
+      kind: "issue.create",
+      repository: "art-tra2021/arttra-git-workflow",
+      template: "generic",
+      title: "Project同期",
+      fields: { summary: "同期する", done: "" },
+      actor: "U123",
+      projectFields: { priority: "P1", status: "Intake" },
+    });
+
+    expect(issue.projectFieldStatus).toMatchObject({
+      status: "synced",
+      itemCreated: true,
+      project: { owner: "art-tra2021", number: 8, itemId: "PVTI_item" },
+    });
+    expect(issue.projectFieldStatus?.fields).toContainEqual(
+      expect.objectContaining({ field: "Priority", actual: "P1", status: "updated" }),
+    );
+  });
+
   test("GitHub AppはIssue作成後にnative parent・依存関係を付与する", async () => {
     const calls: Array<{ url: string; method: string; body?: unknown }> = [];
     const client = dependencies(async (input, init) => {
@@ -972,6 +1049,53 @@ function baseConfig() {
 
 function json(value: unknown): Response {
   return Response.json(value, { status: 200 });
+}
+
+function projectFieldState(itemId: string | null, priority: string | null, status: string | null) {
+  const fieldValues = [
+    ...(priority ? [{ name: priority, field: { name: "Priority" } }] : []),
+    ...(status ? [{ name: status, field: { name: "Status" } }] : []),
+  ];
+  return {
+    organization: {
+      projectV2: {
+        id: "PVT_project",
+        fields: {
+          totalCount: 2,
+          nodes: [
+            {
+              id: "F_priority",
+              name: "Priority",
+              dataType: "SINGLE_SELECT",
+              options: ["P0", "P1", "P2", "P3"].map((name) => ({ id: `O_${name}`, name })),
+            },
+            {
+              id: "F_status",
+              name: "Status",
+              dataType: "SINGLE_SELECT",
+              options: ["Intake", "Ready"].map((name) => ({ id: `O_${name}`, name })),
+            },
+          ],
+        },
+      },
+    },
+    node: {
+      id: "I_issue",
+      assignees: { nodes: [] },
+      projectItems: {
+        totalCount: itemId ? 1 : 0,
+        nodes: itemId
+          ? [
+              {
+                id: itemId,
+                project: { id: "PVT_project" },
+                fieldValues: { totalCount: fieldValues.length, nodes: fieldValues },
+              },
+            ]
+          : [],
+      },
+    },
+  };
 }
 
 function issueForm(): string {
