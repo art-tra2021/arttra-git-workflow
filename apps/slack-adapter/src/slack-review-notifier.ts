@@ -5,25 +5,29 @@ import type {
 import {
   issueRootMentionLogins,
   issueRootNotification,
+  resolveNotificationThreadRootIssue,
   shouldSuppressActorMention,
 } from "./lifecycle-notification-service.ts";
 import { notificationIntentId } from "./notification-outbox.ts";
 import type { NotificationThreadService } from "./notification-thread-service.ts";
-import type { ReviewRequestReadModel } from "./review-types.ts";
+import type { GitHubLifecycleClient, ReviewRequestReadModel } from "./review-types.ts";
 
 export class SlackReviewNotifier {
   private readonly notifier: LifecycleNotifier;
   private readonly threads: NotificationThreadService;
   private readonly resolveSlackUserId: ResolveLifecycleSlackUserId;
+  private readonly github: Pick<GitHubLifecycleClient, "loadIssueContext">;
 
   constructor(
     notifier: LifecycleNotifier,
     threads: NotificationThreadService,
     resolveSlackUserId: ResolveLifecycleSlackUserId,
+    github: Pick<GitHubLifecycleClient, "loadIssueContext">,
   ) {
     this.notifier = notifier;
     this.threads = threads;
     this.resolveSlackUserId = resolveSlackUserId;
+    this.github = github;
   }
 
   async notify(
@@ -34,11 +38,17 @@ export class SlackReviewNotifier {
       return;
     }
     const issue = model.primaryIssue;
+    const threadRootIssue = await resolveNotificationThreadRootIssue(
+      issue,
+      this.github,
+      new Set([model.repository.toLowerCase()]),
+    );
+    if (!threadRootIssue) return;
     const assigneeLogins = issue.assigneeLogins;
     const assigneeSlackIds = await Promise.all(assigneeLogins.map(this.resolveSlackUserId));
     const [actorSlackUserId, ...rootResolvedUserIds] = await Promise.all([
       this.resolveSlackUserId(model.authorLogin),
-      ...issueRootMentionLogins(issue).map(this.resolveSlackUserId),
+      ...issueRootMentionLogins(threadRootIssue).map(this.resolveSlackUserId),
     ]);
     const slackUserIds = [
       ...new Set([
@@ -72,17 +82,17 @@ export class SlackReviewNotifier {
       url: issue.url,
     };
     const rootNotification = issueRootNotification(
-      issue,
+      threadRootIssue,
       [...new Set(rootResolvedUserIds.filter((value): value is string => value !== null))],
       null,
     );
     await this.threads.publishReply(
-      resource.url,
+      threadRootIssue.url,
       () =>
         this.notifier.notify(rootNotification, null, {
           intentId: notificationIntentId({
             kind: "lifecycle",
-            resourceUrl: issue.url,
+            resourceUrl: threadRootIssue.url,
             notificationKind: "issue-opened",
             eventFingerprint: "issue-root-v1",
           }),

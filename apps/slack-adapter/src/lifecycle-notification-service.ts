@@ -590,14 +590,26 @@ export class LifecycleNotificationService {
       }),
       sourceDeliveryId,
     };
-    if (kind === "issue-opened") {
-      await this.threads.ensureRoot(resource.url, () =>
+    const threadRootIssue = await resolveNotificationThreadRootIssue(
+      issue,
+      this.github,
+      this.allowedRepositories,
+    );
+    if (!threadRootIssue) {
+      console.error(
+        `Task ${issue.url} の親Work/Businessを通知scope内で解決できないため、channel直下へのfallbackを停止しました。`,
+      );
+      return 0;
+    }
+    const threadRootUrl = threadRootIssue.url;
+    if (kind === "issue-opened" && threadRootUrl === resource.url) {
+      await this.threads.ensureRoot(threadRootUrl, () =>
         this.notifier.notify(notification, null, metadata),
       );
     } else {
       await this.threads.publishReply(
-        resource.url,
-        () => this.createIssueRoot(issue, sourceDeliveryId),
+        threadRootUrl,
+        () => this.createIssueRoot(threadRootIssue, sourceDeliveryId),
         (threadTs) => this.notifier.notify(notification, threadTs, metadata),
       );
     }
@@ -639,6 +651,21 @@ export class LifecycleNotificationService {
     const resolved = await Promise.all(uniqueLogins.map(this.resolveSlackUserId));
     return [...new Set(resolved.filter((value): value is string => value !== null))];
   }
+}
+
+export async function resolveNotificationThreadRootIssue(
+  issue: GitHubIssueContext,
+  github: Pick<GitHubLifecycleClient, "loadIssueContext">,
+  allowedRepositories: ReadonlySet<string> | null = null,
+): Promise<GitHubIssueContext | null> {
+  const type = issueNotificationType(issue);
+  if (type !== "task") return issue;
+  const parent = issue.parentIssueUrl ? parseIssueReferenceUrl(issue.parentIssueUrl) : null;
+  if (!parent) return null;
+  if (allowedRepositories && !allowedRepositories.has(parent.repository.toLowerCase())) return null;
+  const parentIssue = await github.loadIssueContext(parent.repository, parent.number);
+  const parentType = issueNotificationType(parentIssue);
+  return parentType === "work" || parentType === "business" ? parentIssue : null;
 }
 
 function primaryIssue(context: PullRequestReviewContext): GitHubIssueContext | null {
@@ -750,8 +777,13 @@ function issueOpenedCopy(issue: GitHubIssueContext): { summary: string; nextActi
 }
 
 function issueReferenceFromUrl(url: string): string {
-  const match = url.match(/(?:\/repos)?\/([^/]+\/[^/]+)\/issues\/([1-9][0-9]*)$/u);
-  return match?.[1] && match[2] ? `${match[1]}#${match[2]}` : url;
+  const reference = parseIssueReferenceUrl(url);
+  return reference ? `${reference.repository}#${reference.number}` : url;
+}
+
+export function parseIssueReferenceUrl(url: string): { repository: string; number: number } | null {
+  const match = url.match(/(?:\/repos)?\/([^/]+\/[^/]+)\/issues\/([1-9][0-9]*)\/?$/u);
+  return match?.[1] && match[2] ? { repository: match[1], number: Number(match[2]) } : null;
 }
 
 function issueSectionSummary(body: string, heading: string): string | null {

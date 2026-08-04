@@ -108,6 +108,12 @@ export class NotificationThreadService {
     return existingRootTs ?? result.messageTs;
   }
 
+  async rootTs(resourceUrl: string): Promise<string | null> {
+    const thread = await this.store.get<NotificationThreadState>(THREAD_NAMESPACE, resourceUrl);
+    if (thread && !hasRoot(thread)) throw rootCreationInProgress();
+    return hasRoot(thread) ? thread.rootTs : null;
+  }
+
   private async claimRootCreation(
     resourceUrl: string,
     owner: string,

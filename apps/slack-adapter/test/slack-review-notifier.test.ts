@@ -21,6 +21,7 @@ describe("SlackReviewNotifier", () => {
       new NotificationThreadService(store),
       async (login) =>
         ({ author: "UAUTHOR", owner: "UOWNER", requester: "UREQUESTER" })[login] ?? null,
+      { loadIssueContext: async () => workIssue() },
     );
 
     await notifier.notify({
@@ -59,7 +60,7 @@ describe("SlackReviewNotifier", () => {
       notification: {
         kind: "issue-opened",
         slackUserIds: ["UAUTHOR", "UOWNER"],
-        resource: { kind: "issue", number: 44 },
+        resource: { kind: "issue", number: 86 },
       },
     });
     expect(sent[1]).toMatchObject({
@@ -85,6 +86,7 @@ describe("SlackReviewNotifier", () => {
       },
       new NotificationThreadService(store),
       async () => null,
+      { loadIssueContext: async () => workIssue() },
     );
 
     await notifier.notify({
@@ -123,5 +125,20 @@ function issue() {
     authorLogin: "requester",
     assigneeLogins: ["author", "owner"],
     labels: ["type/task", "merge/review"],
+    parentIssueUrl: "https://github.example/example/repo/issues/86",
+  };
+}
+
+function workIssue() {
+  return {
+    number: 86,
+    title: "通知をまとめるWork",
+    url: "https://github.example/example/repo/issues/86",
+    body: "",
+    state: "open" as const,
+    authorLogin: "requester",
+    assigneeLogins: ["author", "owner"],
+    labels: ["type/work"],
+    parentIssueUrl: "https://github.example/example/repo/issues/7",
   };
 }
