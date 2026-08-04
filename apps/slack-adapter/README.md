@@ -11,6 +11,7 @@ GitHub の生イベントを Slack へ転送せず、GitHub と Projects から�
 - Slack は操作窓口であり、正本は GitHub Issue と Projects に置く。
 - Slack ユーザーと GitHub ユーザーの対応を推測しない。
 - `/ar new` のmodalとAIは、同じversion付きIssue作成commandを使う。
+- `AR-PR-004`だけの承認待ちはレビュー依頼通知へ一本化し、実CI失敗や混在失敗は抑止しない。
 
 ## 開発
 
