@@ -64,7 +64,29 @@ export FAKE_CURRENT_IMAGE="asia-northeast1-docker.pkg.dev/bmarumado/arttra-work/
 export FAKE_HEALTH_COMMIT="${ar_main}"
 export FAKE_REVISION_COMMIT="${ar_main}"
 ar_status="$(bash scripts/slack-release.sh status --main-commit "${ar_main}")"
-jq -e '.drift.detected == false and .serving.imageCommit == .mainCommit' <<<"${ar_status}" >/dev/null
+jq -e \
+	'.drift.detected == false and .serving.imageCommit == .mainCommit and .drift.imageMetadataMissing == false and .drift.imageVsHealth == false' \
+	<<<"${ar_status}" >/dev/null
+
+export FAKE_CURRENT_IMAGE="asia-northeast1-docker.pkg.dev/bmarumado/arttra-work/slack-adapter:${ar_old}-amd64"
+set +e
+ar_image_drift="$(bash scripts/slack-release.sh status --main-commit "${ar_main}")"
+ar_image_drift_status=$?
+set -e
+[[ ${ar_image_drift_status} -eq 2 ]]
+jq -e \
+	'.drift.detected == true and .drift.imageMetadataMissing == false and .drift.imageVsHealth == true and .drift.mainVsHealth == false and .drift.revisionVsHealth == false' \
+	<<<"${ar_image_drift}" >/dev/null
+
+export FAKE_CURRENT_IMAGE="asia-northeast1-docker.pkg.dev/bmarumado/arttra-work/slack-adapter:latest"
+set +e
+ar_image_missing="$(bash scripts/slack-release.sh status --main-commit "${ar_main}")"
+ar_image_missing_status=$?
+set -e
+[[ ${ar_image_missing_status} -eq 2 ]]
+jq -e \
+	'.drift.detected == true and .serving.imageCommit == "" and .drift.imageMetadataMissing == true and .drift.imageVsHealth == true and .drift.mainVsHealth == false and .drift.revisionVsHealth == false' \
+	<<<"${ar_image_missing}" >/dev/null
 
 export FAKE_CURRENT_IMAGE="asia-northeast1-docker.pkg.dev/bmarumado/arttra-work/slack-adapter:${ar_old}-amd64"
 export FAKE_HEALTH_COMMIT="${ar_old}"
