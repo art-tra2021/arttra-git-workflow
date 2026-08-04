@@ -133,6 +133,9 @@ Task作成時に届いたメッセージは次の2件である。
 Task #113に対する独立したassignment変更通知はなく、Task概要とセルフマージ警告の順序も維持された。
 セルフマージ警告がchannelへ展開されないのは、`rozwer`に`suppress_self_merge_channel_broadcast`を明示grantしているためである。
 
+Task #113をcloseするPR [#114](https://github.com/art-tra2021/arttra-git-workflow/pull/114)の作成通知は、message ts `1785820889.371709`、thread_ts `1785819495.573869`である。
+この通知にもnative mentionとchannelへの展開はなく、PR作成後もTask #113の概要は重複せず2件のままだった。
+
 ## 本番deploy
 
 必須CIが成功してmainへmergeされたcommitだけを本番へdeployする。
