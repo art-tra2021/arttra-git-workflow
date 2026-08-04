@@ -75,9 +75,24 @@ describe("LifecycleNotificationService", () => {
 
   test("自己assignmentとセルフマージ選択は実行者本人をmentionしない", async () => {
     const assignmentHarness = await createHarness();
-    expect(await assignmentHarness.service.process(issueAssignedJob("owner"))).toBe(1);
+    expect(await assignmentHarness.service.process(issueOpenedJob())).toBe(1);
+    expect(await assignmentHarness.service.process(issueAssignedJob("owner"))).toBe(0);
+    assignmentHarness.github.issue = {
+      ...assignmentHarness.github.issue,
+      assigneeLogins: [],
+    };
+    expect(await assignmentHarness.service.process(issueUnassignedJob("owner"))).toBe(1);
+    assignmentHarness.github.issue = {
+      ...assignmentHarness.github.issue,
+      assigneeLogins: ["owner"],
+    };
+    expect(
+      await assignmentHarness.service.process(issueAssignedJob("owner", 44, "delivery-reassigned")),
+    ).toBe(1);
     expect(assignmentHarness.sent.map(({ notification }) => notification.slackUserIds)).toEqual([
       ["UOWNER"],
+      ["UOWNER"],
+      ["UREQUESTER"],
       ["UREQUESTER"],
     ]);
 
@@ -90,8 +105,60 @@ describe("LifecycleNotificationService", () => {
     expect(await mergeHarness.service.process(selfMergeLabeledJob("owner"))).toBe(1);
     expect(mergeHarness.sent.map(({ notification }) => notification.slackUserIds)).toEqual([
       ["UOWNER"],
+      ["UOWNER"],
       [],
     ]);
+  });
+
+  test("作成直後のassignmentを概要へ吸収し、Task概要をセルフマージ警告より先に置く", async () => {
+    const harness = await createHarness();
+    harness.github.issue = {
+      ...harness.github.issue,
+      labels: ["type/task", "merge/self"],
+    };
+
+    expect(await harness.service.process(issueAssignedJob("owner"))).toBe(1);
+    expect(await harness.service.process(selfMergeLabeledJob("owner"))).toBe(1);
+    expect(await harness.service.process(issueOpenedJob())).toBe(0);
+    expect(harness.sent.map(({ notification }) => notification.kind)).toEqual([
+      "issue-opened",
+      "issue-opened",
+      "self-merge-scheduled",
+    ]);
+    expect(harness.sent.map(({ threadTs }) => threadTs)).toEqual([null, "900.1", "900.1"]);
+
+    const reversedHarness = await createHarness();
+    reversedHarness.github.issue = {
+      ...reversedHarness.github.issue,
+      labels: ["type/task", "merge/self"],
+    };
+    expect(await reversedHarness.service.process(selfMergeLabeledJob("owner"))).toBe(1);
+    expect(await reversedHarness.service.process(issueAssignedJob("owner"))).toBe(0);
+    expect(await reversedHarness.service.process(issueOpenedJob())).toBe(0);
+    expect(reversedHarness.sent.map(({ notification }) => notification.kind)).toEqual([
+      "issue-opened",
+      "issue-opened",
+      "self-merge-scheduled",
+    ]);
+  });
+
+  test("Intake・Work・Business作成直後のassignmentも親投稿へ吸収する", async () => {
+    for (const issueType of ["intake", "work", "business"] as const) {
+      const harness = await createHarness();
+      harness.github.issue = {
+        ...harness.github.issue,
+        number: 86,
+        url: "https://github.example/example/repo/issues/86",
+        labels: [`type/${issueType}`],
+      };
+
+      expect(await harness.service.process(issueOpenedJob(86, `delivery-${issueType}-open`))).toBe(
+        1,
+      );
+      expect(await harness.service.process(issueAssignedJob("owner", 86))).toBe(0);
+      expect(harness.sent).toHaveLength(1);
+      expect(harness.sent[0]?.notification.issueType).toBe(issueType);
+    }
   });
 
   test("App bot経由のセルフマージ作成でもmarkerの選択者をpingしない", async () => {
@@ -171,6 +238,13 @@ describe("LifecycleNotificationService", () => {
     expect(harness.sent[1]).toMatchObject({
       threadTs: "900.1",
       notification: {
+        kind: "issue-opened",
+        slackUserIds: ["UOWNER"],
+      },
+    });
+    expect(harness.sent[2]).toMatchObject({
+      threadTs: "900.1",
+      notification: {
         kind: "comment-created",
         actorLogin: "commenter",
         slackUserIds: ["UOWNER", "UMENTIONED"],
@@ -178,7 +252,7 @@ describe("LifecycleNotificationService", () => {
     });
 
     expect(await harness.service.process(issueClosedJob())).toBe(1);
-    expect(harness.sent[2]).toMatchObject({
+    expect(harness.sent[3]).toMatchObject({
       threadTs: "900.1",
       notification: { kind: "issue-completed", slackUserIds: ["UOWNER", "UREQUESTER"] },
     });
@@ -194,7 +268,7 @@ describe("LifecycleNotificationService", () => {
     expect(
       await harness.service.process(issueCommentJob("delivery-self-comment", "commenter")),
     ).toBe(1);
-    expect(harness.sent[1]?.notification).toMatchObject({
+    expect(harness.sent[2]?.notification).toMatchObject({
       actorLogin: "commenter",
       slackUserIds: ["UOWNER", "UMENTIONED"],
     });
@@ -273,18 +347,25 @@ describe("LifecycleNotificationService", () => {
 
     expect(harness.sent.map((value) => value.notification.kind)).toEqual([
       "issue-opened",
+      "issue-opened",
       "review-changes-requested",
       "revision-pushed",
       "pr-merged",
     ]);
-    expect(harness.sent.map((value) => value.threadTs)).toEqual([null, "900.1", "900.1", "900.1"]);
+    expect(harness.sent.map((value) => value.threadTs)).toEqual([
+      null,
+      "900.1",
+      "900.1",
+      "900.1",
+      "900.1",
+    ]);
     expect(harness.sent[0]?.notification.resource.number).toBe(86);
     expect(harness.sent.slice(1).map((value) => value.notification.resource.number)).toEqual([
-      44, 44, 44,
+      44, 44, 44, 44,
     ]);
-    expect(harness.sent[1]?.notification.slackUserIds).toEqual(["UAUTHOR"]);
-    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UREVIEWER"]);
-    expect(harness.sent[3]?.notification.slackUserIds).toEqual(["UAUTHOR", "UOWNER"]);
+    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UAUTHOR"]);
+    expect(harness.sent[3]?.notification.slackUserIds).toEqual(["UREVIEWER"]);
+    expect(harness.sent[4]?.notification.slackUserIds).toEqual(["UAUTHOR", "UOWNER"]);
   });
 
   test("PR会話とコードコメントではPR作成者をmentionする", async () => {
@@ -295,12 +376,13 @@ describe("LifecycleNotificationService", () => {
 
     expect(harness.sent.map((value) => value.notification.kind)).toEqual([
       "issue-opened",
+      "issue-opened",
       "comment-created",
       "review-commented",
     ]);
-    expect(harness.sent[1]?.notification.slackUserIds).toEqual(["UAUTHOR", "UMENTIONED"]);
-    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UAUTHOR"]);
-    expect(harness.sent[2]?.threadTs).toBe("900.1");
+    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UAUTHOR", "UMENTIONED"]);
+    expect(harness.sent[3]?.notification.slackUserIds).toEqual(["UAUTHOR"]);
+    expect(harness.sent[3]?.threadTs).toBe("900.1");
   });
 
   test("primary Issueが一意でないPRはchannel直下にもIssue threadにも通知しない", async () => {
@@ -336,9 +418,10 @@ describe("LifecycleNotificationService", () => {
 
     expect(harness.sent.map((value) => value.notification.kind)).toEqual([
       "issue-opened",
+      "issue-opened",
       "ci-failed",
     ]);
-    expect(harness.sent[1]).toMatchObject({
+    expect(harness.sent[2]).toMatchObject({
       threadTs: "900.1",
       notification: {
         slackUserIds: ["UAUTHOR", "UOWNER"],
@@ -537,17 +620,27 @@ function checkRunFailedJob(actor = "merger") {
   };
 }
 
-function issueAssignedJob(actor: string) {
+function issueAssignedJob(actor: string, issueNumber = 44, deliveryId = "delivery-assigned") {
   return {
     schemaVersion: 1 as const,
-    deliveryId: "delivery-assigned",
+    deliveryId,
     event: "issues",
     payload: {
       ...basePayload(),
       sender: { login: actor },
       action: "assigned",
-      issue: { number: 44 },
+      issue: { number: issueNumber },
       assignee: { login: actor },
+    },
+  };
+}
+
+function issueUnassignedJob(actor: string, issueNumber = 44) {
+  return {
+    ...issueAssignedJob(actor, issueNumber, "delivery-unassigned"),
+    payload: {
+      ...issueAssignedJob(actor, issueNumber).payload,
+      action: "unassigned",
     },
   };
 }

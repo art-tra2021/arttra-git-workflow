@@ -42,10 +42,14 @@ PRはGitHubが`Closes`から解決したprimary closing Taskをちょうど1件�
 primary closing Taskが0件、複数件、または`type/task`でないPRは、PR単位のchannel直下投稿へfallbackせず、policy違反として修正する。
 WorkまたはBusinessだけが実行単位のSlack親投稿を持つ。Task作成と配下のPR、review、CI、comment、期限、blockerは同じ親threadへ集約し、Task単位の親投稿を作らない。
 
-Task作成eventより先にコメントやPR eventが届いた場合も、親WorkまたはBusinessの概要を親投稿として作成してから続報を返信する。
+Task作成eventより先にコメントやPR eventが届いた場合も、親WorkまたはBusinessの概要、Task概要、続報の順に返信する。
+PR作成・レビュー依頼の経路もLifecycle通知と同じTask概要intentを使い、Outboxで一度だけ送る。
 複数workerが同時に最初のeventを処理しても親投稿は一つだけ作り、root作成中の処理は平投稿せず再試行する。
 親がない、親種別が不正、または共有channelのrepository scope外であるTaskはchannel直下へfallbackしない。
 通知subjectとdedupe keyはTaskのまま維持し、同じWork配下の複数Taskを衝突させない。
+Issue作成時点の担当者は最初のIssue概要に含め、初期`assigned` eventは独立返信にしない。
+初期担当者はIssueごとの永続stateで一度だけ消費する。
+処理時刻やキュー遅延では判定せず、作成後の`unassigned`と再assignmentは通常どおり通知する。
 
 | GitHub上の出来事 | 通知対象 |
 | --- | --- |
@@ -104,8 +108,9 @@ fallback textにも同じ絵文字と見出しを含めるが、本文中の装�
 6. PRをsquash mergeし、Issueを完了させる。
 7. CI失敗を一度発生させ、primary Taskの親WorkまたはBusiness threadへ通知されることを確認する。
 8. 通常のセルフマージ実行者では初回だけchannelへ展開され、`suppress_self_merge_channel_broadcast`のgrant対象者では初回からthread内だけになることを確認する。どちらも停止ボタンがあり、CI通過通知はthread内だけであることを確認する。
-9. Task作成からPR完了までの通知が同じWorkまたはBusinessスレッドにあり、同じイベントの重複通知がないことを確認する。
-10. GitHub Webhook delivery、Cloud Run log、Cloud Tasksの失敗件数を確認する。
+9. Intake、Work、Business、Taskの作成時に、担当者表示を含む最初の概要とは別の初期assignment返信がないことを確認する。その後のunassignmentと再assignmentは通知されることを確認する。
+10. Task作成からPR完了までの通知が同じWorkまたはBusinessスレッドにあり、WorkまたはBusiness概要、Task概要、後続eventの順で、同じイベントの重複通知がないことを確認する。
+11. GitHub Webhook delivery、Cloud Run log、Cloud Tasksの失敗件数を確認する。
 
 Slack APIでも、WorkまたはBusiness親投稿は`ts == thread_ts`、Task作成・PR作成・レビュー依頼は`thread_ts == WorkまたはBusiness親投稿のts`かつ`ts != thread_ts`であることを確認する。
 Task作成またはPR作成・レビュー依頼が`ts == thread_ts`なら平投稿が再発しているため、合格にしてはならない。
