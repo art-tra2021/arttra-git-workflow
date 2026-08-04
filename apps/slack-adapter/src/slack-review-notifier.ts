@@ -3,9 +3,9 @@ import type {
   ResolveLifecycleSlackUserId,
 } from "./lifecycle-notification-service.ts";
 import {
-  issueRootActorLogin,
   issueRootMentionLogins,
   issueRootNotification,
+  shouldSuppressActorMention,
 } from "./lifecycle-notification-service.ts";
 import { notificationIntentId } from "./notification-outbox.ts";
 import type { NotificationThreadService } from "./notification-thread-service.ts";
@@ -36,9 +36,8 @@ export class SlackReviewNotifier {
     const issue = model.primaryIssue;
     const assigneeLogins = issue.assigneeLogins;
     const assigneeSlackIds = await Promise.all(assigneeLogins.map(this.resolveSlackUserId));
-    const [actorSlackUserId, rootActorSlackUserId, ...rootResolvedUserIds] = await Promise.all([
+    const [actorSlackUserId, ...rootResolvedUserIds] = await Promise.all([
       this.resolveSlackUserId(model.authorLogin),
-      this.resolveSlackUserId(issueRootActorLogin(issue)),
       ...issueRootMentionLogins(issue).map(this.resolveSlackUserId),
     ]);
     const slackUserIds = [
@@ -48,7 +47,7 @@ export class SlackReviewNotifier {
         ),
         ...assigneeSlackIds.filter((value): value is string => value !== null),
       ]),
-    ];
+    ].filter((slackUserId) => slackUserId !== actorSlackUserId);
     const reviewerLines = model.reviewers.map(
       (reviewer) => `@${reviewer.githubLogin}: ${reviewer.reasons.join("、")}`,
     );
@@ -75,7 +74,7 @@ export class SlackReviewNotifier {
     const rootNotification = issueRootNotification(
       issue,
       [...new Set(rootResolvedUserIds.filter((value): value is string => value !== null))],
-      rootActorSlackUserId,
+      null,
     );
     await this.threads.publishReply(
       resource.url,
@@ -97,7 +96,9 @@ export class SlackReviewNotifier {
             resource,
             pullRequest,
             actorLogin: model.authorLogin,
-            actorSlackUserId,
+            actorSlackUserId: shouldSuppressActorMention("review-requested")
+              ? null
+              : actorSlackUserId,
             slackUserIds,
             issueType: rootNotification.issueType,
             summary: "PRが作成され、レビュー依頼が設定されました。",

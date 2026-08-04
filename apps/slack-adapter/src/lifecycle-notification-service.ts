@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { type GitHubCapabilityAccess, GitHubCapabilityGrants } from "./github-capabilities.ts";
 import { parseIssueRequester } from "./issue-requester.ts";
 import type { GitHubWebhookJob } from "./job-queue.ts";
 import { type NotificationIntentMetadata, notificationIntentId } from "./notification-outbox.ts";
@@ -14,6 +15,20 @@ import type {
 import type { StateStore } from "./state-store.ts";
 
 const NOTIFICATION_NAMESPACE = "lifecycle-notification";
+const SUPPRESS_ACTOR_MENTION_KINDS = new Set<LifecycleNotificationKind>([
+  "issue-opened",
+  "issue-reopened",
+  "issue-assignment-changed",
+  "comment-created",
+  "issue-completed",
+  "pr-merged",
+  "review-requested",
+  "review-approved",
+  "review-commented",
+  "review-dismissed",
+  "revision-pushed",
+  "self-merge-scheduled",
+]);
 
 export type LifecycleNotificationKind =
   | "issue-opened"
@@ -61,6 +76,8 @@ export interface LifecycleNotification {
   nextAction: string;
   actionUrl: string;
   selfMergeControl?: { repository: string; issueNumber: number } | null;
+  /** self-merge-scheduledをchannelへ展開するか。未指定の旧payloadは展開する。 */
+  replyBroadcast?: boolean;
 }
 
 export interface LifecycleNotifier {
@@ -89,6 +106,7 @@ export class LifecycleNotificationService {
   private readonly resolveSlackUserId: ResolveLifecycleSlackUserId;
   private readonly now: () => number;
   private readonly allowedRepositories: Set<string> | null;
+  private readonly githubCapabilities: GitHubCapabilityAccess;
 
   constructor(
     github: GitHubLifecycleClient,
@@ -98,6 +116,7 @@ export class LifecycleNotificationService {
     resolveSlackUserId: ResolveLifecycleSlackUserId,
     now: () => number = Date.now,
     allowedRepositories: readonly string[] | null = null,
+    githubCapabilities: GitHubCapabilityAccess = GitHubCapabilityGrants.empty(),
   ) {
     this.github = github;
     this.store = store;
@@ -108,6 +127,7 @@ export class LifecycleNotificationService {
     this.allowedRepositories = allowedRepositories
       ? new Set(allowedRepositories.map((repository) => repository.toLowerCase()))
       : null;
+    this.githubCapabilities = githubCapabilities;
   }
 
   async process(job: GitHubWebhookJob): Promise<number> {
@@ -156,7 +176,10 @@ export class LifecycleNotificationService {
         fingerprint({ action, url: issue.url }),
         job.deliveryId,
       );
-      return opened + (await this.notifySelfMergeScheduled(issue, repository, actor, job));
+      return (
+        opened +
+        (await this.notifySelfMergeScheduled(issue, repository, issueRootActorLogin(issue), job))
+      );
     }
     if (action === "reopened") {
       return this.send(
@@ -377,6 +400,7 @@ export class LifecycleNotificationService {
       fingerprint({ url: issue.url, merge: "self" }),
       job.deliveryId,
       { repository, issueNumber: issue.number },
+      !this.githubCapabilities.has(actor, "suppress_self_merge_channel_broadcast"),
     );
   }
 
@@ -524,6 +548,7 @@ export class LifecycleNotificationService {
     eventFingerprint: string,
     sourceDeliveryId: string,
     selfMergeControl: { repository: string; issueNumber: number } | null = null,
+    replyBroadcast: boolean | null = null,
   ): Promise<number> {
     const resource = issueResource(issue);
     const stateKey = `${resource.url}:${kind}`;
@@ -532,9 +557,13 @@ export class LifecycleNotificationService {
       stateKey,
     );
     if (previous?.fingerprint === eventFingerprint) return 0;
+    const suppressActorMention = shouldSuppressActorMention(kind);
+    const recipientLogins = suppressActorMention
+      ? withoutLogin(mentionLogins, actorLogin)
+      : mentionLogins;
     const [slackUserIds, actorSlackUserId] = await Promise.all([
-      this.resolveMentions(mentionLogins),
-      this.resolveSlackUserId(actorLogin),
+      this.resolveMentions(recipientLogins),
+      suppressActorMention ? Promise.resolve(null) : this.resolveSlackUserId(actorLogin),
     ]);
     const notification: LifecycleNotification = {
       schemaVersion: 1,
@@ -550,6 +579,7 @@ export class LifecycleNotificationService {
       nextAction,
       actionUrl,
       selfMergeControl,
+      ...(replyBroadcast === null ? {} : { replyBroadcast }),
     };
     const metadata = {
       intentId: notificationIntentId({
@@ -587,7 +617,7 @@ export class LifecycleNotificationService {
   ): Promise<ThreadMessageResult> {
     const [slackUserIds, actorSlackUserId] = await Promise.all([
       this.resolveMentions(issueRootMentionLogins(issue)),
-      this.resolveSlackUserId(issueRootActorLogin(issue)),
+      Promise.resolve(null),
     ]);
     return this.notifier.notify(
       issueRootNotification(issue, slackUserIds, actorSlackUserId),
@@ -666,11 +696,20 @@ export function issueRootNotification(
 }
 
 export function issueRootMentionLogins(issue: GitHubIssueContext): string[] {
-  return [issueRootActorLogin(issue), issue.authorLogin, ...issue.assigneeLogins];
+  return withoutLogin([issue.authorLogin, ...issue.assigneeLogins], issueRootActorLogin(issue));
 }
 
 export function issueRootActorLogin(issue: GitHubIssueContext): string {
   return parseIssueRequester(issue.body)?.login ?? issue.authorLogin;
+}
+
+export function shouldSuppressActorMention(kind: LifecycleNotificationKind): boolean {
+  return SUPPRESS_ACTOR_MENTION_KINDS.has(kind);
+}
+
+function withoutLogin(logins: string[], actorLogin: string): string[] {
+  const actor = actorLogin.toLowerCase();
+  return logins.filter((login) => login.toLowerCase() !== actor);
 }
 
 function issueNotificationType(issue: GitHubIssueContext): IssueNotificationType {

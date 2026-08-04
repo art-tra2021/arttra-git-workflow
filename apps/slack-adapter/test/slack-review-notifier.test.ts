@@ -58,7 +58,7 @@ describe("SlackReviewNotifier", () => {
       threadTs: null,
       notification: {
         kind: "issue-opened",
-        slackUserIds: ["UREQUESTER", "UOWNER"],
+        slackUserIds: ["UAUTHOR", "UOWNER"],
         resource: { kind: "issue", number: 44 },
       },
     });
@@ -67,7 +67,7 @@ describe("SlackReviewNotifier", () => {
       notification: {
         kind: "review-requested",
         slackUserIds: ["UREVIEWER", "UOWNER"],
-        actorSlackUserId: "UAUTHOR",
+        actorSlackUserId: null,
         resource: { kind: "issue", number: 44 },
       },
     });
@@ -121,7 +121,7 @@ function issue() {
     body: "",
     state: "open" as const,
     authorLogin: "requester",
-    assigneeLogins: ["owner"],
+    assigneeLogins: ["author", "owner"],
     labels: ["type/task", "merge/review"],
   };
 }

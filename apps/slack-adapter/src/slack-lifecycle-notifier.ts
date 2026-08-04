@@ -4,6 +4,7 @@ import type {
   LifecycleNotificationKind,
   LifecycleNotifier,
 } from "./lifecycle-notification-service.ts";
+import { shouldSuppressActorMention } from "./lifecycle-notification-service.ts";
 import type { NotificationIntentMetadata } from "./notification-outbox.ts";
 import type { ThreadMessageResult } from "./notification-thread-service.ts";
 import { lifecycleTone, slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
@@ -27,11 +28,14 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
         `Issue threadが見つからないため、${notification.kind}通知のchannel直下への送信を停止しました。`,
       );
     }
-    const mentions = notification.slackUserIds.map((userId) => `<@${userId}>`).join(" ");
+    const recipientSlackUserIds = shouldSuppressActorMention(notification.kind)
+      ? notification.slackUserIds.filter((userId) => userId !== notification.actorSlackUserId)
+      : notification.slackUserIds;
+    const mentions = recipientSlackUserIds.map((userId) => `<@${userId}>`).join(" ");
     const target = notification.pullRequest ?? notification.resource;
     const tone = lifecycleTone(notification.kind);
     const label = kindLabel(notification);
-    const replyBroadcast = isSelfMergeNotice(notification.kind);
+    const replyBroadcast = isSelfMergeNotice(notification);
     const response = await this.client.chat.postMessage({
       channel: this.channelId,
       text: `${mentions ? `${mentions} ` : ""}${slackPlain(tone, notification.summary)} ${target.url}`,
@@ -108,15 +112,12 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
   }
 }
 
-function isSelfMergeNotice(kind: LifecycleNotificationKind): boolean {
-  return kind === "self-merge-scheduled";
+function isSelfMergeNotice(notification: LifecycleNotification): boolean {
+  return notification.kind === "self-merge-scheduled" && notification.replyBroadcast !== false;
 }
 
 function actorLabel(notification: LifecycleNotification): string {
-  return notification.actorSlackUserId &&
-    /^[A-Z][A-Z0-9]{1,31}$/.test(notification.actorSlackUserId)
-    ? `<@${notification.actorSlackUserId}>`
-    : `@${escapeMrkdwn(notification.actorLogin)}`;
+  return `@${escapeMrkdwn(notification.actorLogin)}`;
 }
 
 function kindLabel(notification: LifecycleNotification): string {

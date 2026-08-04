@@ -5,6 +5,7 @@ import { createSlackApp } from "./app.ts";
 import { IssueApprovalService } from "./approval.ts";
 import { type CanvasClient, CanvasProjectionService } from "./canvas-service.ts";
 import { GitHubAppDependencies } from "./github-app.ts";
+import { GitHubCapabilityGrants } from "./github-capabilities.ts";
 import { GitHubCliDependencies } from "./github-cli.ts";
 import { parseGitHubWebhookJob, verifyGitHubWebhookSignature } from "./github-webhook.ts";
 import { GitHubWebhookProcessor } from "./github-webhook-processor.ts";
@@ -59,6 +60,9 @@ const project = projectConfig();
 const approverUserIds = csv("AR_SLACK_APPROVER_IDS");
 const selfApproverUserIds = csv("AR_SLACK_SELF_APPROVER_IDS");
 const notificationReplayOperatorIds = csv("AR_NOTIFICATION_REPLAY_OPERATOR_IDS");
+const githubCapabilities = GitHubCapabilityGrants.fromJson(
+  process.env.AR_GITHUB_CAPABILITY_GRANTS_JSON,
+);
 const githubBackend = (process.env.AR_GITHUB_BACKEND ?? "cli").trim().toLowerCase();
 if (githubBackend !== "cli" && githubBackend !== "app") {
   throw new Error("AR_GITHUB_BACKENDはcliまたはappを指定してください。");
@@ -243,6 +247,7 @@ const lifecycleNotificationService =
         resolveSlackUserId,
         Date.now,
         sharedRepository ? [sharedRepository] : [],
+        githubCapabilities,
       )
     : null;
 const webhookProcessor =

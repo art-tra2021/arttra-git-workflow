@@ -92,6 +92,9 @@ Issue modalの担当者と予定レビュワーはSlackのネイティブなメ�
 選択値はAIと共通のversion付きIssue作成commandへ保存し、対応する`merge/*`ラベルを正本とする。
 `AR_SLACK_APPROVER_IDS`には、`merge/self`または`merge/emergency`を許可できるSlack user IDをカンマ区切りで設定する。
 申請者本人による直通を許すPL等は、`AR_SLACK_SELF_APPROVER_IDS`にも明示する。
+通知上の追加権限は`AR_GITHUB_CAPABILITY_GRANTS_JSON`でGitHub loginへ明示的に付与する。
+`suppress_self_merge_channel_broadcast`はセルフマージ初回警告をIssue thread内だけに留める権限であり、Task threadへの警告と停止ボタンは残る。
+この権限はrepositoryのadmin権限や`AR_SLACK_SELF_APPROVER_IDS`から暗黙には付与しない。
 直通にはこのSlack設定に加え、OAuthで確認したGitHub loginが対象repositoryで`write`、`maintain`、`admin`のいずれかを持つことを要求する。
 未設定者、GitHub未連携者、権限不足者、権限を確認できない場合は拒否せず、理由と申請者・repository・マージ方針を示したnative mentionと承認ボタンを承認者へ送る。
 承認時にも申請者のGitHub連携とrepository accessを再確認し、申請後に失効した権限を流用しない。

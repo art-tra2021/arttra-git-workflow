@@ -64,17 +64,53 @@ describe("SlackLifecycleNotifier", () => {
     expect(calls[1]).toMatchObject({ thread_ts: "970.1", reply_broadcast: false });
   });
 
-  test("actorSlackUserIdがあれば実行者をnative mentionで表示する", async () => {
+  test("broadcast免除が明示されたセルフマージ予定はthread内だけにする", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const notifier = notifierWithCalls(calls, "970.31");
+
+    await notifier.notify(
+      { ...notification("self-merge-scheduled"), replyBroadcast: false },
+      "970.1",
+    );
+
+    expect(calls[0]).toMatchObject({ thread_ts: "970.1", reply_broadcast: false });
+  });
+
+  test("actionable通知も実行者欄はplain表示し、責任者recipientだけnative mentionする", async () => {
     const calls: Array<Record<string, unknown>> = [];
     const notifier = notifierWithCalls(calls, "970.4");
     const withActorSlackUserId = {
-      ...notification("comment-created"),
+      ...notification("review-changes-requested"),
       actorSlackUserId: "UACTOR",
+      slackUserIds: ["UACTOR"],
     };
 
     await notifier.notify(withActorSlackUserId, "970.1");
 
-    expect(JSON.stringify(calls[0]?.blocks)).toContain("*実行者:* <@UACTOR>");
+    const serialized = JSON.stringify(calls[0]);
+    expect(serialized).toContain("<@UACTOR>");
+    expect(serialized).toContain("*実行者:* @owner");
+    expect(serialized).not.toContain("*実行者:* <@UACTOR>");
+  });
+
+  test("informational自己操作はrecipientと実行者のどちらにもnative mentionを残さない", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const notifier = notifierWithCalls(calls, "970.5");
+
+    await notifier.notify(
+      {
+        ...notification("comment-created"),
+        actorLogin: "actor",
+        actorSlackUserId: "UACTOR",
+        slackUserIds: ["UACTOR", "UOTHER"],
+      },
+      "970.1",
+    );
+
+    const serialized = JSON.stringify(calls[0]);
+    expect(serialized).not.toContain("<@UACTOR>");
+    expect(serialized).toContain("<@UOTHER>");
+    expect(serialized).toContain("*実行者:* @actor");
   });
 
   test("native mention付きでIssue threadへ日本語通知する", async () => {
