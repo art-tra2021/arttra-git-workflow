@@ -118,6 +118,21 @@ Task作成またはPR作成・レビュー依頼が`ts == thread_ts`なら平投
 検証用Issue、PR、Slackメッセージは監査証跡として残す。
 失敗時も削除せず、原因と再試験結果をIssueへ追記する。
 
+### 2026-08-04の本番E2E証跡
+
+Cloud Run revision `arttra-work-slack-00048-xv7`で、Work [#111](https://github.com/art-tra2021/arttra-git-workflow/issues/111)とTask [#113](https://github.com/art-tra2021/arttra-git-workflow/issues/113)を使って確認した。
+作業通知channelは`C0BK0RGD87J`、Work親投稿のtsは`1785819495.573869`である。
+
+Task作成時に届いたメッセージは次の2件である。
+
+| 順序 | 通知 | message ts | thread_ts | native mention | channelへの展開 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Task概要 | `1785820794.713059` | `1785819495.573869` | なし | なし |
+| 2 | セルフマージ警告 | `1785820795.549839` | `1785819495.573869` | なし | なし |
+
+Task #113に対する独立したassignment変更通知はなく、Task概要とセルフマージ警告の順序も維持された。
+セルフマージ警告がchannelへ展開されないのは、`rozwer`に`suppress_self_merge_channel_broadcast`を明示grantしているためである。
+
 ## 本番deploy
 
 必須CIが成功してmainへmergeされたcommitだけを本番へdeployする。
