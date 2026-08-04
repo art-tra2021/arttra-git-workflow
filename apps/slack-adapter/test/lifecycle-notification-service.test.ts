@@ -17,7 +17,7 @@ import { SlackLifecycleNotifier } from "../src/slack-lifecycle-notifier.ts";
 import { LocalStateStore } from "../src/state-store.ts";
 
 describe("LifecycleNotificationService", () => {
-  test("通常Issue作成をchannel rootへ即時通知し、セルフマージ予定を同じthreadで強調する", async () => {
+  test("Task作成を親Work threadへ集約し、セルフマージ予定も同じthreadで強調する", async () => {
     const harness = await createHarness();
     harness.github.issue = {
       ...harness.github.issue,
@@ -34,17 +34,22 @@ describe("LifecycleNotificationService", () => {
     expect(await harness.service.process(selfMergeLabeledJob())).toBe(0);
     expect(harness.sent.map((value) => value.notification.kind)).toEqual([
       "issue-opened",
+      "issue-opened",
       "self-merge-scheduled",
     ]);
-    expect(harness.sent.map((value) => value.threadTs)).toEqual([null, "900.1"]);
-    expect(harness.sent[0]?.notification.detail).toContain("親Issue: example/repo#86");
-    expect(harness.sent[0]?.notification.detail).toContain("完了条件: Slackへ通知する");
-    expect(harness.sent[0]?.notification.detail).toContain("目標日: 2026-08-04");
+    expect(harness.sent.map((value) => value.threadTs)).toEqual([null, "900.1", "900.1"]);
     expect(harness.sent[0]?.notification).toMatchObject({
+      issueType: "work",
+      resource: { number: 86 },
+    });
+    expect(harness.sent[1]?.notification.detail).toContain("親Issue: example/repo#86");
+    expect(harness.sent[1]?.notification.detail).toContain("完了条件: Slackへ通知する");
+    expect(harness.sent[1]?.notification.detail).toContain("目標日: 2026-08-04");
+    expect(harness.sent[1]?.notification).toMatchObject({
       issueType: "task",
       slackUserIds: ["UOWNER"],
     });
-    expect(harness.sent[1]?.notification).toMatchObject({
+    expect(harness.sent[2]?.notification).toMatchObject({
       selfMergeControl: { repository: "example/repo", issueNumber: 44 },
       replyBroadcast: true,
       detail: "第三者承認を待たず、PR作成者本人が必須CI通過後にマージします。",
@@ -104,7 +109,7 @@ describe("LifecycleNotificationService", () => {
     };
 
     expect(await harness.service.process(issueOpenedJob())).toBe(2);
-    const warning = harness.sent[1]?.notification;
+    const warning = harness.sent[2]?.notification;
     expect(warning?.slackUserIds).toEqual([]);
     expect(warning?.replyBroadcast).toBe(false);
     const calls: Array<Record<string, unknown>> = [];
@@ -213,6 +218,44 @@ describe("LifecycleNotificationService", () => {
     expect(harness.sent[0]?.notification.detail).not.toContain("マージ方針");
   });
 
+  test("親WorkまたはBusinessを解決できないTaskはchannel直下へfallbackしない", async () => {
+    const harness = await createHarness();
+    harness.github.issue = { ...harness.github.issue, parentIssueUrl: null };
+
+    expect(await harness.service.process(issueOpenedJob())).toBe(0);
+    expect(harness.sent).toHaveLength(0);
+  });
+
+  test("Business配下のTaskもBusiness threadへ集約する", async () => {
+    const harness = await createHarness();
+    harness.github.parentIssue = {
+      ...harness.github.parentIssue,
+      labels: ["type/business"],
+    };
+
+    expect(await harness.service.process(issueOpenedJob())).toBe(1);
+    expect(harness.sent).toHaveLength(2);
+    expect(harness.sent[0]).toMatchObject({
+      threadTs: null,
+      notification: { issueType: "business", resource: { number: 86 } },
+    });
+    expect(harness.sent[1]).toMatchObject({
+      threadTs: "900.1",
+      notification: { issueType: "task", resource: { number: 44 } },
+    });
+  });
+
+  test("共有channelのrepository scope外にある親Issueを表示しない", async () => {
+    const harness = await createHarness(GitHubCapabilityGrants.empty(), ["example/repo"]);
+    harness.github.issue = {
+      ...harness.github.issue,
+      parentIssueUrl: "https://github.example/another/repo/issues/86",
+    };
+
+    expect(await harness.service.process(issueOpenedJob())).toBe(0);
+    expect(harness.sent).toHaveLength(0);
+  });
+
   test("差し戻し、修正push、マージを関連Issueのthreadへ集約する", async () => {
     const harness = await createHarness();
 
@@ -235,6 +278,10 @@ describe("LifecycleNotificationService", () => {
       "pr-merged",
     ]);
     expect(harness.sent.map((value) => value.threadTs)).toEqual([null, "900.1", "900.1", "900.1"]);
+    expect(harness.sent[0]?.notification.resource.number).toBe(86);
+    expect(harness.sent.slice(1).map((value) => value.notification.resource.number)).toEqual([
+      44, 44, 44,
+    ]);
     expect(harness.sent[1]?.notification.slackUserIds).toEqual(["UAUTHOR"]);
     expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UREVIEWER"]);
     expect(harness.sent[3]?.notification.slackUserIds).toEqual(["UAUTHOR", "UOWNER"]);
@@ -301,7 +348,10 @@ describe("LifecycleNotificationService", () => {
   });
 });
 
-async function createHarness(githubCapabilities = GitHubCapabilityGrants.empty()) {
+async function createHarness(
+  githubCapabilities = GitHubCapabilityGrants.empty(),
+  allowedRepositories: readonly string[] | null = null,
+) {
   const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-lifecycle-")));
   const github = new FakeLifecycleClient();
   const sent: Array<{ notification: LifecycleNotification; threadTs: string | null }> = [];
@@ -324,7 +374,7 @@ async function createHarness(githubCapabilities = GitHubCapabilityGrants.empty()
     },
     async (login) => ids[login] ?? null,
     () => Date.parse("2026-08-02T00:00:00Z"),
-    null,
+    allowedRepositories,
     githubCapabilities,
   );
   return { service, github, sent };
@@ -341,6 +391,18 @@ class FakeLifecycleClient implements GitHubLifecycleClient {
     assigneeLogins: ["owner"],
     labels: ["type/task", "merge/review"],
     parentIssueUrl: "https://github.example/example/repo/issues/86",
+  };
+
+  parentIssue: GitHubIssueContext = {
+    number: 86,
+    title: "通知をまとめるWork",
+    url: "https://github.example/example/repo/issues/86",
+    body: "",
+    state: "open",
+    authorLogin: "requester",
+    assigneeLogins: ["owner"],
+    labels: ["type/work"],
+    parentIssueUrl: "https://github.example/example/repo/issues/7",
   };
 
   pullRequest: PullRequestReviewContext = {
@@ -367,8 +429,10 @@ class FakeLifecycleClient implements GitHubLifecycleClient {
     changesRequestedReviewerLogins: ["reviewer"],
   };
 
-  async loadIssueContext(): Promise<GitHubIssueContext> {
-    return this.issue;
+  async loadIssueContext(_repository: string, issueNumber: number): Promise<GitHubIssueContext> {
+    if (issueNumber === this.issue.number) return this.issue;
+    if (issueNumber === this.parentIssue.number) return this.parentIssue;
+    throw new Error(`Issue #${issueNumber}がfixtureにありません。`);
   }
 
   async loadPullRequestReviewContext(): Promise<PullRequestReviewContext> {

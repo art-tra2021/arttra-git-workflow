@@ -30,7 +30,7 @@ TaskはWorkまたはBusinessの子となる末端作業で、さらに子Issue�
 PRは本文の`Closes #<Issue番号>`で、1件のPRで完了できるTaskをちょうど1件だけ閉じます。
 Intake、Work、Businessや複数Issueをprimary closing Taskにせず、Taskのnative parentは`Relates to https://github.com/owner/repo/issues/<番号>`で参照します。
 branch名のTask番号、`git ar pr --issue`、`Closes`のTask番号はすべて同じにします。
-これにより、100件規模の活動を一つの親IssueやSlackスレッドへ集中させません。
+SlackはWorkまたはBusiness単位で一つの親スレッドを持ち、子TaskとPRの会話をそこへ集約します。Work直下が20件を超えそうな場合に成果単位を分ける運用シグナルは、100件規模のTaskを一つのスレッドへ集中させないためにも使います。
 `Closes`はPRとIssueの完了リンクであり、Issue同士の`parent / sub-issue`や`blocked-by / blocking`には変換しません。
 
 ## マージ

@@ -36,19 +36,21 @@ GitHub App本体へ復帰した後もrepository webhookを無断で削除せず�
 
 ## スレッド規則
 
-PRはGitHubが`Closes`から解決したprimary closing Taskをちょうど1件持つことを必須とし、そのTask URLだけをthread keyとする。
+PRはGitHubが`Closes`から解決したprimary closing Taskをちょうど1件持つことを必須とする。通知本文と重複排除にはTask URLを使い、Slackのthread keyにはTaskのnative parentであるWorkまたはBusiness URLを使う。
 `Closes`はPRが直接完了させるTaskを示す完了リンクであり、Issue同士の親子関係や依存関係ではない。
 `Relates to`や本文中の単なる`#123`は通知先にしない。
 primary closing Taskが0件、複数件、または`type/task`でないPRは、PR単位のchannel直下投稿へfallbackせず、policy違反として修正する。
-親WorkまたはBusinessとTaskはそれぞれ独立したSlack親投稿を持ち、PRの会話を親Work側へ混ぜない。
+WorkまたはBusinessだけが実行単位のSlack親投稿を持つ。Task作成と配下のPR、review、CI、comment、期限、blockerは同じ親threadへ集約し、Task単位の親投稿を作らない。
 
-Issue作成eventより先にコメントやPR eventが届いた場合も、Issue種別に応じた概要を親投稿として作成してから続報を返信する。
+Task作成eventより先にコメントやPR eventが届いた場合も、親WorkまたはBusinessの概要を親投稿として作成してから続報を返信する。
 複数workerが同時に最初のeventを処理しても親投稿は一つだけ作り、root作成中の処理は平投稿せず再試行する。
-同じIssueに対する次の通知は、同一の親投稿への返信に集約する。
+親がない、親種別が不正、または共有channelのrepository scope外であるTaskはchannel直下へfallbackしない。
+通知subjectとdedupe keyはTaskのまま維持し、同じWork配下の複数Taskを衝突させない。
 
 | GitHub上の出来事 | 通知対象 |
 | --- | --- |
-| Issueの最初の親投稿 | Issue作成の実行者本人を除いたIssue担当者 |
+| Intake、Work、Businessの最初の親投稿 | Issue作成の実行者本人を除いたIssue担当者 |
+| Task作成 | 親WorkまたはBusinessのthreadで、実行者本人を除いたTask担当者 |
 | PR作成・レビュー依頼 | 指定reviewerとIssue担当者 |
 | Issueコメント | Issue担当者と本文で明示されたGitHubユーザー |
 | PR会話コメント・コードコメント | PR作成者と本文で明示されたGitHubユーザー |
@@ -61,10 +63,10 @@ Issue作成eventより先にコメントやPR eventが届いた場合も、Issue
 
 実行者は通知先ではなく出来事の帰属表示なので、常にplainな`@github-login`で表示する。
 native mentionは、確認や対応が必要なrecipientだけに付け、Issue作成、自己assignment、自己reviewer指定、自己コメントなどの実行者本人には付けない。
-Issueの親投稿はIntake、Work、Task、Businessごとに見出し、説明、次の操作を変える。
-セルフマージ対象になった最初の警告だけはIssue threadへの返信をchannelにも展開し、停止機会を作る。
-ただし`AR_GITHUB_CAPABILITY_GRANTS_JSON`で`suppress_self_merge_channel_broadcast`を明示grantされたGitHub利用者は、初回警告もIssue thread内だけに留める。
-この権限はrepositoryのadmin権限やセルフマージ権限から暗黙付与せず、Task threadへの警告と停止ボタンは権限の有無にかかわらず残す。
+Issueの表示はIntake、Work、Task、Businessごとに見出し、説明、次の操作を変えるが、Taskは親WorkまたはBusinessのthread返信として表示する。
+セルフマージ対象になった最初の警告だけはWorkまたはBusiness threadへのTask返信をchannelにも展開し、停止機会を作る。
+ただし`AR_GITHUB_CAPABILITY_GRANTS_JSON`で`suppress_self_merge_channel_broadcast`を明示grantされたGitHub利用者は、初回警告も親WorkまたはBusiness thread内だけに留める。
+この権限はrepositoryのadmin権限やセルフマージ権限から暗黙付与せず、WorkまたはBusiness thread内のTask警告と停止ボタンは権限の有無にかかわらず残す。
 CI通過後のセルフマージ実行可能通知は同じthread内だけに置き、channelを二度通知しない。
 
 GitHubログインとSlack user IDの対応は、本人が完了したGitHub OAuthだけを正とする。
@@ -96,17 +98,17 @@ fallback textにも同じ絵文字と見出しを含めるが、本文中の装�
 
 1. 検証用Workと、その子に`merge/self`を付けたTaskを作り、Taskへ担当者と予定reviewerを設定する。
 2. Taskだけを`Closes #<Task番号>`で閉じ、親Workはnative parentの完全なIssue URLを`Relates to https://github.com/owner/repo/issues/<Work番号>`で参照するPRを作る。
-3. SlackのIssue親投稿で作成の実行者本人はmentionされず、別の担当者だけがnative mentionされ、レビュー依頼の返信でPR作成者本人を除いた予定reviewerがnative mentionされていることを確認する。
+3. SlackのWork親投稿で作成の実行者本人はmentionされず、Task作成がそのthread内にあること、レビュー依頼でPR作成者本人を除いた予定reviewerだけがnative mentionされていることを確認する。
 4. Issueコメント、PR会話コメント、レビューコメントを一つずつ追加する。
 5. 差し戻し、修正push、承認の順に実施する。
 6. PRをsquash mergeし、Issueを完了させる。
-7. CI失敗を一度発生させ、primary Issue threadへ通知されることを確認する。
+7. CI失敗を一度発生させ、primary Taskの親WorkまたはBusiness threadへ通知されることを確認する。
 8. 通常のセルフマージ実行者では初回だけchannelへ展開され、`suppress_self_merge_channel_broadcast`のgrant対象者では初回からthread内だけになることを確認する。どちらも停止ボタンがあり、CI通過通知はthread内だけであることを確認する。
-9. すべての通知が同じIssueスレッドにあり、同じイベントの重複通知がないことを確認する。
+9. Task作成からPR完了までの通知が同じWorkまたはBusinessスレッドにあり、同じイベントの重複通知がないことを確認する。
 10. GitHub Webhook delivery、Cloud Run log、Cloud Tasksの失敗件数を確認する。
 
-Slack APIでも、新しいTaskの親投稿は`ts == thread_ts`、PR作成・レビュー依頼は`thread_ts == Task親投稿のts`かつ`ts != thread_ts`であることを確認する。
-PR作成・レビュー依頼が`ts == thread_ts`ならPR専用の平投稿が再発しているため、合格にしてはならない。
+Slack APIでも、WorkまたはBusiness親投稿は`ts == thread_ts`、Task作成・PR作成・レビュー依頼は`thread_ts == WorkまたはBusiness親投稿のts`かつ`ts != thread_ts`であることを確認する。
+Task作成またはPR作成・レビュー依頼が`ts == thread_ts`なら平投稿が再発しているため、合格にしてはならない。
 
 検証用Issue、PR、Slackメッセージは監査証跡として残す。
 失敗時も削除せず、原因と再試験結果をIssueへ追記する。
@@ -131,11 +133,11 @@ gcloud run deploy arttra-work-slack \
 ```
 
 deploy後は`latestReadyRevisionName`、image、traffic 100%を確認し、`/health`が`{"ok":true,"schemaVersion":1}`を返すことを確認する。
-旧revisionのeventで作られたPR専用threadは履歴として残るため、deploy後に新しいTaskとPRでE2E確認する。
+旧revisionで作られたTask専用threadは履歴として残るため、deploy後に新しいTaskとPRでWork単位のE2E確認を行う。
 
 ## 障害時の切り分け
 
 通知がない場合は、GitHub Webhook delivery、`/github/events`のHTTP応答、Cloud Tasks、worker log、Slack API応答の順に確認する。
 同じ通知が複数届く場合は、GitHub delivery ID、`github-delivery` state、`lifecycle-notification` fingerprintを確認する。
-別スレッドへ分かれた場合は、PR本文のIssue参照と`work-thread` stateのIssue URLを確認する。
+別スレッドへ分かれた場合は、PR本文のclosing Task、そのTaskのnative parent、`work-thread` stateのWorkまたはBusiness URLを確認する。
 メンションされない場合は、対象者がSlackからGitHub OAuth連携を完了しているか確認する。

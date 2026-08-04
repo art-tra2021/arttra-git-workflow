@@ -22,6 +22,11 @@ import {
 } from "./issue-schema.ts";
 import { workItemBlocks } from "./presentation.ts";
 import { allAccessibleScope, type RepositoryScope, repositoryScope } from "./project-scope.ts";
+import {
+  approvalDecisionMessage,
+  approvalRequestMessage,
+  selfMergeStoppedMessage,
+} from "./slack-action-message.ts";
 import { slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
 import type { SlackRequirementNotifier } from "./slack-requirement-notifier.ts";
 import type {
@@ -603,11 +608,16 @@ export function createSlackApp(
       if (!issue) {
         throw new Error("承認済みIssueの作成結果を読み取れませんでした。");
       }
-      const result = issueCreateNotification(
+      const teamId = "team" in body && body.team?.id ? body.team.id : "";
+      const actorIdentity = teamId ? await options.identityService.get(teamId, body.user.id) : null;
+      const message = approvalDecisionMessage({
+        decision: "approved",
+        requesterSlackUserId: approval.requester,
+        actorSlackUserId: body.user.id,
+        actorGitHubLogin: actorIdentity?.githubLogin ?? null,
         issue,
-        `<@${body.user.id}> が承認し、Issue #${issue.number}を作成しました: ${issue.url}`,
-        "approved",
-      );
+      });
+      const result = issueCreateNotification(issue, message.text, "approved");
       await respond({
         response_type: "in_channel",
         replace_original: true,
@@ -634,13 +644,18 @@ export function createSlackApp(
         approvers,
         selfApprovers,
       });
+      const teamId = "team" in body && body.team?.id ? body.team.id : "";
+      const actorIdentity = teamId ? await options.identityService.get(teamId, body.user.id) : null;
+      const message = approvalDecisionMessage({
+        decision: "rejected",
+        requesterSlackUserId: approval.requester,
+        actorSlackUserId: body.user.id,
+        actorGitHubLogin: actorIdentity?.githubLogin ?? null,
+      });
       await respond({
         response_type: "in_channel",
         replace_original: true,
-        text: slackPlain(
-          "warning",
-          `<@${body.user.id}> がIssue作成申請を却下しました。申請者: <@${approval.requester}>`,
-        ),
+        text: slackPlain("warning", message.text),
       });
     } catch (error) {
       await respond({
@@ -718,19 +733,19 @@ export function createSlackApp(
       const ownerIds = options.resolveSlackUserId
         ? await Promise.all(issue.assigneeLogins.map(options.resolveSlackUserId))
         : [];
-      const mentions = ownerIds
-        .filter((value): value is string => Boolean(value))
-        .map((value) => `<@${value}>`)
-        .join(" ");
+      const message = selfMergeStoppedMessage({
+        ownerSlackUserIds: ownerIds.filter((value): value is string => Boolean(value)),
+        actorSlackUserId: body.user.id,
+        actorGitHubLogin: actorLogin,
+        reason,
+        issueUrl: issue.url,
+      });
       if (target.channelId) {
         try {
           await client.chat.postMessage({
             channel: target.channelId,
             ...(target.rootTs ? { thread_ts: target.rootTs, reply_broadcast: false } : {}),
-            text: slackPlain(
-              "warning",
-              `${mentions ? `${mentions} ` : ""}<@${body.user.id}> がセルフマージを停止しました。理由: ${reason} ${issue.url}`,
-            ),
+            text: slackPlain("warning", message.text),
             unfurl_links: false,
             unfurl_media: false,
           });
@@ -1477,7 +1492,11 @@ async function requestIssueApproval(
   approvers: ReadonlySet<string>,
   reason: string,
 ): Promise<void> {
-  const mentions = [...approvers].map((id) => `<@${id}>`).join(" ");
+  const message = approvalRequestMessage({
+    approverSlackUserIds: approvers,
+    requesterSlackUserId: command.actor,
+    requesterGitHubLogin: command.requesterGitHubUser?.login ?? null,
+  });
   const mergeMode = command.fields.merge ?? "権限昇格";
   const relationshipSummary = issueRelationshipSummary(command.relationships);
   const response = await fetch(responseUrl, {
@@ -1486,14 +1505,14 @@ async function requestIssueApproval(
     body: JSON.stringify({
       response_type: "in_channel",
       replace_original: false,
-      text: slackPlain("action", `${mentions} Issue作成の承認をお願いします。`),
+      text: slackPlain("action", message.text),
       blocks: [
         slackHeader("action", "Issue作成の承認依頼"),
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `${mentions}\n<@${command.actor}> からIssue作成の承認申請です。\n*作成先:* ${command.repository}\n*タイトル:* ${command.title}\n*マージ方式:* ${mergeMode}${relationshipSummary ? `\n${relationshipSummary}` : ""}\n*承認が必要な理由:* ${reason}`,
+            text: `${message.text}\n*作成先:* ${command.repository}\n*タイトル:* ${command.title}\n*マージ方式:* ${mergeMode}${relationshipSummary ? `\n${relationshipSummary}` : ""}\n*承認が必要な理由:* ${reason}`,
           },
         },
         slackDivider(),

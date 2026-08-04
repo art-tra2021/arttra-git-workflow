@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { NotificationThreadService } from "../src/notification-thread-service.ts";
+import type { GitHubIssueContext } from "../src/review-types.ts";
 import type { StateStore } from "../src/state-store.ts";
 import type { HumanWorkItem } from "../src/types.ts";
 import {
@@ -119,6 +121,76 @@ describe("WorkNotificationService", () => {
     expect(contexts.map((context) => context.kind)).toEqual(["deadline", "state"]);
   });
 
+  test("Taskの状態通知は既存の親Work threadへ送り、Task rootを作らない", async () => {
+    const values = new Map<string, unknown>();
+    const store = memoryStore(values);
+    const threads = new NotificationThreadService(store);
+    const parent = issueContext(20, ["type/work"]);
+    await store.set("work-thread", parent.url, {
+      schemaVersion: 1,
+      issueUrl: parent.url,
+      rootTs: "700.1",
+      createdAt: "2026-08-04T00:00:00Z",
+    });
+    const task = issueContext(23, ["type/task", "merge/review"], parent.url);
+    const contexts: WorkNotificationContext[] = [];
+    const service = new WorkNotificationService(
+      { loadProjectItems: async () => [workItem("BLOCKED", "immediate")] },
+      store,
+      {
+        notify: async (_item, context) => {
+          contexts.push(context);
+          return { messageTs: context.threadTs ?? "unexpected-root" };
+        },
+        digest: async () => {},
+      },
+      Date.now,
+      async () => null,
+      3,
+      threads,
+      {
+        loadIssueContext: async (_repository, number) => {
+          if (number === task.number) return task;
+          if (number === parent.number) return parent;
+          throw new Error(`Issue #${number}がfixtureにありません。`);
+        },
+      },
+    );
+
+    expect(await service.notifyImmediate()).toBe(1);
+    expect(contexts).toEqual([{ kind: "state", threadTs: "700.1", slackUserId: null }]);
+    expect(await threads.rootTs(task.url)).toBeNull();
+  });
+
+  test("親Work rootが未作成のTask通知はchannel直下へfallbackしない", async () => {
+    const values = new Map<string, unknown>();
+    const store = memoryStore(values);
+    const parent = issueContext(20, ["type/work"]);
+    const task = issueContext(23, ["type/task", "merge/review"], parent.url);
+    let sent = 0;
+    const service = new WorkNotificationService(
+      { loadProjectItems: async () => [workItem("BLOCKED", "immediate")] },
+      store,
+      {
+        notify: async () => {
+          sent += 1;
+          return { messageTs: "unexpected-root" };
+        },
+        digest: async () => {},
+      },
+      Date.now,
+      async () => null,
+      3,
+      new NotificationThreadService(store),
+      {
+        loadIssueContext: async (_repository, number) => (number === task.number ? task : parent),
+      },
+    );
+
+    expect(await service.notifyImmediate()).toBe(0);
+    expect(sent).toBe(0);
+  });
+
   test("期限当日と超過への遷移を同じスレッドで一度ずつ通知する", async () => {
     const values = new Map<string, unknown>();
     const sent: Array<{ code: HumanWorkItem["reasonCode"]; threadTs: string | null }> = [];
@@ -208,6 +280,24 @@ function workItem(
     nextAction: reasonCode,
     reason: reasonCode,
     actions: ["open-github"],
+  };
+}
+
+function issueContext(
+  number: number,
+  labels: string[],
+  parentIssueUrl: string | null = null,
+): GitHubIssueContext {
+  return {
+    number,
+    title: `Issue ${number}`,
+    url: `https://github.com/art-tra2021/service/issues/${number}`,
+    body: "",
+    state: "open",
+    authorLogin: "alice",
+    assigneeLogins: ["alice"],
+    labels,
+    parentIssueUrl,
   };
 }
 

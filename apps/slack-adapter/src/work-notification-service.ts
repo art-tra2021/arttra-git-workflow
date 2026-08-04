@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
+import {
+  parseIssueReferenceUrl,
+  resolveNotificationThreadRootIssue,
+} from "./lifecycle-notification-service.ts";
 import { type NotificationIntentMetadata, notificationIntentId } from "./notification-outbox.ts";
 import { NotificationThreadService } from "./notification-thread-service.ts";
+import type { GitHubLifecycleClient } from "./review-types.ts";
 import type { StateStore } from "./state-store.ts";
 import type { HumanWorkItem } from "./types.ts";
 
@@ -58,6 +63,7 @@ export class WorkNotificationService {
   private readonly resolveSlackUserId: ResolveSlackUserId;
   private readonly deadlineLeadDays: number;
   private readonly threads: NotificationThreadService;
+  private readonly github: Pick<GitHubLifecycleClient, "loadIssueContext"> | null;
 
   constructor(
     source: WorkItemSource,
@@ -67,6 +73,7 @@ export class WorkNotificationService {
     resolveSlackUserId: ResolveSlackUserId = async () => null,
     deadlineLeadDays = 3,
     threads: NotificationThreadService = new NotificationThreadService(store, now),
+    github: Pick<GitHubLifecycleClient, "loadIssueContext"> | null = null,
   ) {
     if (!Number.isSafeInteger(deadlineLeadDays) || deadlineLeadDays < 1 || deadlineLeadDays > 30) {
       throw new Error("期限通知の日数は1日から30日で指定してください。");
@@ -78,6 +85,7 @@ export class WorkNotificationService {
     this.resolveSlackUserId = resolveSlackUserId;
     this.deadlineLeadDays = deadlineLeadDays;
     this.threads = threads;
+    this.github = github;
   }
 
   async notifyImmediate(sourceDeliveryId?: string): Promise<number> {
@@ -96,10 +104,11 @@ export class WorkNotificationService {
       if (previous?.fingerprint === fingerprint) {
         continue;
       }
-      await this.notifyThreaded(item, "state", {
+      const sent = await this.notifyThreaded(item, "state", {
         intentId: notificationIntentId({ kind: "work-state", issueUrl: item.url, fingerprint }),
         ...(sourceDeliveryId ? { sourceDeliveryId } : {}),
       });
+      if (!sent) continue;
       await this.store.set<WorkNotificationState>(NOTIFICATION_NAMESPACE, item.url, {
         schemaVersion: 1,
         issueUrl: item.url,
@@ -128,7 +137,7 @@ export class WorkNotificationService {
       if (previous?.targetDate === item.targetDate && previous.stage === stage) {
         continue;
       }
-      await this.notifyThreaded(deadlineWorkItem(item, stage, today), "deadline", {
+      const sent = await this.notifyThreaded(deadlineWorkItem(item, stage, today), "deadline", {
         intentId: notificationIntentId({
           kind: "work-deadline",
           issueUrl: item.url,
@@ -136,6 +145,7 @@ export class WorkNotificationService {
           stage,
         }),
       });
+      if (!sent) continue;
       await this.store.set<WorkDeadlineNotificationState>(DEADLINE_NAMESPACE, item.url, {
         schemaVersion: 1,
         issueUrl: item.url,
@@ -172,11 +182,29 @@ export class WorkNotificationService {
     item: HumanWorkItem,
     kind: WorkNotificationContext["kind"],
     metadata: NotificationIntentMetadata,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const slackUserId = item.owner ? await this.resolveSlackUserId(item.owner) : null;
+    if (this.github) {
+      const reference = parseIssueReferenceUrl(item.url);
+      if (!reference) return false;
+      const issue = await this.github.loadIssueContext(reference.repository, reference.number);
+      const threadRootIssue = await resolveNotificationThreadRootIssue(
+        issue,
+        this.github,
+        new Set([(item.repository ?? reference.repository).toLowerCase()]),
+      );
+      if (!threadRootIssue) return false;
+      if (threadRootIssue.url !== issue.url) {
+        const threadTs = await this.threads.rootTs(threadRootIssue.url);
+        if (!threadTs) return false;
+        await this.notifier.notify(item, { kind, threadTs, slackUserId }, metadata);
+        return true;
+      }
+    }
     await this.threads.publish(item.url, (threadTs) =>
       this.notifier.notify(item, { kind, threadTs, slackUserId }, metadata),
     );
+    return true;
   }
 }
 

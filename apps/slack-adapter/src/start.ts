@@ -209,6 +209,7 @@ const workNotificationService = workNotificationChannelId
       resolveSlackUserId,
       positiveInteger(process.env.AR_DEADLINE_REMINDER_DAYS ?? "3", "AR_DEADLINE_REMINDER_DAYS"),
       notificationThreads,
+      dependencies instanceof GitHubAppDependencies ? dependencies : null,
     )
   : null;
 const receiver =
@@ -225,7 +226,12 @@ const reviewService =
         dependencies,
         identityService,
         store,
-        new SlackReviewNotifier(slackLifecycleNotifier, notificationThreads, resolveSlackUserId),
+        new SlackReviewNotifier(
+          slackLifecycleNotifier,
+          notificationThreads,
+          resolveSlackUserId,
+          dependencies,
+        ),
         {
           slackTeamId,
           ...(sharedRepository ? { allowedRepositories: [sharedRepository] } : {}),

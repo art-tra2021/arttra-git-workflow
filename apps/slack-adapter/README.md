@@ -93,7 +93,7 @@ Issue modalの担当者と予定レビュワーはSlackのネイティブなメ�
 `AR_SLACK_APPROVER_IDS`には、`merge/self`または`merge/emergency`を許可できるSlack user IDをカンマ区切りで設定する。
 申請者本人による直通を許すPL等は、`AR_SLACK_SELF_APPROVER_IDS`にも明示する。
 通知上の追加権限は`AR_GITHUB_CAPABILITY_GRANTS_JSON`でGitHub loginへ明示的に付与する。
-`suppress_self_merge_channel_broadcast`はセルフマージ初回警告をIssue thread内だけに留める権限であり、Task threadへの警告と停止ボタンは残る。
+`suppress_self_merge_channel_broadcast`はセルフマージ初回警告を親WorkまたはBusiness thread内だけに留める権限であり、Task警告と停止ボタンは残る。
 この権限はrepositoryのadmin権限や`AR_SLACK_SELF_APPROVER_IDS`から暗黙には付与しない。
 直通にはこのSlack設定に加え、OAuthで確認したGitHub loginが対象repositoryで`write`、`maintain`、`admin`のいずれかを持つことを要求する。
 未設定者、GitHub未連携者、権限不足者、権限を確認できない場合は拒否せず、理由と申請者・repository・マージ方針を示したnative mentionと承認ボタンを承認者へ送る。
@@ -133,7 +133,7 @@ mise run slack:outbox:audit:json
 ```
 
 再送前には必ずdry-runを行う。
-コマンドはSlack Conversations APIで対象channelの時間帯またはIssue threadを最後まで読み、メッセージmetadataに埋め込んだintent IDを照合する。
+コマンドはSlack Conversations APIで対象channelの時間帯またはWork / Business threadを最後まで読み、メッセージmetadataに埋め込んだintent IDを照合する。
 
 ```sh
 mise run slack:outbox:replay -- \
@@ -248,8 +248,8 @@ job本文は`AR_JOB_SECRET`でも署名し、GitHub delivery IDをCloud Tasks ta
 Project項目、Issue、PR、reviewの変更を処理したworkerはGitHub Projectsを再取得し、設定済みSlack Listへ反映する。
 同じ再取得結果から、未着手・緊急、Blocked、CI失敗、conflictだけを`AR_SLACK_WORK_CHANNEL_ID`へ即時通知する。
 通知済み状態はIssue URLと判定内容のfingerprintで重複排除し、通常の進行中作業は即時投稿しない。
-Issueごとの親投稿tsは共通state storeへ保存する。
-期限、blocker、CI失敗、conflictなど同じIssueの続報は親投稿のthreadへ返信し、channelへ新しい親投稿を増やさない。
+Intakeの受付投稿とWorkまたはBusiness単位の親投稿tsを共通state storeへ保存する。
+Task作成、期限、blocker、CI失敗、conflictなどの続報は親WorkまたはBusinessのthreadへ返信し、Task単位の親投稿をchannelへ増やさない。
 日次digestはIssue別threadへ入れず、独立した一覧投稿とする。
 
 PR作成時は、GitHubが`Closes`から解決したprimary closing Taskがちょうど1件であることを確認し、そのTask本文の予定reviewer、変更fileに対するCODEOWNERS、Rulesetを再取得する。
@@ -258,10 +258,10 @@ GitHubへ正式なReview Requestを設定し、reviewerとIssue担当者をnativ
 Issue作成モーダルで選択した担当者または予定reviewerがGitHub未連携の場合、Issue作成者だけへエラーを返して終わらせない。
 対象のSlack user IDをnative mentionし、`🧩 GitHub連携が必要です`と`/ar connect github`を通知する。
 同じ利用者への連携要求は24時間抑止し、表示名やメールアドレスからGitHubアカウントを推測しない。
-Issueの最初の親投稿ではIssue作成者と担当者をnative mentionし、Intake、Work、Task、Businessごとに見出しと次の操作を変える。
-WorkまたはBusinessと、その子Taskはそれぞれ独立したSlack親投稿を持つ。
-PR作成、Issue・PRコメント、Approve、差し戻し、差し戻し後のpush、CI失敗、マージ、Issue closeはprimary closing Taskのthreadへ返信し、親Work側へ混ぜない。
-Issue作成eventより続報が先に届いてもIssue概要の親投稿を先に作り、続報をchannel直下へ平投稿しない。
+Intakeは受付用の親投稿、WorkまたはBusinessは実行単位の親投稿を持ち、作成者本人を除いた担当者だけをnative mentionする。
+子Taskは独立したSlack親投稿を作らず、種別固有の見出しと次の操作を親WorkまたはBusinessのthreadへ返信する。
+PR作成、Issue・PRコメント、Approve、差し戻し、差し戻し後のpush、CI失敗、期限、blocker、マージ、Issue closeもprimary closing Taskの親WorkまたはBusinessのthreadへ集約する。
+Task作成eventより続報が先に届いても親WorkまたはBusinessの概要を先に作り、続報をchannel直下へ平投稿しない。親を解決できないTaskは平投稿へfallbackしない。
 セルフマージ対象になった最初の警告だけはthread返信をchannelにも展開し、CI通過後の通知はthread内だけにする。
 コメント時はIssue担当者またはPR作成者と、コメント本文で明示された`@github-login`を通知対象とする。
 差し戻し時はPR作成者、修正push時は差し戻したreviewer、マージとIssue close時は担当者を通知対象とする。
@@ -296,7 +296,7 @@ Slackの通常操作はこのcacheだけを読み、GitHubの一時的な遅延�
 
 PR作成・更新時は、唯一のprimary closing Taskにあるversion付き予定reviewer、変更fileに最後に一致するCODEOWNERS、active Rulesetの必要承認数をGitHubから再取得する。
 GitHubへ正式なuser/team review requestを設定した後、検証済みaccount mappingを持つ利用者だけSlackでmentionする。
-通知にはPR、選定理由、目標日、必要承認数、次の操作を表示し、primary closing Taskのthreadへ集約する。
+通知にはPR、選定理由、目標日、必要承認数、次の操作を表示し、primary closing Taskの親WorkまたはBusinessのthreadへ集約する。
 同じreviewer・理由・期限では既定24時間再通知せず、未対応が続く場合だけ再通知する。
 Cloud Schedulerは固定JSON `{"schemaVersion":1,"kind":"review.remind"}` を`/internal/review-reminders`へ定期送信する。
 本文に対する`X-Ar-Job-Signature`を設定し、workerは保存済みread modelのPRだけをGitHubから再取得して未対応を判定する。
