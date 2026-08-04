@@ -16,6 +16,63 @@ import {
 import { LocalStateStore } from "../src/state-store.ts";
 
 describe("NotificationOutboxService", () => {
+  test("送信済みの旧Task平投稿はthreadTsだけの移行なら再投稿せず既送信として扱う", async () => {
+    const store = await localStore("flat-task-migration");
+    let sends = 0;
+    const service = outbox(store, {
+      send: async () => {
+        sends += 1;
+        return { messageTs: "119.1" };
+      },
+    });
+    const flat = taskOpenedIntent("flat-task-migration", null, "delivery-legacy");
+    const threaded = taskOpenedIntent("flat-task-migration", "95.1", "delivery-current");
+
+    await expect(service.deliver(flat)).resolves.toEqual({ messageTs: "119.1" });
+    await expect(service.deliver(threaded)).resolves.toEqual({ messageTs: "119.1" });
+    await expect(service.deliver(threaded)).resolves.toEqual({ messageTs: "119.1" });
+
+    expect(sends).toBe(1);
+    expect(await service.get(flat.metadata.intentId)).toMatchObject({
+      status: "sent",
+      revision: 3,
+      messageTs: "119.1",
+      sourceDeliveryId: "delivery-legacy",
+      payload: { kind: "lifecycle", threadTs: null },
+    });
+  });
+
+  test("旧Task平投稿以外のpayload差分は引き続きfail-closedにする", async () => {
+    const store = await localStore("flat-task-collision");
+    const service = outbox(store, {
+      send: async () => ({ messageTs: "119.2" }),
+    });
+    const flat = taskOpenedIntent("flat-task-collision", null, "delivery-legacy");
+    await service.deliver(flat);
+
+    const changed = taskOpenedIntent("flat-task-collision", "95.2", "delivery-current");
+    if (changed.payload.kind !== "lifecycle") throw new Error("lifecycle intentではありません。");
+    changed.payload.notification.detail = "thread以外も変更";
+    await expect(service.deliver(changed)).rejects.toMatchObject({
+      code: "notification_intent_collision",
+    });
+
+    const nonTask = intent("non-task-thread-change");
+    await service.deliver(nonTask);
+    if (nonTask.payload.kind !== "lifecycle") throw new Error("lifecycle intentではありません。");
+    const threadedNonTask: NotificationIntent = {
+      metadata: { ...nonTask.metadata, sourceDeliveryId: "delivery-current" },
+      payload: {
+        ...nonTask.payload,
+        threadTs: "95.3",
+        metadata: { ...nonTask.metadata, sourceDeliveryId: "delivery-current" },
+      },
+    };
+    await expect(service.deliver(threadedNonTask)).rejects.toMatchObject({
+      code: "notification_intent_collision",
+    });
+  });
+
   test("同じintentの並列workerはSlack送信を一度だけ実行する", async () => {
     const store = await localStore("parallel");
     let entered!: () => void;
@@ -407,6 +464,46 @@ function intent(name: string): NotificationIntent {
         actionUrl: "https://github.example/example/repo/issues/54#issuecomment-1",
       },
       threadTs: null,
+      metadata,
+    },
+  };
+}
+
+function taskOpenedIntent(
+  name: string,
+  threadTs: string | null,
+  sourceDeliveryId: string,
+): NotificationIntent {
+  const metadata = {
+    intentId: notificationIntentId({ test: name }),
+    sourceDeliveryId,
+  };
+  return {
+    metadata,
+    payload: {
+      schemaVersion: 1,
+      kind: "lifecycle",
+      notification: {
+        schemaVersion: 1,
+        kind: "issue-opened",
+        resource: {
+          kind: "issue",
+          number: 102,
+          title: "旧Task通知",
+          url: "https://github.example/example/repo/issues/102",
+        },
+        pullRequest: null,
+        actorLogin: "requester",
+        actorSlackUserId: null,
+        slackUserIds: ["UOWNER"],
+        issueType: "task",
+        summary: "Taskが作成されました。",
+        detail: "移行前後で同じ内容",
+        nextAction: "内容を確認する",
+        actionUrl: "https://github.example/example/repo/issues/102",
+        selfMergeControl: null,
+      },
+      threadTs,
       metadata,
     },
   };

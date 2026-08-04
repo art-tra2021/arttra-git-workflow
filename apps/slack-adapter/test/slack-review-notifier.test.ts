@@ -3,12 +3,15 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  issueOpenedEventFingerprint,
+  issueRootNotification,
   type LifecycleNotification,
   LifecycleNotificationService,
 } from "../src/lifecycle-notification-service.ts";
 import {
   NotificationOutboxService,
   type NotificationPayload,
+  notificationIntentId,
   OutboxLifecycleNotifier,
 } from "../src/notification-outbox.ts";
 import { NotificationThreadService } from "../src/notification-thread-service.ts";
@@ -198,6 +201,66 @@ describe("SlackReviewNotifier", () => {
       "issue-opened",
       "review-requested",
     ]);
+  });
+
+  test("#119相当の旧Task平投稿後もready_for_reviewとreview_requestedをWork threadへ一度だけ通知する", async () => {
+    const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-review-migration-")));
+    const delivered: NotificationPayload[] = [];
+    const outbox = new NotificationOutboxService(
+      store,
+      {
+        send: async (payload) => {
+          delivered.push(payload);
+          return {
+            messageTs:
+              payload.kind === "lifecycle" && payload.threadTs === null ? "119.1" : "119.2",
+          };
+        },
+      },
+      { channelId: "CWORK" },
+    );
+    const lifecycleNotifier = new OutboxLifecycleNotifier(outbox);
+    const taskOpened = issueRootNotification(issue(), ["UAUTHOR", "UOWNER"], null);
+    const taskIntentId = notificationIntentId({
+      kind: "lifecycle",
+      resourceUrl: issue().url,
+      notificationKind: "issue-opened",
+      eventFingerprint: issueOpenedEventFingerprint(issue()),
+    });
+    await lifecycleNotifier.notify(taskOpened, null, {
+      intentId: taskIntentId,
+      sourceDeliveryId: "delivery-legacy-task-opened",
+    });
+
+    const threads = new NotificationThreadService(store);
+    await threads.ensureRoot(workIssue().url, async () => ({ messageTs: "95.1" }));
+    const resolveSlackUserId = async (login: string) =>
+      ({ author: "UAUTHOR", owner: "UOWNER", requester: "UREQUESTER" })[login] ?? null;
+    const reviewNotifier = new SlackReviewNotifier(lifecycleNotifier, threads, resolveSlackUserId, {
+      loadIssueContext: async (_repository, number) => (number === 86 ? workIssue() : issue()),
+    });
+
+    await expect(
+      lifecycleNotifier.notify(taskOpened, "95.1", {
+        intentId: taskIntentId,
+        sourceDeliveryId: "delivery-outbox-rerun",
+      }),
+    ).resolves.toEqual({ messageTs: "119.1" });
+    await reviewNotifier.notify(reviewModel(), { sourceDeliveryId: "delivery-ready-for-review" });
+    await reviewNotifier.notify(reviewModel(), { sourceDeliveryId: "delivery-ready-for-review" });
+    await reviewNotifier.notify(reviewModel(), { sourceDeliveryId: "delivery-review-requested" });
+
+    expect(delivered.map(notificationKind)).toEqual(["issue-opened", "review-requested"]);
+    expect(delivered[0]).toMatchObject({ kind: "lifecycle", threadTs: null });
+    expect(delivered[1]).toMatchObject({ kind: "lifecycle", threadTs: "95.1" });
+    expect(await outbox.get(taskIntentId)).toMatchObject({
+      status: "sent",
+      revision: 3,
+      sourceDeliveryId: "delivery-legacy-task-opened",
+      messageTs: "119.1",
+      payload: { kind: "lifecycle", threadTs: null },
+    });
+    expect(await store.list("notification-outbox")).toHaveLength(2);
   });
 });
 
