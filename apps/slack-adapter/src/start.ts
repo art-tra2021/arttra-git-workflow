@@ -45,6 +45,7 @@ import {
 import type { ProjectListClient } from "./project-list.ts";
 import { ProjectListSyncService, parseProjectListSyncCommand } from "./project-list-service.ts";
 import { filterItemsByAccessibleRepositories, normalizeRepositoryScope } from "./project-scope.ts";
+import { buildHealthResponse } from "./release-info.ts";
 import { isRetryableWorkError } from "./retryable-error.ts";
 import { PullRequestReviewService } from "./review-service.ts";
 import { SlackLifecycleNotifier } from "./slack-lifecycle-notifier.ts";
@@ -368,7 +369,7 @@ const syncProjectProjection = async (
 };
 
 receiver?.router.get("/health", (_request, response) => {
-  response.status(200).json({ ok: true, schemaVersion: 1 });
+  response.status(200).json(buildHealthResponse());
 });
 
 receiver?.router.get("/github/callback", async (request, response) => {

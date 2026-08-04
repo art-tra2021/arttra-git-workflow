@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ar_container_name="arttra-slack-smoke-${GITHUB_RUN_ID:-local}-$$"
+ar_slack_image="${AR_SLACK_IMAGE:-arttra-slack-adapter:test}"
+ar_expected_revision="${AR_EXPECTED_REVISION:-development}"
 
 # shellcheck disable=SC2329 # trapから呼び出す
 cleanup() {
@@ -33,12 +35,14 @@ docker run --detach --rm \
 	--env AR_SLACK_TEAM_ID=T123 \
 	--env AR_SLACK_REVIEW_CHANNEL_ID=C123 \
 	--env AR_STATE_BACKEND=local \
-	arttra-slack-adapter:test >/dev/null
+	"${ar_slack_image}" >/dev/null
 
 ar_host_port="$(docker port "${ar_container_name}" 8080/tcp | sed -E 's/.*:([0-9]+)$/\1/')"
 ar_ready=false
 for _ in {1..30}; do
-	if curl --fail --silent "http://127.0.0.1:${ar_host_port}/health" | jq -e '.ok == true and .schemaVersion == 1' >/dev/null; then
+	if curl --fail --silent "http://127.0.0.1:${ar_host_port}/health" |
+		jq -e --arg commit "${ar_expected_revision}" \
+			'.ok == true and .schemaVersion == 1 and .commit == $commit' >/dev/null; then
 		ar_ready=true
 		break
 	fi

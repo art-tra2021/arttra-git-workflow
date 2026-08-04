@@ -140,23 +140,58 @@ Task #113をcloseするPR [#114](https://github.com/art-tra2021/arttra-git-workf
 
 必須CIが成功してmainへmergeされたcommitだけを本番へdeployする。
 Apple SiliconなどARM環境からbuildする場合も、Cloud Run用imageは`linux/amd64`を明示する。
+以下の`<merge-commit>`は省略形ではなく40文字の小文字SHAである。
 
 ```sh
 docker buildx build --platform linux/amd64 \
   --file apps/slack-adapter/Dockerfile \
+  --build-arg AR_BUILD_REVISION=<merge-commit> \
   --tag asia-northeast1-docker.pkg.dev/bmarumado/arttra-work/slack-adapter:<merge-commit>-amd64 \
   --push .
-
-gcloud run deploy arttra-work-slack \
-  --image asia-northeast1-docker.pkg.dev/bmarumado/arttra-work/slack-adapter:<merge-commit>-amd64 \
-  --update-env-vars='AR_GITHUB_CAPABILITY_GRANTS_JSON={"suppress_self_merge_channel_broadcast":["rozwer"]}' \
-  --region asia-northeast1 \
-  --project bmarumado \
-  --platform managed
 ```
 
-deploy後は`latestReadyRevisionName`、image、traffic 100%を確認し、`/health`が`{"ok":true,"schemaVersion":1}`を返すことを確認する。
+imageをpushしてもCloud Runは変更されない。
+次に対象commitが現在のGitHub mainと一致すること、対象image、現在配信中のrevision・image・health commit、変更点をJSONで確認する。
+
+```sh
+mise run slack:release:preview -- --commit <merge-commit>
+```
+
+previewはread-onlyでありdeployしない。
+内容を確認した操作者だけが、同じ完全SHAと`--yes`を明示してdeployする。
+`--yes`がなければscriptはpreviewを表示した後に停止する。
+
+```sh
+mise run slack:release:deploy -- --commit <merge-commit> --yes
+```
+
+deploy scriptは既存の環境変数とsecret設定を維持してimageを更新し、Cloud Run revision labelにも同じcommitを記録してからread-backを実行する。
+read-backはtraffic 100%のrevisionをCloud Runから引き直し、そのrevisionのimage、revision label、`/health`の`commit`、現在のGitHub mainを比較する。
+一致すればexit 0、mainとhealthまたはimageとhealthに差があればdriftをJSONで示してexit 2となる。
+
+いつでも次のread-only確認を実行できる。
+
+```sh
+mise run slack:release:status
+```
+
+deploy後はこのstatusがdriftなしであることを確認する。
 旧revisionで作られたTask専用threadは履歴として残るため、deploy後に新しいTaskとPRでWork単位のE2E確認を行う。
+
+### rollback
+
+自動rollbackは行わない。
+Cloud Runに残っている戻し先revisionと、そのrevisionが参照するimageをpreviewで確認し、操作者がrevision名と`--yes`を明示した場合だけtrafficを100%切り替える。
+
+```sh
+mise run slack:release:rollback -- --revision arttra-work-slack-00047-abc
+mise run slack:release:rollback -- --revision arttra-work-slack-00047-abc --yes
+```
+
+1行目はrollback planを表示して停止する。
+2行目だけがtrafficを変更し、変更後に同じread-backを行う。
+旧revisionのcommitは現在のmainと異なるため、意図したrollback後のstatusはdriftを検出してexit 2となる。
+Issueと障害記録へrollback理由、対象revision、image、health commit、復旧判断を残す。
 
 ## 障害時の切り分け
 
