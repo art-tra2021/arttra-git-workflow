@@ -236,8 +236,11 @@ GitHub Appのcallback URLは`AR_PUBLIC_BASE_URL/github/callback`である。
 Google OAuth client IDは`GOOGLE_OAUTH_CLIENT_ID`へ設定し、Google Calendar APIを有効化する。
 private keyは改行を含むPEM文字列、または改行を`\\n`に置換したSecret Managerの値を受け付ける。
 GitHub Appには対象repositoryに対するMetadata read、Contents read、Issues read/write、Checks readを与える。
-ProjectsのStatus、Priority、Target dateを読むため、Organization permissionsのProjects readも与える。
-ローカルの`gh` backendでは`gh auth refresh -s read:project`で同等のscopeを追加する。
+Projectsの一覧表示とread-only監査だけを行うAppには、Organization permissionsのProjects `Read-only`を最小権限として与える。
+Issue作成経路からProject fieldを書き込みread-backする本番Appには、Projects `Read and write`が必要であり、追加するOrganization権限はこれだけにする。Organization権限自体はProject単位に絞れないため、書き込み先は`AR_GITHUB_PROJECT_OWNER=art-tra2021`と`AR_GITHUB_PROJECT_NUMBER=8`でProject #8へ固定する。
+`Read-only`から引き上げてもOrganization ownerが既存installationの追加権限を承認するまでは旧read権限のままである。承認後は新しいinstallation tokenの権限をread-backしてから本番へ反映する。
+Project field同期が`partial`または`failed`でもIssueは作成済みなので、Issueを作り直さない。権限または設定を直した後、同じIssue URLと同じfield入力で再同期し、既存itemと同値fieldを再利用する。
+ローカルの`gh` backendでは、一覧表示と監査だけなら`gh auth refresh -s read:project`、Project field同期には`gh auth refresh -s project`で最小scopeを追加する。
 PR reviewer自動設定にはPull requests read/write、Ruleset確認にはAdministration readも与える。
 Webhook URLは`AR_PUBLIC_BASE_URL/github/events`とし、`issues`、`issue_comment`、`projects_v2_item`、`pull_request`、`pull_request_review`、`pull_request_review_comment`、`check_run`、`check_suite`を購読する。
 `GITHUB_WEBHOOK_SECRET`でGitHub署名を検証し、生payloadをSlackへ表示しない。
