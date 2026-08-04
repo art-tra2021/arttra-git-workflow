@@ -48,7 +48,7 @@ Issue作成eventより先にコメントやPR eventが届いた場合も、Issue
 
 | GitHub上の出来事 | 通知対象 |
 | --- | --- |
-| Issueの最初の親投稿 | Issue作成者とIssue担当者 |
+| Issueの最初の親投稿 | Issue作成の実行者本人を除いたIssue担当者 |
 | PR作成・レビュー依頼 | 指定reviewerとIssue担当者 |
 | Issueコメント | Issue担当者と本文で明示されたGitHubユーザー |
 | PR会話コメント・コードコメント | PR作成者と本文で明示されたGitHubユーザー |
@@ -59,9 +59,12 @@ Issue作成eventより先にコメントやPR eventが届いた場合も、Issue
 | マージ | Issue担当者 |
 | Issue完了 | Issue担当者 |
 
-実行者に検証済みSlack identityがある場合、`@github-login`という文字列ではなくnative mentionで表示する。
+実行者は通知先ではなく出来事の帰属表示なので、常にplainな`@github-login`で表示する。
+native mentionは、確認や対応が必要なrecipientだけに付け、Issue作成、自己assignment、自己reviewer指定、自己コメントなどの実行者本人には付けない。
 Issueの親投稿はIntake、Work、Task、Businessごとに見出し、説明、次の操作を変える。
 セルフマージ対象になった最初の警告だけはIssue threadへの返信をchannelにも展開し、停止機会を作る。
+ただし`AR_GITHUB_CAPABILITY_GRANTS_JSON`で`suppress_self_merge_channel_broadcast`を明示grantされたGitHub利用者は、初回警告もIssue thread内だけに留める。
+この権限はrepositoryのadmin権限やセルフマージ権限から暗黙付与せず、Task threadへの警告と停止ボタンは権限の有無にかかわらず残す。
 CI通過後のセルフマージ実行可能通知は同じthread内だけに置き、channelを二度通知しない。
 
 GitHubログインとSlack user IDの対応は、本人が完了したGitHub OAuthだけを正とする。
@@ -93,12 +96,12 @@ fallback textにも同じ絵文字と見出しを含めるが、本文中の装�
 
 1. 検証用Workと、その子に`merge/self`を付けたTaskを作り、Taskへ担当者と予定reviewerを設定する。
 2. Taskだけを`Closes #<Task番号>`で閉じ、親Workはnative parentの完全なIssue URLを`Relates to https://github.com/owner/repo/issues/<Work番号>`で参照するPRを作る。
-3. SlackのIssue親投稿でIssue作成者と担当者がnative mentionされ、レビュー依頼の返信で予定reviewerがnative mentionされていることを確認する。
+3. SlackのIssue親投稿で作成の実行者本人はmentionされず、別の担当者だけがnative mentionされ、レビュー依頼の返信でPR作成者本人を除いた予定reviewerがnative mentionされていることを確認する。
 4. Issueコメント、PR会話コメント、レビューコメントを一つずつ追加する。
 5. 差し戻し、修正push、承認の順に実施する。
 6. PRをsquash mergeし、Issueを完了させる。
 7. CI失敗を一度発生させ、primary Issue threadへ通知されることを確認する。
-8. セルフマージ予定の初回だけchannelへ展開され、CI通過通知はthread内だけであることを確認する。
+8. 通常のセルフマージ実行者では初回だけchannelへ展開され、`suppress_self_merge_channel_broadcast`のgrant対象者では初回からthread内だけになることを確認する。どちらも停止ボタンがあり、CI通過通知はthread内だけであることを確認する。
 9. すべての通知が同じIssueスレッドにあり、同じイベントの重複通知がないことを確認する。
 10. GitHub Webhook delivery、Cloud Run log、Cloud Tasksの失敗件数を確認する。
 
@@ -121,6 +124,7 @@ docker buildx build --platform linux/amd64 \
 
 gcloud run deploy arttra-work-slack \
   --image asia-northeast1-docker.pkg.dev/bmarumado/arttra-work/slack-adapter:<merge-commit>-amd64 \
+  --update-env-vars='AR_GITHUB_CAPABILITY_GRANTS_JSON={"suppress_self_merge_channel_broadcast":["rozwer"]}' \
   --region asia-northeast1 \
   --project bmarumado \
   --platform managed

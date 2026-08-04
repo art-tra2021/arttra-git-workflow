@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { GitHubCapabilityGrants } from "../src/github-capabilities.ts";
 import {
   type LifecycleNotification,
   LifecycleNotificationService,
@@ -12,6 +13,7 @@ import type {
   GitHubLifecycleClient,
   PullRequestReviewContext,
 } from "../src/review-types.ts";
+import { SlackLifecycleNotifier } from "../src/slack-lifecycle-notifier.ts";
 import { LocalStateStore } from "../src/state-store.ts";
 
 describe("LifecycleNotificationService", () => {
@@ -40,10 +42,11 @@ describe("LifecycleNotificationService", () => {
     expect(harness.sent[0]?.notification.detail).toContain("目標日: 2026-08-04");
     expect(harness.sent[0]?.notification).toMatchObject({
       issueType: "task",
-      slackUserIds: ["UREQUESTER", "UOWNER"],
+      slackUserIds: ["UOWNER"],
     });
     expect(harness.sent[1]?.notification).toMatchObject({
       selfMergeControl: { repository: "example/repo", issueNumber: 44 },
+      replyBroadcast: true,
       detail: "第三者承認を待たず、PR作成者本人が必須CI通過後にマージします。",
     });
   });
@@ -58,11 +61,69 @@ describe("LifecycleNotificationService", () => {
     };
 
     expect(await harness.service.process(issueOpenedJob())).toBe(1);
-    expect(harness.sent[0]?.notification.slackUserIds).toEqual(["UREQUESTER", "UOWNER"]);
+    expect(harness.sent[0]?.notification.slackUserIds).toEqual(["UOWNER"]);
     expect(harness.sent[0]?.notification).toMatchObject({
       actorLogin: "requester",
-      actorSlackUserId: "UREQUESTER",
+      actorSlackUserId: null,
     });
+  });
+
+  test("自己assignmentとセルフマージ選択は実行者本人をmentionしない", async () => {
+    const assignmentHarness = await createHarness();
+    expect(await assignmentHarness.service.process(issueAssignedJob("owner"))).toBe(1);
+    expect(assignmentHarness.sent.map(({ notification }) => notification.slackUserIds)).toEqual([
+      ["UOWNER"],
+      ["UREQUESTER"],
+    ]);
+
+    const mergeHarness = await createHarness();
+    mergeHarness.github.issue = {
+      ...mergeHarness.github.issue,
+      assigneeLogins: ["owner"],
+      labels: ["type/task", "merge/self"],
+    };
+    expect(await mergeHarness.service.process(selfMergeLabeledJob("owner"))).toBe(1);
+    expect(mergeHarness.sent.map(({ notification }) => notification.slackUserIds)).toEqual([
+      ["UOWNER"],
+      [],
+    ]);
+  });
+
+  test("App bot経由のセルフマージ作成でもmarkerの選択者をpingしない", async () => {
+    const harness = await createHarness(
+      GitHubCapabilityGrants.fromJson(
+        JSON.stringify({ suppress_self_merge_channel_broadcast: ["rozwer"] }),
+      ),
+    );
+    harness.github.issue = {
+      ...harness.github.issue,
+      authorLogin: "arttra-app[bot]",
+      assigneeLogins: ["rozwer"],
+      labels: ["type/task", "merge/self"],
+      body: '<!-- ar:requester:v1 {"id":202,"login":"rozwer"} -->',
+    };
+
+    expect(await harness.service.process(issueOpenedJob())).toBe(2);
+    const warning = harness.sent[1]?.notification;
+    expect(warning?.slackUserIds).toEqual([]);
+    expect(warning?.replyBroadcast).toBe(false);
+    const calls: Array<Record<string, unknown>> = [];
+    const notifier = new SlackLifecycleNotifier(
+      {
+        chat: {
+          postMessage: async (arguments_: Record<string, unknown>) => {
+            calls.push(arguments_);
+            return { ok: true, ts: "980.1" };
+          },
+        },
+      } as unknown as ConstructorParameters<typeof SlackLifecycleNotifier>[0],
+      "CWORK",
+    );
+    if (!warning) throw new Error("セルフマージ警告fixtureが必要です");
+    await notifier.notify(warning, "980.0");
+
+    expect(JSON.stringify(calls[0])).not.toContain("<@UOWNER>");
+    expect(calls[0]?.reply_broadcast).toBe(false);
   });
 
   test("セルフマージPRのCI成功をIssue threadへ通知する", async () => {
@@ -99,7 +160,7 @@ describe("LifecycleNotificationService", () => {
       threadTs: null,
       notification: {
         kind: "issue-opened",
-        slackUserIds: ["UREQUESTER", "UOWNER"],
+        slackUserIds: ["UOWNER"],
       },
     });
     expect(harness.sent[1]).toMatchObject({
@@ -115,6 +176,22 @@ describe("LifecycleNotificationService", () => {
     expect(harness.sent[2]).toMatchObject({
       threadTs: "900.1",
       notification: { kind: "issue-completed", slackUserIds: ["UOWNER", "UREQUESTER"] },
+    });
+  });
+
+  test("コメントは投稿者を派生recipientから外し、明示mentionした他者を残す", async () => {
+    const harness = await createHarness();
+    harness.github.issue = {
+      ...harness.github.issue,
+      assigneeLogins: ["commenter", "owner"],
+    };
+
+    expect(
+      await harness.service.process(issueCommentJob("delivery-self-comment", "commenter")),
+    ).toBe(1);
+    expect(harness.sent[1]?.notification).toMatchObject({
+      actorLogin: "commenter",
+      slackUserIds: ["UOWNER", "UMENTIONED"],
     });
   });
 
@@ -207,7 +284,7 @@ describe("LifecycleNotificationService", () => {
   test("CI失敗をprimary Issue threadへ通知し、PR作成者と担当者を呼び出す", async () => {
     const harness = await createHarness();
 
-    expect(await harness.service.process(checkRunFailedJob())).toBe(1);
+    expect(await harness.service.process(checkRunFailedJob("author"))).toBe(1);
     expect(await harness.service.process(checkSuiteFailedJob())).toBe(0);
 
     expect(harness.sent.map((value) => value.notification.kind)).toEqual([
@@ -224,7 +301,7 @@ describe("LifecycleNotificationService", () => {
   });
 });
 
-async function createHarness() {
+async function createHarness(githubCapabilities = GitHubCapabilityGrants.empty()) {
   const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-lifecycle-")));
   const github = new FakeLifecycleClient();
   const sent: Array<{ notification: LifecycleNotification; threadTs: string | null }> = [];
@@ -247,6 +324,8 @@ async function createHarness() {
     },
     async (login) => ids[login] ?? null,
     () => Date.parse("2026-08-02T00:00:00Z"),
+    null,
+    githubCapabilities,
   );
   return { service, github, sent };
 }
@@ -310,7 +389,7 @@ function basePayload() {
   };
 }
 
-function issueCommentJob(deliveryId: string) {
+function issueCommentJob(deliveryId: string, actor = "commenter") {
   return {
     schemaVersion: 1 as const,
     deliveryId,
@@ -323,7 +402,7 @@ function issueCommentJob(deliveryId: string) {
         id: 101,
         body: "確認をお願いします @mentioned",
         html_url: "https://github.example/example/repo/issues/44#issuecomment-101",
-        user: { login: "commenter" },
+        user: { login: actor },
       },
     },
   };
@@ -347,13 +426,14 @@ function issueOpenedJob(issueNumber = 44, deliveryId = "delivery-open") {
   };
 }
 
-function selfMergeLabeledJob() {
+function selfMergeLabeledJob(actor = "merger") {
   return {
     schemaVersion: 1 as const,
     deliveryId: "delivery-self-merge-label",
     event: "issues",
     payload: {
       ...basePayload(),
+      sender: { login: actor },
       action: "labeled",
       issue: { number: 44 },
       label: { name: "merge/self" },
@@ -374,13 +454,14 @@ function checkSuiteCompletedJob() {
   };
 }
 
-function checkRunFailedJob() {
+function checkRunFailedJob(actor = "merger") {
   return {
     schemaVersion: 1 as const,
     deliveryId: "delivery-check-failure",
     event: "check_run",
     payload: {
       ...basePayload(),
+      sender: { login: actor },
       action: "completed",
       check_run: {
         name: "verify",
@@ -388,6 +469,21 @@ function checkRunFailedJob() {
         html_url: "https://github.example/checks/501",
         pull_requests: [{ number: 45 }],
       },
+    },
+  };
+}
+
+function issueAssignedJob(actor: string) {
+  return {
+    schemaVersion: 1 as const,
+    deliveryId: "delivery-assigned",
+    event: "issues",
+    payload: {
+      ...basePayload(),
+      sender: { login: actor },
+      action: "assigned",
+      issue: { number: 44 },
+      assignee: { login: actor },
     },
   };
 }
