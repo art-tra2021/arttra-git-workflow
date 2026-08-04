@@ -5,6 +5,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::issue_audit::{IssueAuditDiagnostic, parent_diagnostics};
 use crate::policy::BranchPolicy;
 
 const ISSUE_FIELDS: &str = "number,title,body,state,url,labels,assignees,blockedBy,blocking,parent,subIssues,milestone,projectItems,updatedAt";
@@ -22,6 +23,7 @@ pub struct StatusReport {
     worktree: WorktreeStatus,
     upstream: UpstreamStatus,
     next_actions: Vec<NextAction>,
+    diagnostics: Vec<IssueAuditDiagnostic>,
     warnings: Vec<String>,
 }
 
@@ -324,6 +326,12 @@ fn collect(issue_override: Option<u64>, policy: &BranchPolicy) -> Result<StatusR
             None
         }
     };
+    let diagnostics = issue.as_ref().map(issue_diagnostics).unwrap_or_default();
+    warnings.extend(
+        diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message_ja)),
+    );
     let protected = policy
         .protected_branches
         .iter()
@@ -346,8 +354,31 @@ fn collect(issue_override: Option<u64>, policy: &BranchPolicy) -> Result<StatusR
         worktree,
         upstream,
         next_actions,
+        diagnostics,
         warnings,
     })
+}
+
+pub fn current_issue_diagnostics() -> Result<Vec<IssueAuditDiagnostic>> {
+    let branch = git(&["branch", "--show-current"])?;
+    let Some(number) = issue_number_from_branch(&branch) else {
+        return Ok(Vec::new());
+    };
+    Ok(issue_diagnostics(&fetch_issue(number)?))
+}
+
+fn issue_diagnostics(issue: &IssueStatus) -> Vec<IssueAuditDiagnostic> {
+    let kind = issue
+        .labels
+        .iter()
+        .find_map(|label| label.strip_prefix("type/"))
+        .unwrap_or_default();
+    let open_child_count = issue
+        .sub_issues
+        .iter()
+        .filter(|child| child.state.eq_ignore_ascii_case("open"))
+        .count();
+    parent_diagnostics(kind, &issue.state, issue.sub_issues.len(), open_child_count)
 }
 
 fn fetch_issue(number: u64) -> Result<IssueStatus> {
@@ -986,9 +1017,9 @@ fn print_human(report: &StatusReport) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChecklistItem, IssueStatus, RecommendationFacts, UpstreamStatus, WorktreeStatus,
-        completion_items, issue_number_from_branch, issue_purpose, parse_worktree, recommend,
-        summarize_checks,
+        ChecklistItem, IssueReference, IssueStatus, RecommendationFacts, UpstreamStatus,
+        WorktreeStatus, completion_items, issue_diagnostics, issue_number_from_branch,
+        issue_purpose, parse_worktree, recommend, summarize_checks,
     };
     use serde_json::Value;
 
@@ -1171,5 +1202,36 @@ mod tests {
         });
         assert_eq!(actions[0].id, "audit-closed-issue");
         assert!(actions[0].reason.contains("本番確認"));
+    }
+
+    #[test]
+    fn closed_work_reports_open_children_without_blocking_status_collection() {
+        let issue = IssueStatus {
+            number: 3,
+            title: "Parent".into(),
+            url: "https://example.test/3".into(),
+            state: "CLOSED".into(),
+            body: String::new(),
+            purpose: None,
+            completion_items: Vec::new(),
+            labels: vec!["type/work".into()],
+            assignees: Vec::new(),
+            blocked_by: Vec::new(),
+            blocking: Vec::new(),
+            parent: None,
+            sub_issues: vec![IssueReference {
+                number: 4,
+                title: "Open child".into(),
+                state: "OPEN".into(),
+                url: "https://example.test/4".into(),
+            }],
+            milestone: None,
+            project_items: Value::Array(Vec::new()),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let diagnostics = issue_diagnostics(&issue);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "AR-ISSUE-021");
+        assert!(diagnostics[0].non_blocking);
     }
 }

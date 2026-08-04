@@ -25,6 +25,8 @@ Intakeは解析・整理してWorkまたはBusinessへ分解した時点で役�
 repositoryをまたぐ親は`owner/repo#番号`またはGitHub Issue URLで指定します。
 Workの直下は10件程度を目安とし、20件を超えそうならIntake配下の複数Workなど、成果別の単位へ再編するかを確認します。
 件数はvalidatorで拒否する条件ではなく、分割を見直す運用上のシグナルです。
+`git ar issue`は新しいTaskを含めて直属Taskが10件以上になると見直し案内、20件を超えると強い警告を返しますが、Task作成は拒否しません。
+`git ar status`と`git ar check`は同じ診断コードを返し、未完了Taskを残したままWorkまたはBusinessが閉じられた場合も再openまたは親の付け替えを案内します。
 TaskはWorkまたはBusinessの子となる末端作業で、さらに子Issueを持たせません。
 
 PRは本文の`Closes #<Issue番号>`で、1件のPRで完了できるTaskをちょうど1件だけ閉じます。
