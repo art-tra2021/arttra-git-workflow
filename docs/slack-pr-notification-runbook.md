@@ -166,8 +166,8 @@ mise run slack:release:deploy -- --commit <merge-commit> --yes
 ```
 
 deploy scriptは既存の環境変数とsecret設定を維持してimageを更新し、Cloud Run revision labelにも同じcommitを記録してからread-backを実行する。
-read-backはtraffic 100%のrevisionをCloud Runから引き直し、そのrevisionのimage、revision label、`/health`の`commit`、現在のGitHub mainを比較する。
-一致すればexit 0、mainとhealthまたはimageとhealthに差があればdriftをJSONで示してexit 2となる。
+read-backはtraffic 100%のrevisionをCloud Runから引き直し、そのrevisionのimage tagから得たcommit、revision label、`/health`の`commit`、現在のGitHub mainを比較する。
+一致すればexit 0となる。image tagから40文字のcommitを取得できない場合は`imageMetadataMissing`、imageとhealthが一致しない場合は`imageVsHealth`を含むdriftをJSONで示してexit 2となる。main、revision label、配信revisionの不一致も同じくexit 2である。
 
 いつでも次のread-only確認を実行できる。
 

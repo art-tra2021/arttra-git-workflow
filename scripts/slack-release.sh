@@ -177,7 +177,7 @@ release_status() {
 	ar_drift="$(jq -n \
 		--arg main "${ar_current_main}" \
 		--argjson current "${ar_current}" \
-		'$current.healthCommit != $main or $current.revisionCommit != $current.healthCommit or ($current.latestReadyRevision != "" and $current.revision != $current.latestReadyRevision)')"
+		'$current.healthCommit != $main or $current.imageCommit == "" or $current.imageCommit != $current.healthCommit or $current.revisionCommit != $current.healthCommit or ($current.latestReadyRevision != "" and $current.revision != $current.latestReadyRevision)')"
 
 	jq -cn \
 		--arg action status \
@@ -189,11 +189,13 @@ release_status() {
       action:$action,
       mainCommit:$mainCommit,
       serving:$current,
-      drift:{
-        detected:$drift,
-        mainVsHealth:($mainCommit != $current.healthCommit),
-        revisionVsHealth:($current.revisionCommit != $current.healthCommit),
-        servingVsLatestReady:($current.latestReadyRevision != "" and $current.revision != $current.latestReadyRevision)
+	      drift:{
+	        detected:$drift,
+	        mainVsHealth:($mainCommit != $current.healthCommit),
+	        imageMetadataMissing:($current.imageCommit == ""),
+	        imageVsHealth:($current.imageCommit == "" or $current.imageCommit != $current.healthCommit),
+	        revisionVsHealth:($current.revisionCommit != $current.healthCommit),
+	        servingVsLatestReady:($current.latestReadyRevision != "" and $current.revision != $current.latestReadyRevision)
       }
     }'
 
