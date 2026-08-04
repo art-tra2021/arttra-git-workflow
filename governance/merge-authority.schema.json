@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://art-tra.example/schemas/merge-authority.schema.json",
+  "title": "ART-TRA merge authority policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "merge_modes", "high_risk_paths"],
+  "properties": {
+    "$schema": {"const": "./merge-authority.schema.json"},
+    "schema_version": {"const": 1},
+    "merge_modes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["self", "emergency"],
+      "properties": {
+        "self": {
+          "allOf": [
+            {"$ref": "#/$defs/authority"},
+            {
+              "type": "object",
+              "properties": {"high_risk_action": {"const": "deny"}}
+            }
+          ]
+        },
+        "emergency": {
+          "allOf": [
+            {"$ref": "#/$defs/authority"},
+            {
+              "type": "object",
+              "properties": {"high_risk_action": {"const": "allow"}}
+            }
+          ]
+        }
+      }
+    },
+    "high_risk_paths": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9_.?*/-]+$"
+      }
+    }
+  },
+  "$defs": {
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed_actors",
+        "minimum_repository_permission",
+        "high_risk_action"
+      ],
+      "properties": {
+        "allowed_actors": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$"
+          }
+        },
+        "minimum_repository_permission": {
+          "enum": ["write", "maintain", "admin"]
+        },
+        "high_risk_action": {"enum": ["deny", "allow"]}
+      }
+    }
+  }
+}
