@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "repository": "art-tra2021/arttra-git-workflow",
+  "actor": "roz",
+  "device": "device-1785827618427-76470",
+  "branch": "fix/123-legacy-slack-intent-migration-rozwer",
+  "head": "a67f9d3f85f602a96f0e10276a2c88bde982fee7",
+  "observed_at_unix_ms": 1785827970248,
+  "files": [
+    {
+      "path": "apps/slack-adapter/src/notification-outbox.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/github-webhook.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/notification-outbox.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/slack-review-notifier.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    }
+  ]
+}
