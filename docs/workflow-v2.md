@@ -91,7 +91,9 @@ Slack利用者と連携したGitHub loginのeffective permissionを確認し、�
 repository別の共有投影は、管理者がSlack channelとrepositoryの対応およびchannel参加者を管理する場合だけ有効にします。
 
 共有投影の手動CLI、定期HTTP同期、Webhook同期は同じ固定channel／単一repository bindingを検証します。
-scope導入前の共有Listは、channel accessと既存行を除去してから旧表示へ移し、private項目を残しません。
+scope導入前の共有Listは、現行Listと別IDであることを検証し、channel accessと既存行を除去して廃止表示へ移します。
+Slack Lists APIではList本体とchannel tabを削除できないため、channel管理者がSlack UIで旧タブを削除して現行の`仕事一覧`を追加します。
+`conversations.info`を再取得し、`type=list`の`file_id`が現行Listだけを指すことを確認してから移行完了とします。
 
 Slack利用者が別のGitHubアカウントへ再連携する場合は、新しいidentityを有効にする前に旧identity用の個人List／Canvas accessを失効させます。
 
