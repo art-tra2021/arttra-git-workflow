@@ -469,6 +469,25 @@ describe("LifecycleNotificationService", () => {
       summary: "PRのCIに対応が必要です。",
     });
   });
+
+  test("annotation取得がthrowしても通常CI失敗通知へfallbackして一度だけ送る", async () => {
+    const harness = await createHarness();
+    harness.github.checkDiagnosticsError = new Error("Resource not accessible by integration");
+
+    expect(await harness.service.process(checkRunFailedJob("github-actions[bot]"))).toBe(1);
+    expect(await harness.service.process(checkSuiteFailedJob())).toBe(0);
+
+    expect(harness.sent.map((value) => value.notification.kind)).toEqual([
+      "issue-opened",
+      "issue-opened",
+      "ci-failed",
+    ]);
+    expect(harness.sent[2]?.notification).toMatchObject({
+      slackUserIds: ["UAUTHOR", "UOWNER"],
+      summary: "PRのCIに対応が必要です。",
+      nextAction: "CIの失敗内容を確認し、修正または再実行する",
+    });
+  });
 });
 
 async function createHarness(
@@ -505,6 +524,7 @@ async function createHarness(
 
 class FakeLifecycleClient implements GitHubLifecycleClient {
   checkDiagnostics = { policyCodes: [] as string[], complete: false };
+  checkDiagnosticsError: Error | null = null;
   issue: GitHubIssueContext = {
     number: 44,
     title: "ライフサイクル通知",
@@ -570,6 +590,7 @@ class FakeLifecycleClient implements GitHubLifecycleClient {
   }
 
   async loadCheckFailureDiagnostics() {
+    if (this.checkDiagnosticsError) throw this.checkDiagnosticsError;
     return this.checkDiagnostics;
   }
 }
