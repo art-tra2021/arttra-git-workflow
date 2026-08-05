@@ -80,6 +80,7 @@ depends = [
   "lint",
   "security:actions",
   "slack:check",
+  "slack-release:test",
   "setup-ui:test",
   "issue-policy:test",
   "merge-authority-policy:test",
@@ -160,9 +161,34 @@ run = "bun run --cwd apps/slack-adapter outbox:replay --"
 [tasks."slack:container"]
 description = "Cloud Run用Slack adapter imageをbuildする"
 run = """
-docker build --file apps/slack-adapter/Dockerfile --tag arttra-slack-adapter:test .
-bash scripts/slack-container-smoke.sh
+ar_slack_commit="$(git rev-parse HEAD)"
+ar_slack_image="arttra-slack-adapter:${ar_slack_commit}-amd64"
+docker build --platform linux/amd64 --file apps/slack-adapter/Dockerfile \
+  --build-arg "AR_BUILD_REVISION=${ar_slack_commit}" \
+  --tag "${ar_slack_image}" .
+AR_SLACK_IMAGE="${ar_slack_image}" AR_EXPECTED_REVISION="${ar_slack_commit}" \
+  bash scripts/slack-container-smoke.sh
 """
+
+[tasks."slack-release:test"]
+description = "Test deterministic Slack adapter release preview and drift checks"
+run = "bash scripts/slack-release-test.sh"
+
+[tasks."slack:release:preview"]
+description = "Preview the exact main commit and Cloud Run image without deploying"
+run = "bash scripts/slack-release.sh preview"
+
+[tasks."slack:release:status"]
+description = "Compare Cloud Run serving image and health commit with GitHub main"
+run = "bash scripts/slack-release.sh status"
+
+[tasks."slack:release:deploy"]
+description = "Deploy a reviewed main image only with explicit --yes"
+run = "bash scripts/slack-release.sh deploy"
+
+[tasks."slack:release:rollback"]
+description = "Route traffic to an exact prior revision only with explicit --yes"
+run = "bash scripts/slack-release.sh rollback"
 
 [tasks.quick]
 description = "Run fast checks while editing"
