@@ -5,6 +5,7 @@ mod guard;
 mod issue_audit;
 mod policy;
 mod presence;
+mod project_status_audit;
 mod project_sync;
 mod revert;
 mod scheduler;
@@ -80,6 +81,15 @@ enum Commands {
     Issue(Box<IssueArgs>),
     /// Idempotently write and read back an existing Issue's Organization Project fields.
     ProjectSync(ProjectSyncArgs),
+    /// Read-only audit of Project Status against compatibility status labels.
+    ProjectStatusAudit {
+        /// Return machine-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Return a failure when drift is found. API and permission failures always fail.
+        #[arg(long)]
+        fail_on_drift: bool,
+    },
     /// Emit minimal repository context for AI or automation.
     Context {
         /// Return machine-readable output.
@@ -857,6 +867,8 @@ struct VerificationReport {
     issue_diagnostics: Vec<issue_audit::IssueAuditDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     issue_audit_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_status_audit: Option<project_status_audit::ProjectStatusAuditReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -910,6 +922,10 @@ fn run() -> Result<()> {
         Some(Commands::Branch(args)) => branch_command(args),
         Some(Commands::Issue(args)) => issue(*args),
         Some(Commands::ProjectSync(args)) => project_sync_command(args),
+        Some(Commands::ProjectStatusAudit {
+            json,
+            fail_on_drift,
+        }) => project_status_audit_command(json, fail_on_drift),
         Some(Commands::Context { json }) => context(json),
         Some(Commands::Status { issue, json }) => {
             status::show(issue, json, &Policy::load()?.branch)
@@ -3253,6 +3269,44 @@ fn project_sync_command(args: ProjectSyncArgs) -> Result<()> {
     Ok(())
 }
 
+fn project_status_audit_command(json: bool, fail_on_drift: bool) -> Result<()> {
+    let report = project_status_audit::audit(&Policy::load()?.tasks);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_project_status_audit(&report);
+    }
+    if !report.execution_succeeded() {
+        bail!("Project status監査を完了できませんでした。diagnosticsを確認してください");
+    }
+    if fail_on_drift && !report.is_clean() {
+        bail!("Project Statusと互換status labelに差分があります");
+    }
+    Ok(())
+}
+
+fn print_project_status_audit(report: &project_status_audit::ProjectStatusAuditReport) {
+    println!(
+        "Project status監査: {:?}（Project items: {}, status label付きIssues: {}, diagnostics: {}）",
+        report.status,
+        report.checked_project_items,
+        report.checked_labeled_issues,
+        report.diagnostics.len()
+    );
+    for diagnostic in &report.diagnostics {
+        println!(
+            "  {} {}: {} 修正案: {}",
+            diagnostic.code,
+            diagnostic
+                .issue_url
+                .as_deref()
+                .unwrap_or(&report.project.url),
+            diagnostic.detail,
+            diagnostic.recommendation
+        );
+    }
+}
+
 fn doctor(json: bool) -> Result<()> {
     let root = git_output(["rev-parse", "--show-toplevel"]);
     let ai = match &root {
@@ -3546,16 +3600,25 @@ fn check(quick: bool, json: bool) -> Result<()> {
             Ok(diagnostics) => (diagnostics, None),
             Err(error) => (Vec::new(), Some(format!("{error:#}"))),
         };
+        let project_status_audit = if quick {
+            None
+        } else {
+            Some(project_status_audit::audit(&Policy::load()?.tasks))
+        };
+        let audit_succeeded = project_status_audit
+            .as_ref()
+            .is_none_or(project_status_audit::ProjectStatusAuditReport::execution_succeeded);
         let report = VerificationReport {
             schema_version: 1,
             task,
-            ok: output.status.success(),
+            ok: output.status.success() && audit_succeeded,
             exit_code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             fix_command,
             issue_diagnostics,
             issue_audit_error,
+            project_status_audit,
         };
         println!("{}", serde_json::to_string_pretty(&report)?);
         if !report.ok {
@@ -3568,23 +3631,29 @@ fn check(quick: bool, json: bool) -> Result<()> {
         .args(["run", task])
         .status()
         .context("miseを起動できませんでした")?;
-    if status.success() {
-        match status::current_issue_diagnostics() {
-            Ok(diagnostics) => {
-                for diagnostic in diagnostics {
-                    eprintln!(
-                        "arttra: {}: {}\n  対応: {}",
-                        diagnostic.code, diagnostic.message_ja, diagnostic.fix
-                    );
-                }
-            }
-            Err(error) => eprintln!("arttra: Issue監査を実行できませんでした: {error:#}"),
-        }
-        println!("✓ 検査に合格しました: {fix_command}");
-        Ok(())
-    } else {
-        bail!("検査に失敗しました。修正後に次を再実行してください: {fix_command}")
+    if !status.success() {
+        bail!("検査に失敗しました。修正後に次を再実行してください: {fix_command}");
     }
+    match status::current_issue_diagnostics() {
+        Ok(diagnostics) => {
+            for diagnostic in diagnostics {
+                eprintln!(
+                    "arttra: {}: {}\n  対応: {}",
+                    diagnostic.code, diagnostic.message_ja, diagnostic.fix
+                );
+            }
+        }
+        Err(error) => eprintln!("arttra: Issue監査を実行できませんでした: {error:#}"),
+    }
+    if !quick {
+        let audit = project_status_audit::audit(&Policy::load()?.tasks);
+        print_project_status_audit(&audit);
+        if !audit.execution_succeeded() {
+            bail!("Project status監査を完了できませんでした。diagnosticsを確認してください");
+        }
+    }
+    println!("✓ 検査に合格しました: {fix_command}");
+    Ok(())
 }
 
 fn hook_check() -> Check {
