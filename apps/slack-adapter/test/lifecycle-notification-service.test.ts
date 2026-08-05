@@ -258,6 +258,45 @@ describe("LifecycleNotificationService", () => {
     });
   });
 
+  test("close→reopen→closeを別cycleとして通知し、同じcycleの再配信は重複させない", async () => {
+    const harness = await createHarness();
+    harness.github.issue = {
+      ...harness.github.issue,
+      labels: ["type/work"],
+      parentIssueUrl: "https://github.example/example/intake/issues/7",
+    };
+
+    expect(
+      await harness.service.process(issueClosedJob("delivery-close-1", "2026-08-04T00:00:00Z")),
+    ).toBe(1);
+    expect(
+      await harness.service.process(
+        issueClosedJob("delivery-close-1-redelivery", "2026-08-04T00:00:00Z"),
+      ),
+    ).toBe(0);
+
+    harness.github.issue = { ...harness.github.issue, state: "open" };
+    expect(
+      await harness.service.process(issueReopenedJob("delivery-reopen-1", "2026-08-04T01:00:00Z")),
+    ).toBe(1);
+    expect(
+      await harness.service.process(
+        issueReopenedJob("delivery-reopen-1-redelivery", "2026-08-04T01:00:00Z"),
+      ),
+    ).toBe(0);
+
+    harness.github.issue = { ...harness.github.issue, state: "closed" };
+    expect(
+      await harness.service.process(issueClosedJob("delivery-close-2", "2026-08-04T02:00:00Z")),
+    ).toBe(1);
+
+    expect(
+      harness.sent
+        .map(({ notification }) => notification.kind)
+        .filter((kind) => kind === "issue-reopened" || kind === "issue-completed"),
+    ).toEqual(["issue-completed", "issue-reopened", "issue-completed"]);
+  });
+
   test("コメントは投稿者を派生recipientから外し、明示mentionした他者を残す", async () => {
     const harness = await createHarness();
     harness.github.issue = {
@@ -660,12 +699,29 @@ function issueCommentJob(deliveryId: string, actor = "commenter") {
   };
 }
 
-function issueClosedJob() {
+function issueClosedJob(deliveryId = "delivery-close", updatedAt = "2026-08-02T00:00:00Z") {
   return {
     schemaVersion: 1 as const,
-    deliveryId: "delivery-close",
+    deliveryId,
     event: "issues",
-    payload: { ...basePayload(), action: "closed", issue: { number: 44 } },
+    payload: {
+      ...basePayload(),
+      action: "closed",
+      issue: { number: 44, updated_at: updatedAt },
+    },
+  };
+}
+
+function issueReopenedJob(deliveryId: string, updatedAt: string) {
+  return {
+    schemaVersion: 1 as const,
+    deliveryId,
+    event: "issues",
+    payload: {
+      ...basePayload(),
+      action: "reopened",
+      issue: { number: 44, updated_at: updatedAt },
+    },
   };
 }
 
