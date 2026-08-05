@@ -44,7 +44,7 @@ Merge commitとrebase mergeは使わず、squash mergeへ統一します。
 
 - `merge/review`: 既定。PR作成者以外の承認が1件必要。
 - `merge/self`: 小さな変更、PL判断、十分に自動検証できる変更。承認なしで本人がマージ可能。
-- `merge/emergency`: `hotfix/` branch限定。即時マージ後に事後レビューIssueを自動作成し、翌営業日までに確認。
+- `merge/emergency`: `hotfix/` branch限定。即時マージ後に元Taskを再openし、`post-review-required`と翌営業日の期限を付けて同じTaskで確認。
 
 GitHub Ruleset側の承認数は0にし、`policy` checkがこの差を機械判定します。
 これにより、Rulesetを毎回バイパスせずTask作成時点の明示的な判断を監査できます。
