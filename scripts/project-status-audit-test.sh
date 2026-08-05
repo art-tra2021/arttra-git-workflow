@@ -34,12 +34,14 @@ export MOCK_AUDIT_JSON
 export MOCK_EXIT_CODE=0
 
 clean_summary="$test_root/clean-summary.md"
-MOCK_AUDIT_JSON="$(jq -cn '{schema_version: 1, status: "clean", project: {owner: "art-tra2021", number: 8, url: "https://github.example/orgs/art-tra2021/projects/8"}, checked_project_items: 2, checked_labeled_issues: 2, diagnostics: []}')"
+MOCK_AUDIT_JSON="$(jq -cn '{schema_version: 1, status: "clean", project: {owner: "art-tra2021", number: 8, url: "https://github.example/orgs/art-tra2021/projects/8"}, checked_project_items: 2, checked_labeled_issues: 2, exemptions: [{issue_url: "https://github.example/org/legacy/issues/2", issue_state: "OPEN", repository: "org/legacy", issue_type: null, project_value: "Intake", label_values: [], reason: "schema未導入"}], diagnostics: []}')"
 GITHUB_STEP_SUMMARY="$clean_summary" bash "$repository_root/scripts/project-status-audit.sh" >/dev/null
 grep -Fq 'Status: **clean**' "$clean_summary" || fail 'clean summary is missing'
+grep -Fq 'Exemptions: 1' "$clean_summary" || fail 'exemption count is missing'
+grep -Fq 'schema未導入' "$clean_summary" || fail 'exemption detail is missing'
 
 drift_summary="$test_root/drift-summary.md"
-MOCK_AUDIT_JSON="$(jq -cn '{schema_version: 1, status: "drift", project: {owner: "art-tra2021", number: 8, url: "https://github.example/orgs/art-tra2021/projects/8"}, checked_project_items: 1, checked_labeled_issues: 1, diagnostics: [{code: "AR-PROJECT-STATUS-001", issue_url: "https://github.example/org/repo/issues/1", project_value: "Ready", label_values: ["status/in-progress"], detail: "mismatch", recommendation: "status/todoへ手作業で付け替える"}]}')"
+MOCK_AUDIT_JSON="$(jq -cn '{schema_version: 1, status: "drift", project: {owner: "art-tra2021", number: 8, url: "https://github.example/orgs/art-tra2021/projects/8"}, checked_project_items: 1, checked_labeled_issues: 1, exemptions: [], diagnostics: [{code: "AR-PROJECT-STATUS-001", issue_url: "https://github.example/org/repo/issues/1", issue_state: "OPEN", repository: "org/repo", issue_type: "type/task", project_value: "Ready", label_values: ["status/in-progress"], detail: "mismatch", recommendation: "status/todoへ手作業で付け替える"}]}')"
 if GITHUB_STEP_SUMMARY="$drift_summary" bash "$repository_root/scripts/project-status-audit.sh" >/dev/null 2>&1; then
 	fail 'drift unexpectedly passed the scheduled gate'
 fi
@@ -47,7 +49,7 @@ grep -Fq 'AR-PROJECT-STATUS-001' "$drift_summary" || fail 'drift diagnostic is m
 grep -Fq 'status/todoへ手作業で付け替える' "$drift_summary" || fail 'drift fix is missing'
 
 failed_summary="$test_root/failed-summary.md"
-MOCK_AUDIT_JSON="$(jq -cn '{schema_version: 1, status: "failed", project: {owner: "art-tra2021", number: 8, url: "https://github.example/orgs/art-tra2021/projects/8"}, checked_project_items: 0, checked_labeled_issues: 0, diagnostics: [{code: "AR-PROJECT-STATUS-007", issue_url: null, project_value: null, label_values: [], detail: "permission denied", recommendation: "project read権限を確認する"}]}')"
+MOCK_AUDIT_JSON="$(jq -cn '{schema_version: 1, status: "failed", project: {owner: "art-tra2021", number: 8, url: "https://github.example/orgs/art-tra2021/projects/8"}, checked_project_items: 0, checked_labeled_issues: 0, exemptions: [], diagnostics: [{code: "AR-PROJECT-STATUS-007", issue_url: null, issue_state: null, repository: null, issue_type: null, project_value: null, label_values: [], detail: "permission denied", recommendation: "project read権限を確認する"}]}')"
 MOCK_EXIT_CODE=1
 if GITHUB_STEP_SUMMARY="$failed_summary" bash "$repository_root/scripts/project-status-audit.sh" >/dev/null 2>&1; then
 	fail 'permission failure unexpectedly passed the scheduled gate'

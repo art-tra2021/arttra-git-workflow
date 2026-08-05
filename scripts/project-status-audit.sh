@@ -23,9 +23,21 @@ cat "$report_file"
 jq -e '
   .schema_version == 1 and
   (.status == "clean" or .status == "drift" or .status == "failed") and
+  (.exemptions | type == "array") and
   (.diagnostics | type == "array") and
+  all(.exemptions[];
+    (.issue_url | type == "string" and length > 0) and
+    (.issue_state | type == "string" and length > 0) and
+    (.repository | type == "string" and length > 0) and
+    ((.issue_type == null) or (.issue_type | type == "string")) and
+    (.label_values | type == "array") and
+    (.reason | type == "string" and length > 0)
+  ) and
   all(.diagnostics[];
     (.code | startswith("AR-PROJECT-STATUS-")) and
+    ((.issue_state == null) or (.issue_state | type == "string")) and
+    ((.repository == null) or (.repository | type == "string")) and
+    ((.issue_type == null) or (.issue_type | type == "string")) and
     (.label_values | type == "array") and
     (.recommendation | type == "string" and length > 0)
   )
@@ -34,8 +46,9 @@ jq -e '
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 	{
 		printf '## Project Status drift audit\n\n'
-		jq -r '"Status: **\(.status)**  \nProject items: \(.checked_project_items)  \nstatus label付きIssues: \(.checked_labeled_issues)  \nDiagnostics: \(.diagnostics | length)\n"' "$report_file"
-		jq -r '. as $report | .diagnostics[] | "- `\(.code)` [Issue](\(.issue_url // $report.project.url)): \(.detail) 修正案: \(.recommendation)"' "$report_file"
+		jq -r '"Status: **\(.status)**  \nProject items: \(.checked_project_items)  \nstatus label付きIssues: \(.checked_labeled_issues)  \nExemptions: \(.exemptions | length)  \nDiagnostics: \(.diagnostics | length)\n"' "$report_file"
+		jq -r '.exemptions[] | "- `EXEMPT` [Issue](\(.issue_url)) [\(.issue_state) / \(.repository) / \(.issue_type // "type未設定")]: \(.reason)"' "$report_file"
+		jq -r '. as $report | .diagnostics[] | "- `\(.code)` [Issue](\(.issue_url // $report.project.url)) [\(.issue_state // "state未取得") / \(.repository // "repository未取得") / \(.issue_type // "type未設定")]: \(.detail) 修正案: \(.recommendation)"' "$report_file"
 	} >>"$GITHUB_STEP_SUMMARY"
 fi
 
