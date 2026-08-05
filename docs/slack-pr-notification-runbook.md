@@ -166,6 +166,27 @@ Task #113に対する独立したassignment変更通知はなく、Task概要と
 Task #113をcloseするPR [#114](https://github.com/art-tra2021/arttra-git-workflow/pull/114)の作成通知は、message ts `1785820889.371709`、thread_ts `1785819495.573869`である。
 この通知にもnative mentionとchannelへの展開はなく、PR作成後もTask #113の概要は重複せず2件のままだった。
 
+### 2026-08-05の最新revision E2E証跡
+
+Work [#111](https://github.com/art-tra2021/arttra-git-workflow/issues/111)とTask [#150](https://github.com/art-tra2021/arttra-git-workflow/issues/150)を使い、Cloud Run revision `arttra-work-slack-00051-dps`で初回確認した後、重複を修正した`arttra-work-slack-00052-t2v`で再確認する。
+確認した通知は次のとおりである。
+
+| revision | 通知 | message ts | thread_ts | native mention | channelへの展開 |
+| --- | --- | --- | --- | --- | --- |
+| `00051-dps` | Task概要 | `1785897342.161759` | `1785819495.573869` | なし | なし |
+| `00051-dps` | セルフマージ警告 | `1785897347.427449` | `1785819495.573869` | なし | なし |
+| `00051-dps` | PR作成 | `1785897469.673109` | `1785819495.573869` | なし | なし |
+| `00051-dps` | 制御したPolicy失敗（汎用Work通知） | `1785897473.798139` | `1785819495.573869` | 実行者へ1回 | なし |
+| `00051-dps` | 制御したPolicy失敗（PR lifecycle通知） | `1785897491.737409` | `1785819495.573869` | 実行者へ1回 | なし |
+| `00052-t2v` | 修正後のPolicy失敗 | `1785898677.951519` | `1785819495.573869` | 実行者へ1回 | なし |
+| `00052-t2v` | 修正後の必須check成功 | `1785898862.531469` | `1785819495.573869` | 実行者へ1回 | なし |
+
+PR [#151](https://github.com/art-tra2021/arttra-git-workflow/pull/151)では、親Workを短縮表記した本文をPolicyで`AR-PR-010`として意図的にfail-closedにした。
+初回は同じ失敗に対して汎用Work通知とPR lifecycle通知が1通ずつ届いたため、Task [#152](https://github.com/art-tra2021/arttra-git-workflow/issues/152)とPR [#153](https://github.com/art-tra2021/arttra-git-workflow/pull/153)で`CHECKS_FAILED`の即時通知をPR lifecycleへ一本化した。
+commit `5b13f19f95d7e88c00c8467e91bc461ecdca6b64`を`00052-t2v`へdeployし、PR #151の新しいheadで同じPolicy失敗を再現すると、対応必須mentionは1通だけになった。
+完全な親Issue URLへ戻して全必須checkを成功させると、セルフマージ可能通知も1通だけ届いた。
+Task作成から再確認までchannel rootは増えず、すべて既存Work threadに集約された。
+
 ## 本番deploy
 
 必須CIが成功してmainへmergeされたcommitだけを本番へdeployする。
