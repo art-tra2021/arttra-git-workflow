@@ -347,13 +347,18 @@ export class LifecycleNotificationService {
           optionalString(check.name) ?? (job.event === "check_run" ? "check" : "CI");
         const actionUrl = optionalString(check.html_url) ?? context.url;
         const checkId = numberValue(check.id);
-        const diagnostics =
-          checkId > 0
-            ? await this.github.loadCheckFailureDiagnostics(repository, {
-                kind: job.event === "check_run" ? "check_run" : "check_suite",
-                id: checkId,
-              })
-            : { policyCodes: [], complete: false };
+        let diagnostics = { policyCodes: [] as string[], complete: false };
+        if (checkId > 0) {
+          try {
+            diagnostics = await this.github.loadCheckFailureDiagnostics(repository, {
+              kind: job.event === "check_run" ? "check_run" : "check_suite",
+              id: checkId,
+            });
+          } catch {
+            // annotationを取得できない場合は承認待ちと断定せず、従来のCI失敗通知へ戻す。
+            diagnostics = { policyCodes: [], complete: false };
+          }
+        }
         const approvalOnly =
           diagnostics.complete &&
           diagnostics.policyCodes.length === 1 &&
