@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   type CanvasClient,
   CanvasProjectionService,
+  type CanvasProjectionState,
   canvasMarkdown,
 } from "../src/canvas-service.ts";
 import { allAccessibleScope, repositoryScope } from "../src/project-scope.ts";
@@ -50,6 +51,93 @@ describe("Slack Canvas projection", () => {
       stateKey: first.stateKey,
       state: { canvasId: "F_CANVAS_1", contentHash: first.contentHash },
     });
+  });
+
+  test("Project内容が変わった時刻だけを表示し、定期同期では時刻を進めない", async () => {
+    const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-canvas-")));
+    const creates: Array<{ document_content: { markdown: string } }> = [];
+    const edits: Array<{ changes: Array<{ document_content?: { markdown: string } }> }> = [];
+    let now = Date.parse("2026-08-05T05:00:00Z");
+    const service = new CanvasProjectionService(
+      {
+        canvases: {
+          create: async (input) => {
+            creates.push(input);
+            return { canvas_id: "F_CANVAS_TIMESTAMP" };
+          },
+          edit: async (input) => void edits.push(input),
+          access: { set: async () => {} },
+        },
+      },
+      store,
+      () => now,
+    );
+    const workItem = item("https://github.com/art-tra2021/work/issues/1");
+    const input = {
+      teamId: "T123",
+      viewerId: "U123",
+      target: { kind: "user" as const, id: "U123" },
+      scope: allAccessibleScope(),
+      accessibleRepositories: ["art-tra2021/work"],
+      items: [workItem],
+    };
+
+    await service.sync(input);
+    expect(creates[0]?.document_content.markdown).toContain(
+      "データ最終更新: 2026-08-05 14:00:00 JST",
+    );
+
+    now += 15 * 60_000;
+    expect(await service.sync(input)).toMatchObject({ unchanged: true, updated: false });
+    expect(edits).toHaveLength(0);
+
+    workItem.priority = "P1";
+    now += 15 * 60_000;
+    expect(await service.sync(input)).toMatchObject({ unchanged: false, updated: true });
+    expect(edits).toHaveLength(1);
+    expect(edits[0]?.changes[0]?.document_content?.markdown).toContain(
+      "データ最終更新: 2026-08-05 14:30:00 JST",
+    );
+  });
+
+  test("最終更新時刻のない旧stateを一度だけ移行する", async () => {
+    const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-canvas-")));
+    const edits: Array<{ changes: Array<{ document_content?: { markdown: string } }> }> = [];
+    let now = Date.parse("2026-08-05T05:00:00Z");
+    const service = new CanvasProjectionService(
+      {
+        canvases: {
+          create: async () => ({ canvas_id: "F_CANVAS_LEGACY_TIMESTAMP" }),
+          edit: async (input) => void edits.push(input),
+          access: { set: async () => {} },
+        },
+      },
+      store,
+      () => now,
+    );
+    const input = {
+      teamId: "T123",
+      viewerId: "U123",
+      target: { kind: "user" as const, id: "U123" },
+      scope: allAccessibleScope(),
+      accessibleRepositories: ["art-tra2021/work"],
+      items: [item("https://github.com/art-tra2021/work/issues/1")],
+    };
+    const created = await service.sync(input);
+    const legacy = await store.get<CanvasProjectionState>("project-canvas", created.stateKey);
+    if (!legacy) throw new Error("Canvas stateがありません");
+    delete legacy.lastUpdatedAt;
+    await store.set("project-canvas", created.stateKey, legacy);
+
+    now += 15 * 60_000;
+    expect(await service.sync(input)).toMatchObject({ updated: true, unchanged: false });
+    expect(edits[0]?.changes[0]?.document_content?.markdown).toContain(
+      "データ最終更新: 2026-08-05 14:15:00 JST",
+    );
+
+    now += 15 * 60_000;
+    expect(await service.sync(input)).toMatchObject({ updated: false, unchanged: true });
+    expect(edits).toHaveLength(1);
   });
 
   test("定期同期用のexisting-only指定ではstate消失時にCanvasを新規作成しない", async () => {
