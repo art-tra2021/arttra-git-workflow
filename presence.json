@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "repository": "art-tra2021/arttra-git-workflow",
+  "actor": "roz",
+  "device": "device-1785921000822-21871",
+  "branch": "feature/161-required-action-dm-rozwer",
+  "head": "28ee413be0839b98a525825de4d943251c56bd4f",
+  "observed_at_unix_ms": 1785922962833,
+  "files": [
+    {
+      "path": "apps/slack-adapter/README.md",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/slack-app-manifest.yml",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/github-webhook-processor.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/lifecycle-notification-service.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/notification-outbox-cli.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/notification-outbox.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/required-action-dm-service.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/review-service.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-direct-notifier.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-lifecycle-notifier.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-notification-reconciler.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-review-notifier.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-work-notifier.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/start.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/work-notification-service.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/github-webhook.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/lifecycle-notification-service.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/notification-outbox.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/required-action-dm-service.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/slack-direct-notifier.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/slack-lifecycle-notifier.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/slack-review-notifier.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/slack-work-notifier.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/work-notification-service.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "docs/slack-pr-notification-runbook.md",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    }
+  ]
+}
