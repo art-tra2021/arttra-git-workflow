@@ -5,6 +5,7 @@ import {
   NotificationOutboxService,
   type NotificationReplayCommand,
 } from "./notification-outbox.ts";
+import { SlackDirectLifecycleNotifier, SlackDirectWorkNotifier } from "./slack-direct-notifier.ts";
 import { SlackLifecycleNotifier } from "./slack-lifecycle-notifier.ts";
 import {
   type SlackConversationClient,
@@ -70,7 +71,10 @@ try {
     const work = new SlackWorkNotifier(slack, channelId);
     const outbox = new NotificationOutboxService(
       store,
-      new DelegatingNotificationPayloadSender(lifecycle, work),
+      new DelegatingNotificationPayloadSender(lifecycle, work, (slackUserId) => ({
+        lifecycle: new SlackDirectLifecycleNotifier(slack, slackUserId),
+        work: new SlackDirectWorkNotifier(slack, slackUserId),
+      })),
       {
         channelId,
         replayOperatorIds: csv("AR_NOTIFICATION_REPLAY_OPERATOR_IDS"),

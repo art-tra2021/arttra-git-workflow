@@ -9,6 +9,7 @@ import {
   LifecycleNotificationService,
 } from "../src/lifecycle-notification-service.ts";
 import {
+  type NotificationIntentMetadata,
   NotificationOutboxService,
   type NotificationPayload,
   notificationIntentId,
@@ -21,49 +22,65 @@ import { LocalStateStore } from "../src/state-store.ts";
 describe("SlackReviewNotifier", () => {
   test("PR作成時のreviewerとIssue担当者を関連Issue threadでmentionする", async () => {
     const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-review-thread-")));
-    const sent: Array<{ notification: LifecycleNotification; threadTs: string | null }> = [];
+    const sent: Array<{
+      notification: LifecycleNotification;
+      threadTs: string | null;
+      metadata?: NotificationIntentMetadata;
+    }> = [];
     const notifier = new SlackReviewNotifier(
       {
-        notify: async (notification, threadTs) => {
-          sent.push({ notification, threadTs });
+        notify: async (notification, threadTs, metadata) => {
+          sent.push({
+            notification,
+            threadTs,
+            ...(metadata ? { metadata } : {}),
+          });
           return { messageTs: threadTs ?? "970.1" };
         },
       },
       new NotificationThreadService(store),
       async (login) =>
-        ({ author: "UAUTHOR", owner: "UOWNER", requester: "UREQUESTER" })[login] ?? null,
+        ({
+          author: "UAUTHOR",
+          owner: "UOWNER",
+          requester: "UREQUESTER",
+          initiator: "UINITIATOR",
+        })[login] ?? null,
       { loadIssueContext: async () => workIssue() },
     );
 
-    await notifier.notify({
-      schemaVersion: 1,
-      kind: "review.request",
-      repository: "example/repo",
-      pullRequest: {
-        number: 45,
-        title: "通知を追加",
-        url: "https://github.example/pull/45",
-        headSha: "head-1",
-      },
-      authorLogin: "author",
-      primaryIssue: issue(),
-      closingIssueCount: 1,
-      linkedIssues: [issue()],
-      requiredApprovals: 1,
-      reviewers: [
-        {
-          githubUserId: 101,
-          githubLogin: "reviewer",
-          slackUserId: "UREVIEWER",
-          reasons: ["CODEOWNERS: src/app.ts"],
-          notified: false,
+    await notifier.notify(
+      {
+        schemaVersion: 1,
+        kind: "review.request",
+        repository: "example/repo",
+        pullRequest: {
+          number: 45,
+          title: "通知を追加",
+          url: "https://github.example/pull/45",
+          headSha: "head-1",
         },
-      ],
-      teams: [],
-      dueDate: "2026-08-10",
-      nextAction: "GitHubで確認する",
-      updatedAt: "2026-08-02T00:00:00Z",
-    });
+        authorLogin: "author",
+        primaryIssue: issue(),
+        closingIssueCount: 1,
+        linkedIssues: [issue()],
+        requiredApprovals: 1,
+        reviewers: [
+          {
+            githubUserId: 101,
+            githubLogin: "reviewer",
+            slackUserId: "UREVIEWER",
+            reasons: ["CODEOWNERS: src/app.ts"],
+            notified: false,
+          },
+        ],
+        teams: [],
+        dueDate: "2026-08-10",
+        nextAction: "GitHubで確認する",
+        updatedAt: "2026-08-02T00:00:00Z",
+      },
+      { sourceDeliveryId: "delivery-review", actorLogin: "initiator" },
+    );
 
     expect(sent).toHaveLength(3);
     expect(sent[0]).toMatchObject({
@@ -87,11 +104,17 @@ describe("SlackReviewNotifier", () => {
       threadTs: "970.1",
       notification: {
         kind: "review-requested",
-        slackUserIds: ["UREVIEWER", "UOWNER"],
-        actorSlackUserId: null,
+        slackUserIds: ["UREVIEWER", "UAUTHOR", "UOWNER"],
+        actorSlackUserId: "UINITIATOR",
+        actorLogin: "initiator",
         issueType: "task",
         resource: { kind: "issue", number: 44 },
       },
+    });
+    expect(sent[2]?.metadata?.requiredAction).toEqual({
+      kind: "review-requested",
+      recipientSlackUserIds: ["UREVIEWER"],
+      actorSlackUserId: "UINITIATOR",
     });
   });
 
@@ -133,6 +156,40 @@ describe("SlackReviewNotifier", () => {
     });
 
     expect(sent).toHaveLength(0);
+  });
+
+  test("GitHub teamだけのreview依頼はIssue担当者をchannelで知らせてもDM対象にしない", async () => {
+    const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-team-review-")));
+    const sent: Array<{
+      notification: LifecycleNotification;
+      metadata?: NotificationIntentMetadata;
+    }> = [];
+    const notifier = new SlackReviewNotifier(
+      {
+        notify: async (notification, _threadTs, metadata) => {
+          sent.push({ notification, ...(metadata ? { metadata } : {}) });
+          return { messageTs: "970.3" };
+        },
+      },
+      new NotificationThreadService(store),
+      async (login) =>
+        ({ author: "UAUTHOR", owner: "UOWNER", initiator: "UINITIATOR" })[login] ?? null,
+      { loadIssueContext: async () => workIssue() },
+    );
+    const model = {
+      ...reviewModel(),
+      reviewers: [],
+      teams: [{ slug: "platform", reasons: ["CODEOWNERS: src/**"] }],
+    };
+
+    await notifier.notify(model, { actorLogin: "initiator" });
+
+    expect(sent.at(-1)?.notification.slackUserIds).toEqual(["UAUTHOR", "UOWNER"]);
+    expect(sent.at(-1)?.metadata?.requiredAction).toEqual({
+      kind: "review-requested",
+      recipientSlackUserIds: [],
+      actorSlackUserId: "UINITIATOR",
+    });
   });
 
   test("PR eventが先でもOutboxでTask概要を一度だけ先行させる", async () => {

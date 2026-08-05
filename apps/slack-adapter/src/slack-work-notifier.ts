@@ -12,10 +12,16 @@ import type {
 export class SlackWorkNotifier implements WorkNotifier {
   private readonly client: Pick<WebClient, "chat">;
   private readonly channelId: string;
+  private readonly direct: boolean;
 
-  constructor(client: Pick<WebClient, "chat">, channelId: string) {
+  constructor(
+    client: Pick<WebClient, "chat">,
+    channelId: string,
+    options: { direct?: boolean } = {},
+  ) {
     this.client = client;
     this.channelId = channelId;
+    this.direct = options.direct ?? false;
   }
 
   async notify(
@@ -23,7 +29,7 @@ export class SlackWorkNotifier implements WorkNotifier {
     context: WorkNotificationContext,
     metadata?: NotificationIntentMetadata,
   ): Promise<WorkNotificationResult> {
-    const mention = context.slackUserId ? `<@${context.slackUserId}> ` : "";
+    const mention = !this.direct && context.slackUserId ? `<@${context.slackUserId}> ` : "";
     const tone = context.kind === "deadline" ? "deadline" : "work";
     const label = context.kind === "deadline" ? "期限のお知らせ" : "作業状況の更新";
     const response = await this.client.chat.postMessage({
@@ -42,7 +48,9 @@ export class SlackWorkNotifier implements WorkNotifier {
         slackDivider(),
         ...workItemBlocks(item),
       ],
-      ...(context.threadTs ? { thread_ts: context.threadTs, reply_broadcast: false } : {}),
+      ...(!this.direct && context.threadTs
+        ? { thread_ts: context.threadTs, reply_broadcast: false }
+        : {}),
       ...(metadata ? { metadata: slackMetadata(metadata.intentId) } : {}),
       unfurl_links: false,
       unfurl_media: false,

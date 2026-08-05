@@ -17,6 +17,7 @@ interface ReviewNotifier {
 
 interface ReviewNotificationContext {
   sourceDeliveryId?: string;
+  actorLogin?: string;
 }
 
 interface ReviewNotificationState {
@@ -42,6 +43,7 @@ interface ReviewerCandidate {
 interface ReviewProcessOptions {
   reRequestChanges?: boolean;
   sourceDeliveryId?: string;
+  actorLogin?: string;
 }
 
 export class PullRequestReviewService {
@@ -171,6 +173,7 @@ export class PullRequestReviewService {
     if (shouldNotify) {
       await this.notifier.notify(model, {
         ...(options.sourceDeliveryId ? { sourceDeliveryId: options.sourceDeliveryId } : {}),
+        ...(options.actorLogin ? { actorLogin: options.actorLogin } : {}),
       });
       for (const reviewer of model.reviewers) {
         reviewer.notified = reviewer.slackUserId !== null;

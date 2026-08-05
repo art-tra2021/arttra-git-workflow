@@ -46,8 +46,14 @@ import type { ProjectListClient } from "./project-list.ts";
 import { ProjectListSyncService, parseProjectListSyncCommand } from "./project-list-service.ts";
 import { filterItemsByAccessibleRepositories, normalizeRepositoryScope } from "./project-scope.ts";
 import { buildHealthResponse } from "./release-info.ts";
+import {
+  LifecycleNotifierWithRequiredActionDm,
+  RequiredActionDmService,
+  WorkNotifierWithRequiredActionDm,
+} from "./required-action-dm-service.ts";
 import { isRetryableWorkError } from "./retryable-error.ts";
 import { PullRequestReviewService } from "./review-service.ts";
+import { SlackDirectLifecycleNotifier, SlackDirectWorkNotifier } from "./slack-direct-notifier.ts";
 import { SlackLifecycleNotifier } from "./slack-lifecycle-notifier.ts";
 import {
   type SlackConversationClient,
@@ -196,25 +202,55 @@ const rawSlackLifecycleNotifier = workNotificationChannelId
 const rawSlackWorkNotifier = workNotificationChannelId
   ? new SlackWorkNotifier(slackClient, workNotificationChannelId)
   : null;
-const notificationOutbox =
-  workNotificationChannelId && rawSlackLifecycleNotifier && rawSlackWorkNotifier
-    ? new NotificationOutboxService(
-        store,
-        new DelegatingNotificationPayloadSender(rawSlackLifecycleNotifier, rawSlackWorkNotifier),
-        {
-          channelId: workNotificationChannelId,
-          replayOperatorIds: notificationReplayOperatorIds,
-          reconciler: new SlackNotificationReconciler(
-            slackClient as unknown as SlackConversationClient,
-            store,
-          ),
-        },
+const notificationReconciler = workNotificationChannelId
+  ? new SlackNotificationReconciler(slackClient as unknown as SlackConversationClient, store)
+  : null;
+const notificationPayloadSender =
+  rawSlackLifecycleNotifier && rawSlackWorkNotifier
+    ? new DelegatingNotificationPayloadSender(
+        rawSlackLifecycleNotifier,
+        rawSlackWorkNotifier,
+        (slackUserId) => ({
+          lifecycle: new SlackDirectLifecycleNotifier(slackClient, slackUserId),
+          work: new SlackDirectWorkNotifier(slackClient, slackUserId),
+        }),
       )
     : null;
-const slackLifecycleNotifier = notificationOutbox
+const notificationOutbox =
+  workNotificationChannelId && notificationPayloadSender
+    ? new NotificationOutboxService(store, notificationPayloadSender, {
+        channelId: workNotificationChannelId,
+        replayOperatorIds: notificationReplayOperatorIds,
+        ...(notificationReconciler ? { reconciler: notificationReconciler } : {}),
+      })
+    : null;
+const primaryLifecycleNotifier = notificationOutbox
   ? new OutboxLifecycleNotifier(notificationOutbox)
   : null;
-const workNotifier = notificationOutbox ? new OutboxWorkNotifier(notificationOutbox) : null;
+const primaryWorkNotifier = notificationOutbox ? new OutboxWorkNotifier(notificationOutbox) : null;
+const requiredActionDm =
+  notificationReconciler && notificationPayloadSender
+    ? new RequiredActionDmService((slackUserId) => {
+        const directOutbox = new NotificationOutboxService(store, notificationPayloadSender, {
+          channelId: slackUserId,
+          replayOperatorIds: notificationReplayOperatorIds,
+          reconciler: notificationReconciler,
+        });
+        const delivery = { kind: "direct" as const, slackUserId };
+        return {
+          lifecycle: new OutboxLifecycleNotifier(directOutbox, delivery),
+          work: new OutboxWorkNotifier(directOutbox, delivery),
+        };
+      })
+    : null;
+const slackLifecycleNotifier =
+  primaryLifecycleNotifier && requiredActionDm
+    ? new LifecycleNotifierWithRequiredActionDm(primaryLifecycleNotifier, requiredActionDm)
+    : primaryLifecycleNotifier;
+const workNotifier =
+  primaryWorkNotifier && requiredActionDm
+    ? new WorkNotifierWithRequiredActionDm(primaryWorkNotifier, requiredActionDm)
+    : primaryWorkNotifier;
 const workNotificationService = workNotificationChannelId
   ? new WorkNotificationService(
       sharedWorkSource,

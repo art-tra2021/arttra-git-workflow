@@ -3,6 +3,10 @@ import type {
   NotificationReconciler,
   NotificationReconciliation,
 } from "./notification-outbox.ts";
+import {
+  resolveSlackDirectChannel,
+  type SlackDirectConversationClient,
+} from "./slack-direct-notifier.ts";
 import type { StateStore } from "./state-store.ts";
 
 const THREAD_NAMESPACE = "work-thread";
@@ -30,6 +34,7 @@ export interface SlackConversationClient {
   conversations: {
     history(arguments_: Record<string, unknown>): Promise<SlackConversationPage>;
     replies(arguments_: Record<string, unknown>): Promise<SlackConversationPage>;
+    open?: SlackDirectConversationClient["conversations"]["open"];
   };
 }
 
@@ -54,12 +59,13 @@ export class SlackNotificationReconciler implements NotificationReconciler {
   async reconcile(state: NotificationOutboxState): Promise<NotificationReconciliation> {
     const checkedAt = new Date(this.now()).toISOString();
     try {
+      const channelId = await this.resolveChannelId(state);
       const threadTs = await this.resolveThreadTs(state);
       const result = threadTs
         ? await this.scan(
             "replies",
             {
-              channel: state.channelId,
+              channel: channelId,
               ts: threadTs,
               inclusive: true,
               include_all_metadata: true,
@@ -67,14 +73,14 @@ export class SlackNotificationReconciler implements NotificationReconciler {
             },
             state.intentId,
           )
-        : await this.scan("history", this.historyArguments(state), state.intentId);
+        : await this.scan("history", this.historyArguments(state, channelId), state.intentId);
       if (result.match?.ts) {
         return {
           schemaVersion: 1,
           method: "slack-conversations-api",
           outcome: "message_found",
           checkedAt,
-          channelId: state.channelId,
+          channelId,
           scannedMessages: result.scannedMessages,
           complete: true,
           messageTs: result.match.ts,
@@ -87,7 +93,7 @@ export class SlackNotificationReconciler implements NotificationReconciler {
           method: "slack-conversations-api",
           outcome: "inconclusive",
           checkedAt,
-          channelId: state.channelId,
+          channelId,
           scannedMessages: result.scannedMessages,
           complete: false,
           reason: "Slack APIの全ページを確認できませんでした。安全のため再送しません。",
@@ -98,7 +104,7 @@ export class SlackNotificationReconciler implements NotificationReconciler {
         method: "slack-conversations-api",
         outcome: "message_not_found",
         checkedAt,
-        channelId: state.channelId,
+        channelId,
         scannedMessages: result.scannedMessages,
         complete: true,
         reason: "対象時間帯またはIssue threadに同じoutbox intent IDはありませんでした。",
@@ -117,7 +123,33 @@ export class SlackNotificationReconciler implements NotificationReconciler {
     }
   }
 
+  private async resolveChannelId(state: NotificationOutboxState): Promise<string> {
+    if (
+      (state.payload.kind !== "lifecycle" && state.payload.kind !== "work") ||
+      state.payload.delivery?.kind !== "direct"
+    ) {
+      return state.channelId;
+    }
+    if (!this.client.conversations.open) {
+      throw new Error("slack_dm_open_unavailable");
+    }
+    return resolveSlackDirectChannel(
+      {
+        conversations: {
+          open: this.client.conversations.open.bind(this.client.conversations),
+        },
+      },
+      state.payload.delivery.slackUserId,
+    );
+  }
+
   private async resolveThreadTs(state: NotificationOutboxState): Promise<string | null> {
+    if (
+      (state.payload.kind === "lifecycle" || state.payload.kind === "work") &&
+      state.payload.delivery?.kind === "direct"
+    ) {
+      return null;
+    }
     if (state.payload.kind === "lifecycle" && state.payload.threadTs) {
       return state.payload.threadTs;
     }
@@ -130,13 +162,16 @@ export class SlackNotificationReconciler implements NotificationReconciler {
     return thread?.rootTs ?? null;
   }
 
-  private historyArguments(state: NotificationOutboxState): Record<string, unknown> {
+  private historyArguments(
+    state: NotificationOutboxState,
+    channelId: string,
+  ): Record<string, unknown> {
     const startedAt = Date.parse(state.sendingStartedAt ?? state.updatedAt);
     if (!Number.isFinite(startedAt)) {
       throw new Error("notification_sending_time_invalid");
     }
     return {
-      channel: state.channelId,
+      channel: channelId,
       oldest: ((startedAt - SEARCH_BEFORE_MILLISECONDS) / 1000).toFixed(6),
       latest: ((startedAt + SEARCH_AFTER_MILLISECONDS) / 1000).toFixed(6),
       inclusive: true,

@@ -21,6 +21,8 @@ oauth_config:
       - commands
       - groups:read
       - groups:history
+      - im:history
+      - im:write
       - lists:read
       - lists:write
       - users:read
