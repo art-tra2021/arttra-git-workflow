@@ -7,7 +7,8 @@ import type { LifecycleNotificationService } from "../src/lifecycle-notification
 import { RetryableWorkError } from "../src/retryable-error.ts";
 import type { PullRequestReviewService } from "../src/review-service.ts";
 import type { StateStore } from "../src/state-store.ts";
-import type { WorkNotificationService } from "../src/work-notification-service.ts";
+import type { HumanWorkItem } from "../src/types.ts";
+import { WorkNotificationService } from "../src/work-notification-service.ts";
 
 describe("GitHub webhook gateway", () => {
   test("GitHub HMACとheaderを検証してversion付きjobへ変換する", () => {
@@ -267,6 +268,73 @@ describe("GitHubWebhookProcessor", () => {
 
     expect(lifecycleCount).toBe(1);
     expect(notificationCount).toBe(0);
+  });
+
+  test("CI失敗中の周辺eventでも汎用Work通知を送らずlifecycleだけを一度送る", async () => {
+    const store = memoryStore();
+    let projectSyncCount = 0;
+    let workNotificationCount = 0;
+    let lifecycleNotificationCount = 0;
+    const failedItem: HumanWorkItem = {
+      schemaVersion: 1,
+      repository: "example/repo",
+      issueNumber: 44,
+      title: "CI通知を統合する",
+      url: "https://github.com/example/repo/issues/44",
+      status: "in-review",
+      priority: "P1",
+      owner: "owner",
+      targetDate: null,
+      delivery: "immediate",
+      reasonCode: "CHECKS_FAILED",
+      nextActor: "owner",
+      nextAction: "失敗したcheckを確認する",
+      reason: "PR #45のcheckが失敗している",
+      actions: ["open-github"],
+    };
+    const notifications = new WorkNotificationService(
+      { loadProjectItems: async () => [failedItem] },
+      store,
+      {
+        notify: async () => {
+          workNotificationCount += 1;
+          return { messageTs: "unexpected" };
+        },
+        digest: async () => {},
+      },
+    );
+    const lifecycle = {
+      process: async (job: { event: string }) => {
+        if (job.event === "check_run") lifecycleNotificationCount += 1;
+        return job.event === "check_run" ? 1 : 0;
+      },
+    } as unknown as LifecycleNotificationService;
+    const processor = new GitHubWebhookProcessor(
+      null,
+      store,
+      async () => {
+        projectSyncCount += 1;
+      },
+      notifications,
+      lifecycle,
+    );
+
+    await processor.process({
+      schemaVersion: 1,
+      deliveryId: "delivery-project-after-failed-check",
+      event: "projects_v2_item",
+      payload: { action: "edited" },
+    });
+    await processor.process({
+      schemaVersion: 1,
+      deliveryId: "delivery-check-failed",
+      event: "check_run",
+      payload: { action: "completed" },
+    });
+
+    expect(projectSyncCount).toBe(1);
+    expect(workNotificationCount).toBe(0);
+    expect(lifecycleNotificationCount).toBe(1);
   });
 
   test("Issueコメントをライフサイクル通知へ一度だけ渡す", async () => {
