@@ -3225,30 +3225,16 @@ fn issue(mut args: IssueArgs) -> Result<()> {
 fn project_sync_command(args: ProjectSyncArgs) -> Result<()> {
     let mut issue = project_sync::read_issue(&args.issue)?;
     if !args.assignee.is_empty() {
-        let desired = args
-            .assignee
-            .iter()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty())
-            .collect::<std::collections::BTreeSet<_>>();
-        let current = issue
-            .assignee_logins()
-            .into_iter()
-            .map(|value| value.to_ascii_lowercase())
-            .collect::<std::collections::BTreeSet<_>>();
-        let mut command = Command::new("gh");
-        command.args(["issue", "edit", &args.issue]);
-        for login in current.difference(&desired) {
-            command.args(["--remove-assignee", login]);
+        let edit_arguments = assignee_edit_arguments(&issue.assignee_logins(), &args.assignee);
+        if !edit_arguments.is_empty() {
+            let output = Command::new("gh")
+                .args(["issue", "edit", &args.issue])
+                .args(edit_arguments)
+                .output()
+                .context("Issue Assigneeの更新を起動できませんでした")?;
+            ensure_success(&output, "Issue Assigneeの更新")?;
+            issue = project_sync::read_issue(&args.issue)?;
         }
-        for login in desired.difference(&current) {
-            command.args(["--add-assignee", login]);
-        }
-        let output = command
-            .output()
-            .context("Issue Assigneeの更新を起動できませんでした")?;
-        ensure_success(&output, "Issue Assigneeの更新")?;
-        issue = project_sync::read_issue(&args.issue)?;
     }
     let expected_assignees = issue.assignee_logins();
     let values = project_sync::ProjectFieldValues {
@@ -3267,6 +3253,27 @@ fn project_sync_command(args: ProjectSyncArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     }
     Ok(())
+}
+
+fn assignee_edit_arguments(current: &[String], desired: &[String]) -> Vec<String> {
+    let current = current
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    let desired = desired
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut arguments = Vec::new();
+    for login in current.difference(&desired) {
+        arguments.extend(["--remove-assignee".into(), login.clone()]);
+    }
+    for login in desired.difference(&current) {
+        arguments.extend(["--add-assignee".into(), login.clone()]);
+    }
+    arguments
 }
 
 fn project_status_audit_command(json: bool, fail_on_drift: bool) -> Result<()> {
@@ -4217,10 +4224,28 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        IntakeUrgency, IssueContent, IssueDraft, IssueKind, MergeMode, branch_type_description,
-        commit_type_description, is_hk_commit_msg_command, parse_issue_numbers,
-        path_is_mise_managed, project_sync, required, validate_issue_hierarchy,
+        IntakeUrgency, IssueContent, IssueDraft, IssueKind, MergeMode, assignee_edit_arguments,
+        branch_type_description, commit_type_description, is_hk_commit_msg_command,
+        parse_issue_numbers, path_is_mise_managed, project_sync, required,
+        validate_issue_hierarchy,
     };
+
+    #[test]
+    fn project_sync_skips_unchanged_assignees_and_builds_exact_edits() {
+        assert!(assignee_edit_arguments(&["rozwer".into()], &["ROZWER".into()]).is_empty());
+        assert_eq!(
+            assignee_edit_arguments(
+                &["old-owner".into(), "keep".into()],
+                &["keep".into(), "new-owner".into()],
+            ),
+            vec![
+                "--remove-assignee",
+                "old-owner",
+                "--add-assignee",
+                "new-owner",
+            ]
+        );
+    }
 
     #[test]
     fn issue_body_has_stable_sections() {
