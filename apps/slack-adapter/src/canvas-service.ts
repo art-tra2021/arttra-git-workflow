@@ -79,6 +79,8 @@ export interface CanvasProjectionState {
   schemaVersion: 1;
   canvasId: string;
   contentHash: string;
+  /** Canvas本文へ最後にProject内容を反映した時刻。旧stateでは欠落し得る。 */
+  lastUpdatedAt?: string;
   title: string;
   accessKey: string;
   binding: ProjectionBinding;
@@ -120,10 +122,12 @@ export interface CanvasProjectionResult {
 export class CanvasProjectionService {
   private readonly client: CanvasClient;
   private readonly store: StateStore;
+  private readonly now: () => number;
 
-  constructor(client: CanvasClient, store: StateStore) {
+  constructor(client: CanvasClient, store: StateStore, now: () => number = Date.now) {
     this.client = client;
     this.store = store;
+    this.now = now;
   }
 
   /** 保存済みstateを変更せず、state storeのkey順に列挙する。 */
@@ -188,11 +192,15 @@ export class CanvasProjectionService {
       filterItemsByAccessibleRepositories(input.items, input.accessibleRepositories ?? []),
       binding.scope,
     ).filter((item) => item.delivery !== "silent");
-    const markdown = canvasMarkdown(items, binding.scope);
-    const contentHash = hash(markdown);
+    // 表示時刻をhashへ含めると15分ごとの定期同期が毎回Canvasを書き換える。
+    // Project内容だけをhash化し、内容が変わった時刻だけ本文へ記録する。
+    const semanticMarkdown = canvasMarkdown(items, binding.scope);
+    const contentHash = hash(semanticMarkdown);
+    const observedAt = new Date(this.now()).toISOString();
     const accessKey = JSON.stringify({ target: binding.target, accessLevel: "read" });
     let state = await this.store.get<CanvasProjectionState>(STATE_NAMESPACE, stateKey);
     let canvasId = state?.canvasId ?? input.canvasId;
+    let lastUpdatedAt = state?.lastUpdatedAt ?? observedAt;
     let created = false;
     let updated = false;
     let unchanged = false;
@@ -201,6 +209,8 @@ export class CanvasProjectionService {
       if (input.createIfMissing === false) {
         throw new CanvasProjectionMissingError();
       }
+      lastUpdatedAt = observedAt;
+      const markdown = canvasMarkdown(items, binding.scope, lastUpdatedAt);
       const response = await this.client.canvases.create({
         title,
         document_content: { type: "markdown", markdown },
@@ -217,6 +227,7 @@ export class CanvasProjectionService {
         schemaVersion: 1,
         canvasId,
         contentHash,
+        lastUpdatedAt,
         title,
         accessKey: "",
         binding,
@@ -224,8 +235,13 @@ export class CanvasProjectionService {
       };
       await this.store.set(STATE_NAMESPACE, stateKey, state);
     } else {
-      if (!state || state.contentHash !== contentHash || state.title !== title) {
-        if (!state || state.contentHash !== contentHash) {
+      // lastUpdatedAtのない旧stateは一度だけ本文を更新し、表示時刻を導入する。
+      const contentChanged =
+        !state || state.contentHash !== contentHash || state.lastUpdatedAt === undefined;
+      if (contentChanged || state?.title !== title) {
+        if (contentChanged) {
+          lastUpdatedAt = observedAt;
+          const markdown = canvasMarkdown(items, binding.scope, lastUpdatedAt);
           await this.client.canvases.edit({
             canvas_id: canvasId,
             changes: [
@@ -268,6 +284,7 @@ export class CanvasProjectionService {
       schemaVersion: 1,
       canvasId,
       contentHash,
+      lastUpdatedAt,
       title,
       accessKey,
       binding,
@@ -333,7 +350,11 @@ export async function syncCanvasProjection(
   return new CanvasProjectionService(client, store).sync(input);
 }
 
-export function canvasMarkdown(items: HumanWorkItem[], scope?: RepositoryScope): string {
+export function canvasMarkdown(
+  items: HumanWorkItem[],
+  scope?: RepositoryScope,
+  lastUpdatedAt?: string,
+): string {
   const sorted = [...items].sort((left, right) =>
     `${left.url}\u0000${left.issueNumber}`.localeCompare(`${right.url}\u0000${right.issueNumber}`),
   );
@@ -342,6 +363,7 @@ export function canvasMarkdown(items: HumanWorkItem[], scope?: RepositoryScope):
     "# ART-TRA Work",
     "",
     `> GitHub Projectsの閲覧用投影（${scopeLabel}）です。更新はGitHubで行います。`,
+    ...(lastUpdatedAt ? [`> データ最終更新: ${formatJapanTimestamp(lastUpdatedAt)}`] : []),
     "",
     "| 状態 | 優先度 | 期限 | Issue | 担当 |",
     "| --- | --- | --- | --- | --- |",
@@ -357,6 +379,14 @@ export function canvasMarkdown(items: HumanWorkItem[], scope?: RepositoryScope):
   }
   if (sorted.length === 0) lines.push("| — | — | — | 対象の未完了Issueはありません | — |");
   return `${lines.join("\n")}\n`;
+}
+
+function formatJapanTimestamp(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) throw new Error("Canvasの最終更新時刻が不正です。");
+  const japan = new Date(timestamp + 9 * 60 * 60_000);
+  const pad = (part: number): string => String(part).padStart(2, "0");
+  return `${japan.getUTCFullYear()}-${pad(japan.getUTCMonth() + 1)}-${pad(japan.getUTCDate())} ${pad(japan.getUTCHours())}:${pad(japan.getUTCMinutes())}:${pad(japan.getUTCSeconds())} JST`;
 }
 
 function hash(value: string): string {

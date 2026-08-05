@@ -16,6 +16,7 @@ GitHub Projectsを正本とし、利用者が`/ar canvas`で既に作成した�
 serviceは既存stateをstate key順に列挙し、手動の`/ar canvas`と同じ経路でGitHub identityとrepository accessを再検証する。
 repository accessまたはGitHub連携を失った利用者には、個人List／Canvasの既存失効処理を適用する。
 Project表示のhashとACLが保存済みstateから変わらなければ、`canvases.edit`と`canvases.access.set`を呼ばない。
+Canvas本文にはProject内容を最後に反映したJST時刻を表示する。この時刻は内容変更時だけ更新し、変更のない定期同期では書き換えない。
 
 応答の`results`はstate key順であり、各bindingを次のいずれかとして返す。
 
