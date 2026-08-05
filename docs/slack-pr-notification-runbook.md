@@ -155,13 +155,16 @@ docker buildx build --platform linux/amd64 \
 ```
 
 imageをpushしてもCloud Runは変更されない。
-次に対象commitが現在のGitHub mainと一致すること、対象image、現在配信中のrevision・image・health commit、変更点をJSONで確認する。
+次に対象commitが現在のGitHub mainと一致すること、対象imageのOCI indexに`linux/amd64` manifestがちょうど1件あること、そのdigest、現在配信中のrevision・image digest・health commit、変更点をJSONで確認する。
 
 ```sh
 mise run slack:release:preview -- --commit <merge-commit>
 ```
 
-previewはread-onlyでありdeployしない。
+previewは`docker buildx imagetools inspect`で対象tagをread-onlyに検査し、`target.digest`へ`linux/amd64` manifest digest、`target.deployImage`へdigest固定のimage参照を出力する。
+attestation manifestの`unknown/unknown` platformを実行imageとして扱ってはならない。
+`linux/amd64` manifestがない、または複数ある場合はpreviewを失敗させ、deployしない。
+preview自体はread-onlyでありCloud Runを変更しない。
 内容を確認した操作者だけが、同じ完全SHAと`--yes`を明示してdeployする。
 `--yes`がなければscriptはpreviewを表示した後に停止する。
 
@@ -169,9 +172,14 @@ previewはread-onlyでありdeployしない。
 mise run slack:release:deploy -- --commit <merge-commit> --yes
 ```
 
-deploy scriptは既存の環境変数とsecret設定を維持してimageを更新し、Cloud Run revision labelにも同じcommitを記録してからread-backを実行する。
-read-backはtraffic 100%のrevisionをCloud Runから引き直し、そのrevisionのimage tagから得たcommit、revision label、`/health`の`commit`、現在のGitHub mainを比較する。
-一致すればexit 0となる。image tagから40文字のcommitを取得できない場合は`imageMetadataMissing`、imageとhealthが一致しない場合は`imageVsHealth`を含むdriftをJSONで示してexit 2となる。main、revision label、配信revisionの不一致も同じくexit 2である。
+deploy scriptはpreviewで確定した`linux/amd64` digestを`--image`へ渡すため、previewとdeployの間にtagが移動しても別imageをdeployしない。
+既存の環境変数とsecret設定を維持してimageを更新し、Cloud Run revision labelにも同じcommitを記録してからread-backを実行する。
+read-backはtraffic 100%のrevisionをCloud Runから引き直す。
+Cloud Run revision APIの`status.imageDigest`または`spec.containers[0].image`はtagではなく`@sha256:...`形式で返るため、そのdigestをpreviewで確定した対象digestと比較する。
+同時にrevision label、`/health`の`commit`、現在のGitHub mainを比較する。
+一致すればexit 0となる。
+対象tagを解決できない場合は`targetImageMetadataMissing`、配信revisionからdigestを取得できない場合は`imageMetadataMissing`、対象と配信digestが一致しない場合は`imageVsTarget`を含むdriftをJSONで示してexit 2となる。
+main、revision label、配信revisionの不一致も同じくexit 2である。
 
 いつでも次のread-only確認を実行できる。
 
@@ -185,7 +193,7 @@ deploy後はこのstatusがdriftなしであることを確認する。
 ### rollback
 
 自動rollbackは行わない。
-Cloud Runに残っている戻し先revisionと、そのrevisionが参照するimageをpreviewで確認し、操作者がrevision名と`--yes`を明示した場合だけtrafficを100%切り替える。
+Cloud Runに残っている戻し先revisionと、そのrevisionが参照するdigest形式のimage、revision labelのcommitをpreviewで確認し、操作者がrevision名と`--yes`を明示した場合だけtrafficを100%切り替える。
 
 ```sh
 mise run slack:release:rollback -- --revision arttra-work-slack-00047-abc
@@ -193,7 +201,7 @@ mise run slack:release:rollback -- --revision arttra-work-slack-00047-abc --yes
 ```
 
 1行目はrollback planを表示して停止する。
-2行目だけがtrafficを変更し、変更後に同じread-backを行う。
+2行目だけがtrafficを変更し、変更後に同じdigest read-backを行う。
 旧revisionのcommitは現在のmainと異なるため、意図したrollback後のstatusはdriftを検出してexit 2となる。
 Issueと障害記録へrollback理由、対象revision、image、health commit、復旧判断を残す。
 
