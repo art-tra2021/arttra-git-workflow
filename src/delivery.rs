@@ -42,8 +42,10 @@ pub struct GitHubIssueMetadata {
     pub title: String,
     pub kind: String,
     pub url: String,
+    pub state: String,
     pub merge_mode: Option<String>,
     pub parent: Option<GitHubIssueParent>,
+    pub sub_issues: Vec<GitHubIssueChild>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -53,13 +55,31 @@ pub struct GitHubIssueParent {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GitHubIssueChild {
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub url: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawGitHubIssueConnection {
+    #[serde(default)]
+    nodes: Vec<GitHubIssueChild>,
+}
+
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RawGitHubIssueMetadata {
     number: u64,
     title: String,
     url: String,
+    state: String,
     labels: Vec<RawGitHubLabel>,
     parent: Option<GitHubIssueParent>,
+    sub_issues: RawGitHubIssueConnection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,7 +388,7 @@ pub fn github_issue_metadata(reference: &str) -> Result<GitHubIssueMetadata> {
             "view",
             &issue,
             "--json",
-            "number,title,url,labels,parent",
+            "number,title,url,state,labels,parent,subIssues",
         ])
         .output()
         .with_context(|| format!("Issue `{reference}`を確認できませんでした"))?;
@@ -418,8 +438,10 @@ pub fn github_issue_metadata(reference: &str) -> Result<GitHubIssueMetadata> {
         title: raw.title,
         kind: kinds[0].to_owned(),
         url: raw.url,
+        state: raw.state,
         merge_mode,
         parent: raw.parent,
+        sub_issues: raw.sub_issues.nodes,
     })
 }
 
@@ -623,16 +645,20 @@ mod tests {
             title: "Task".into(),
             kind: "task".into(),
             url: "https://github.com/example/repo/issues/71".into(),
+            state: "OPEN".into(),
             merge_mode: Some("merge/review".into()),
             parent: None,
+            sub_issues: Vec::new(),
         };
         let work = GitHubIssueMetadata {
             number: 72,
             title: "Work".into(),
             kind: "work".into(),
             url: "https://github.com/example/repo/issues/72".into(),
+            state: "OPEN".into(),
             merge_mode: None,
             parent: None,
+            sub_issues: Vec::new(),
         };
         assert!(require_issue_kind(&task, &["task"], "PRの対象").is_ok());
         assert!(require_issue_kind(&work, &["task"], "PRの対象").is_err());

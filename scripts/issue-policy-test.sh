@@ -12,6 +12,8 @@ make_issue() {
 	local parent_url="$3"
 	local child_count="$4"
 	local closing_prs="$5"
+	local state="${6:-OPEN}"
+	local open_child_count="${7:-0}"
 	jq -cn \
 		--argjson number "$number" \
 		--arg url "https://github.com/test/repo/issues/${number}" \
@@ -19,12 +21,18 @@ make_issue() {
 		--arg parent "$parent_url" \
 		--argjson child_count "$child_count" \
 		--argjson closing_prs "$closing_prs" \
+		--arg state "$state" \
+		--argjson open_child_count "$open_child_count" \
 		'{
       number: $number,
       url: $url,
+      state: $state,
       labels: $labels,
       parent: (if $parent == "" then null else {url: $parent} end),
-      subIssues: {nodes: [], totalCount: $child_count},
+      subIssues: {
+        nodes: [range(0; $child_count) | {state: (if . < $open_child_count then "OPEN" else "CLOSED" end)}],
+        totalCount: $child_count
+      },
       closedByPullRequestsReferences: $closing_prs
     }'
 }
@@ -141,3 +149,19 @@ run_policy "work-closed-by-pr" 1 "AR-ISSUE-008"
 valid_fixtures
 MOCK_PARENT_JSON="$(make_issue 41 'type/work' "" 1 '[]')"
 run_policy "invalid-grandparent-chain" 1 "AR-ISSUE-004"
+
+valid_fixtures
+MOCK_ROOT_JSON="$(make_issue 42 'type/work' "https://github.com/test/repo/issues/40" 10 '[]' 'OPEN' 10)"
+run_policy "parent-review-threshold-is-advisory" 0 "AR-ISSUE-020"
+
+valid_fixtures
+MOCK_ROOT_JSON="$(make_issue 42 'type/business' "https://github.com/test/repo/issues/40" 21 '[]' 'OPEN' 4)"
+run_policy "parent-strong-threshold-is-advisory" 0 "AR-ISSUE-022"
+if grep -Fq 'AR-ISSUE-020' "${test_dir}/parent-strong-threshold-is-advisory.output"; then
+	printf 'not ok - strong threshold must not duplicate the review notice\n' >&2
+	exit 1
+fi
+
+valid_fixtures
+MOCK_ROOT_JSON="$(make_issue 42 'type/work' "https://github.com/test/repo/issues/40" 4 '[]' 'CLOSED' 2)"
+run_policy "closed-parent-with-open-tasks-is-advisory" 0 "AR-ISSUE-021"
