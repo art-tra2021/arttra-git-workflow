@@ -8,31 +8,57 @@ Slackは正本ではなく、GitHub IssuesとGitHub Projectsを人間が追い�
 ## 本番構成
 
 - GitHub Organization: `art-tra2021`
-- GitHub App: `ART-TRA Work`（App ID `4460459`）
+- active ingress: Organization webhook（hook ID `660129617`）
+- inactive ingress: repository webhook（hook ID `660198095`）
+- GitHub App: `ART-TRA Work`（App ID `4460459`、default eventsは空、App hookなし）
 - GCP project: `bmarumado`
 - Cloud Run service: `arttra-work-slack`（`asia-northeast1`）
 - Slack workspace: `art-trahq`（team ID `T03T1GXHYH1`）
 - 作業通知channel: `C0BK0RGD87J`
 
-GitHub Webhookは`/github/events`で署名検証した後、Cloud Tasksを介して`/internal/github-events`へ渡す。
+本番のGitHubイベントは、Organization webhook `660129617`だけが`/github/events`へ配信する。
+`/github/events`は署名を検証した後、Cloud Tasksを介して`/internal/github-events`へ渡す。
 生のWebhook payloadをSlackへ転送してはならない。
 workerはGitHubから最新状態を再取得し、日本語の要約と検証済みアカウントのnative mentionだけを投稿する。
 
 ## 必須イベント
 
-次のイベントを購読する。
+Organization webhook `660129617`は、次の8イベントを購読する。
 
+- `check_run`
+- `check_suite`
 - `issues`
 - `issue_comment`
+- `projects_v2_item`
 - `pull_request`
 - `pull_request_review`
 - `pull_request_review_comment`
-- `check_run`
-- `check_suite`
 
-GitHub App本体のWebhook設定が利用できない場合、対象repositoryへ同じURL、secret、イベントを持つ署名付きrepository webhookを設定してよい。
-二重配信されてもdelivery IDとイベントfingerprintで重複投稿を防ぐ。
-GitHub App本体へ復帰した後もrepository webhookを無断で削除せず、管理者が配信実績を確認して切替を判断する。
+repository webhook `660198095`はinactiveのまま維持する。
+GitHub Appのdefault eventsを空とし、App hookを作成しない状態も維持する。
+これらはOrganization webhookとの重複配信を防ぐための意図的な状態であり、障害と判定しない。
+GitHub AppはAPI認証に利用するが、Webhook ingressとしては利用しない。
+ingressを切り替える場合は、変更前後のdeliveryを確認し、同時にactiveとなる経路が一つだけになる手順を別途定める。
+
+## Webhook ingressの確認
+
+本番構成をread-backするときは、GitHub OrganizationのWebhooks設定でhook ID `660129617`を開き、activeであることと必須8イベントを確認する。
+次にrepositoryのWebhooks設定でhook ID `660198095`がinactiveであることを確認する。
+GitHub Appの設定ではdefault eventsが空であり、App hookが存在しないことを確認する。
+後者二つをactiveに変更して確認してはならない。
+
+署名と受理結果は、Organization webhook `660129617`のRecent Deliveriesで次の順に確認する。
+
+1. 対象deliveryのrequest headerに`X-GitHub-Delivery`、`X-GitHub-Event`、`X-Hub-Signature-256: sha256=...`があることを確認する。
+2. `X-GitHub-Event`が必須8イベントのいずれかであることを確認する。
+3. response codeが`202`であり、response bodyの`ok`が`true`、`queued`がboolean、`schemaVersion`が`1`であることを確認する。
+4. `queued: true`ならCloud Tasksへの新規投入、`queued: false`なら同じdelivery IDの重複排除が働いた結果として扱う。
+5. Cloud Run logで同じdelivery IDの署名エラーがなく、`queued`の値とCloud Tasksの状態が一致することを確認する。
+
+受信処理はraw bodyとWebhook secretからHMAC-SHA256を計算し、`X-Hub-Signature-256`と定数時間で比較する。
+署名が一致しない場合は`401 invalid_signature`となるため、`202`として受理してはならない。
+headerまたはJSONが不正な場合は`400`、Cloud Tasksへ投入できない場合は`503 queue_unavailable`となる。
+確認時にWebhook secretやpayload本文をIssue、PR、Slackへ転記してはならない。
 
 ## スレッド規則
 
@@ -114,7 +140,7 @@ fallback textにも同じ絵文字と見出しを含めるが、本文中の装�
 8. 通常のセルフマージ実行者では初回だけchannelへ展開され、`suppress_self_merge_channel_broadcast`のgrant対象者では初回からthread内だけになることを確認する。どちらも停止ボタンがあり、CI通過通知はthread内だけであることを確認する。
 9. Intake、Work、Business、Taskの作成時に、担当者表示を含む最初の概要とは別の初期assignment返信がないことを確認する。その後のunassignmentと再assignmentは通知されることを確認する。
 10. Task作成からPR完了までの通知が同じWorkまたはBusinessスレッドにあり、WorkまたはBusiness概要、Task概要、後続eventの順で、同じイベントの重複通知がないことを確認する。
-11. GitHub Webhook delivery、Cloud Run log、Cloud Tasksの失敗件数を確認する。
+11. Organization webhook `660129617`のdeliveryが`202`であること、Cloud Run log、Cloud Tasksの失敗件数を確認する。
 
 Slack APIでも、WorkまたはBusiness親投稿は`ts == thread_ts`、Task作成・PR作成・レビュー依頼は`thread_ts == WorkまたはBusiness親投稿のts`かつ`ts != thread_ts`であることを確認する。
 Task作成またはPR作成・レビュー依頼が`ts == thread_ts`なら平投稿が再発しているため、合格にしてはならない。
