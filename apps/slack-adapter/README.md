@@ -70,8 +70,11 @@ mise run slack:list:json
 2回目以降はGitHub Issue URLを安定キーとして、既存行の更新、新規行の追加、Projectから外れた行の削除を行う。
 GitHub OAuthで対応付け済みの担当者はSlackのnative user列へ反映する。
 未連携者の担当者欄は空欄とし、表示名やメールから推測しない。
-旧版のList本体は削除せず`ART-TRA Work（旧表示）`へ改名する。
-scope導入前の共有Listは、過去のprivate項目を残さないようchannel accessと全行を除去してから、Slack標準の担当者・期限日を使う5列版の`仕事一覧`へ切り替える。
+旧版のListは現行の`仕事一覧`とは別のIDであることを検証し、channel accessと全行を除去して`ART-TRA Work（旧表示）`へ改名する。
+scope導入前の共有Listも同じ処理を完了してから、Slack標準の担当者・期限日を使う5列版の`仕事一覧`へ切り替える。
+Slack Lists APIにはList本体またはchannel tabを削除するmethodがなく、List IDを`canvases.delete`へ渡すと`canvas_not_found`になる。
+そのためchannel管理者はSlack UIで旧Listタブを削除し、現行の`仕事一覧`を追加する。
+`conversations.info`の`channel.properties.tabs`を再取得し、旧List IDがなく現行List IDだけが`type=list`として残るまで移行完了にしない。
 起動中のadapterでは、同期先channelから`/ar project sync`を実行しても同じ処理を呼び出せる。
 `/ar list sync`と従来の`/ar canvas sync`も移行用aliasとして同じ処理を呼ぶ。
 同じchannelへの同期はleaseで直列化し、Webhook、定期同期、人間の手動操作が重なって行を重複作成しない。
