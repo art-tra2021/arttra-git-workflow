@@ -66,13 +66,14 @@ export class GitHubWebhookProcessor {
         await this.reviews.process(target.repository, target.pullRequestNumber, {
           reRequestChanges: target.reRequestChanges,
           sourceDeliveryId: job.deliveryId,
+          actorLogin: target.actorLogin,
         });
       }
       if (this.lifecycle) {
         await this.lifecycle.process(job);
       }
       if (this.notifications && shouldRefreshWorkNotifications(job)) {
-        await this.notifications.notifyImmediate(job.deliveryId);
+        await this.notifications.notifyImmediate(job.deliveryId, eventActorLogin(job));
       }
       await this.completeDelivery(job, lease);
     } catch (error) {
@@ -293,6 +294,7 @@ function reviewTarget(job: GitHubWebhookJob): {
   repository: string;
   pullRequestNumber: number;
   reRequestChanges: boolean;
+  actorLogin: string;
 } | null {
   if (job.event !== "pull_request" && job.event !== "pull_request_review") {
     return null;
@@ -301,6 +303,7 @@ function reviewTarget(job: GitHubWebhookJob): {
     action?: string;
     repository?: { full_name?: string };
     pull_request?: { number?: number };
+    sender?: { login?: string };
   };
   const allowedActions =
     job.event === "pull_request"
@@ -311,10 +314,12 @@ function reviewTarget(job: GitHubWebhookJob): {
   }
   const repository = payload.repository?.full_name ?? "";
   const pullRequestNumber = payload.pull_request?.number ?? 0;
+  const actorLogin = payload.sender?.login ?? "";
   if (
     !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
     !Number.isSafeInteger(pullRequestNumber) ||
-    pullRequestNumber < 1
+    pullRequestNumber < 1 ||
+    !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(actorLogin)
   ) {
     throw new Error("GitHub webhookからrepositoryまたはPR番号を読み取れませんでした。");
   }
@@ -322,5 +327,16 @@ function reviewTarget(job: GitHubWebhookJob): {
     repository,
     pullRequestNumber,
     reRequestChanges: job.event === "pull_request" && payload.action === "synchronize",
+    actorLogin,
   };
+}
+
+function eventActorLogin(job: GitHubWebhookJob): string | null {
+  if (!job.payload || typeof job.payload !== "object" || Array.isArray(job.payload)) return null;
+  const sender = (job.payload as { sender?: unknown }).sender;
+  if (!sender || typeof sender !== "object" || Array.isArray(sender)) return null;
+  const login = (sender as { login?: unknown }).login;
+  return typeof login === "string" && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login)
+    ? login
+    : null;
 }

@@ -16,6 +16,9 @@ Slackは正本ではなく、GitHub IssuesとGitHub Projectsを人間が追い�
 - Slack workspace: `art-trahq`（team ID `T03T1GXHYH1`）
 - 作業通知channel: `C0BK0RGD87J`
 
+対応必須DMにはBot tokenの`im:write`が必要であり、DM outboxの照合には`im:history`が必要である。
+manifest変更後はSlack Appを再インストールし、既存の`channels:history`と`groups:history`を含む4 scopeをread-backしてから本番へ反映する。
+
 本番のGitHubイベントは、Organization webhook `660129617`だけが`/github/events`へ配信する。
 `/github/events`は署名を検証した後、Cloud Tasksを介して`/internal/github-events`へ渡す。
 生のWebhook payloadをSlackへ転送してはならない。
@@ -93,6 +96,14 @@ Issue作成時点の担当者は最初のIssue概要に含め、初期`assigned`
 | マージ | Issue担当者 |
 | Issue完了 | Issue担当者 |
 
+対応必須DMの対象は、個人reviewerへのレビュー依頼、reviewer未指定の承認待ち、通常のCI失敗、`BLOCKED`、`OVERDUE`の5区分である。
+レビュー依頼では個人reviewerだけをDM対象とし、Issue担当者とGitHub team reviewerは対象にしない。
+差し戻し、conflict、期限接近、期限当日、情報通知、成功通知はDMへ転送しない。
+DMは実行者本人を除外し、channel通知intentとrecipient Slack user IDから別のoutbox intentを作るため、Webhook再送で増えない。
+DM失敗時も既存のchannelまたはthread通知は残り、DM intentだけが監査と確認付き再送の対象になる。
+この変更では既存のchannelまたはthread投稿の件数を変えない。
+channelまたはthread側の通知削減はIssue #159へ分離し、会議の決定記録が付くまで実装しない。
+
 実行者は通知先ではなく出来事の帰属表示なので、常にplainな`@github-login`で表示する。
 native mentionは、確認や対応が必要なrecipientだけに付け、Issue作成、自己assignment、自己reviewer指定、自己コメントなどの実行者本人には付けない。
 PR PolicyはGitHub Actionsのerror annotationへ`AR-PR-*` codeを出し、Slack adapterはChecks read APIで失敗runのannotationを再取得する。
@@ -140,7 +151,9 @@ fallback textにも同じ絵文字と見出しを含めるが、本文中の装�
 8. 通常のセルフマージ実行者では初回だけchannelへ展開され、`suppress_self_merge_channel_broadcast`のgrant対象者では初回からthread内だけになることを確認する。どちらも停止ボタンがあり、CI通過通知はthread内だけであることを確認する。
 9. Intake、Work、Business、Taskの作成時に、担当者表示を含む最初の概要とは別の初期assignment返信がないことを確認する。その後のunassignmentと再assignmentは通知されることを確認する。
 10. Task作成からPR完了までの通知が同じWorkまたはBusinessスレッドにあり、WorkまたはBusiness概要、Task概要、後続eventの順で、同じイベントの重複通知がないことを確認する。
-11. Organization webhook `660129617`のdeliveryが`202`であること、Cloud Run log、Cloud Tasksの失敗件数を確認する。
+11. 個人reviewerへのレビュー依頼、reviewer未指定の承認待ち、通常のCI失敗、`BLOCKED`、`OVERDUE`で、対処者本人のDMが一件あり、同じeventの再配信では増えないことを確認する。実行者本人だけがrecipientの場合はDMが0件であることも確認する。差し戻し、conflict、期限接近、期限当日はDMが0件であることを確認する。
+12. DM送信を一度失敗させ、既存のchannelまたはthread通知が一件残り、DM intentだけをoutboxの監査・照合・確認付き再送で復旧できることを確認する。
+13. Organization webhook `660129617`のdeliveryが`202`であること、Cloud Run log、Cloud Tasksの失敗件数を確認する。
 
 Slack APIでも、WorkまたはBusiness親投稿は`ts == thread_ts`、Task作成・PR作成・レビュー依頼は`thread_ts == WorkまたはBusiness親投稿のts`かつ`ts != thread_ts`であることを確認する。
 Task作成またはPR作成・レビュー依頼が`ts == thread_ts`なら平投稿が再発しているため、合格にしてはならない。

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { NotificationIntentMetadata } from "../src/notification-outbox.ts";
 import { NotificationThreadService } from "../src/notification-thread-service.ts";
 import type { GitHubIssueContext } from "../src/review-types.ts";
 import type { StateStore } from "../src/state-store.ts";
@@ -96,6 +97,32 @@ describe("WorkNotificationService", () => {
     ]);
     expect(await service.notifyDeadlines()).toBe(1);
     expect(sent.at(-1)).toEqual({ code: "DUE_SOON", kind: "deadline" });
+  });
+
+  test("BLOCKEDのevent実行者をDM除外計画へ引き渡し、既存通知は一件送る", async () => {
+    const values = new Map<string, unknown>();
+    const sent: NotificationIntentMetadata[] = [];
+    const service = new WorkNotificationService(
+      { loadProjectItems: async () => [workItem("BLOCKED", "immediate")] },
+      memoryStore(values),
+      {
+        notify: async (_item, _context, metadata) => {
+          if (metadata) sent.push(metadata);
+          return { messageTs: "260.1" };
+        },
+        digest: async () => {},
+      },
+      Date.now,
+      async (login) => (login === "alice" ? "UALICE" : null),
+    );
+
+    expect(await service.notifyImmediate("delivery-blocked", "alice")).toBe(1);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.requiredAction).toEqual({
+      kind: "blocker",
+      recipientSlackUserIds: ["UALICE"],
+      actorSlackUserId: "UALICE",
+    });
   });
 
   test("期限接近を一度だけ担当者へ通知する", async () => {
@@ -227,7 +254,11 @@ describe("WorkNotificationService", () => {
 
   test("期限当日と超過への遷移を同じスレッドで一度ずつ通知する", async () => {
     const values = new Map<string, unknown>();
-    const sent: Array<{ code: HumanWorkItem["reasonCode"]; threadTs: string | null }> = [];
+    const sent: Array<{
+      code: HumanWorkItem["reasonCode"];
+      threadTs: string | null;
+      requiredAction: NotificationIntentMetadata["requiredAction"];
+    }> = [];
     let now = Date.parse("2026-08-02T03:00:00Z");
     const item = workItem("ACTIVE_WORK", "digest");
     item.targetDate = "2026-08-04";
@@ -235,13 +266,18 @@ describe("WorkNotificationService", () => {
       { loadProjectItems: async () => [item] },
       memoryStore(values),
       {
-        notify: async (current, context) => {
-          sent.push({ code: current.reasonCode, threadTs: context.threadTs });
+        notify: async (current, context, metadata) => {
+          sent.push({
+            code: current.reasonCode,
+            threadTs: context.threadTs,
+            requiredAction: metadata?.requiredAction,
+          });
           return { messageTs: context.threadTs ?? "500.1" };
         },
         digest: async () => {},
       },
       () => now,
+      async (login) => (login === "alice" ? "UALICE" : null),
     );
 
     expect(await service.notifyDeadlines()).toBe(1);
@@ -251,9 +287,17 @@ describe("WorkNotificationService", () => {
     now = Date.parse("2026-08-05T03:00:00Z");
     expect(await service.notifyDeadlines()).toBe(1);
     expect(sent).toEqual([
-      { code: "DUE_SOON", threadTs: null },
-      { code: "DUE_TODAY", threadTs: "500.1" },
-      { code: "OVERDUE", threadTs: "500.1" },
+      { code: "DUE_SOON", threadTs: null, requiredAction: undefined },
+      { code: "DUE_TODAY", threadTs: "500.1", requiredAction: undefined },
+      {
+        code: "OVERDUE",
+        threadTs: "500.1",
+        requiredAction: {
+          kind: "overdue",
+          recipientSlackUserIds: ["UALICE"],
+          actorSlackUserId: null,
+        },
+      },
     ]);
   });
 

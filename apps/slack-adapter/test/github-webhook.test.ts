@@ -129,11 +129,24 @@ describe("GitHub webhook gateway", () => {
 
 describe("GitHubWebhookProcessor", () => {
   test("review対象eventを一度だけ処理する", async () => {
-    const calls: string[] = [];
+    const calls: Array<{
+      target: string;
+      actorLogin?: string;
+      reRequestChanges?: boolean;
+      sourceDeliveryId?: string;
+    }> = [];
     const store = memoryStore();
     const reviews = {
-      process: async (repository: string, number: number) => {
-        calls.push(`${repository}#${number}`);
+      process: async (
+        repository: string,
+        number: number,
+        options: {
+          actorLogin?: string;
+          reRequestChanges?: boolean;
+          sourceDeliveryId?: string;
+        } = {},
+      ) => {
+        calls.push({ target: `${repository}#${number}`, ...options });
         return null;
       },
     } as unknown as PullRequestReviewService;
@@ -146,11 +159,19 @@ describe("GitHubWebhookProcessor", () => {
         action: "opened",
         repository: { full_name: "example/repo" },
         pull_request: { number: 28 },
+        sender: { login: "initiator" },
       },
     };
     await processor.process(job);
     await processor.process(job);
-    expect(calls).toEqual(["example/repo#28"]);
+    expect(calls).toEqual([
+      {
+        target: "example/repo#28",
+        actorLogin: "initiator",
+        reRequestChanges: false,
+        sourceDeliveryId: "delivery-2",
+      },
+    ]);
   });
 
   test("review_requestedで手動指定reviewerのreview処理を行う", async () => {
@@ -171,6 +192,7 @@ describe("GitHubWebhookProcessor", () => {
         action: "review_requested",
         repository: { full_name: "example/repo" },
         pull_request: { number: 28 },
+        sender: { login: "reviewer" },
       },
     };
 
@@ -198,6 +220,7 @@ describe("GitHubWebhookProcessor", () => {
         action: "ready_for_review",
         repository: { full_name: "example/repo" },
         pull_request: { number: 119 },
+        sender: { login: "author" },
       },
     };
 
@@ -237,6 +260,33 @@ describe("GitHubWebhookProcessor", () => {
     });
 
     expect(syncCount).toBe(2);
+  });
+
+  test("Work通知へdelivery IDとGitHub event実行者を渡す", async () => {
+    const store = memoryStore();
+    const calls: Array<{ deliveryId?: string; actorLogin?: string | null }> = [];
+    const notifications = {
+      notifyImmediate: async (deliveryId?: string, actorLogin?: string | null) => {
+        calls.push({
+          ...(deliveryId ? { deliveryId } : {}),
+          ...(actorLogin !== undefined ? { actorLogin } : {}),
+        });
+        return 1;
+      },
+    } as unknown as WorkNotificationService;
+    const processor = new GitHubWebhookProcessor(null, store, undefined, notifications);
+
+    await processor.process({
+      schemaVersion: 1,
+      deliveryId: "delivery-assigned",
+      event: "issues",
+      payload: {
+        action: "assigned",
+        sender: { login: "alice" },
+      },
+    });
+
+    expect(calls).toEqual([{ deliveryId: "delivery-assigned", actorLogin: "alice" }]);
   });
 
   test("CI結果はlifecycle通知へ一本化し、汎用作業通知を重ねない", async () => {
@@ -472,6 +522,7 @@ describe("GitHubWebhookProcessor", () => {
         action: "opened",
         repository: { full_name: "example/repo" },
         pull_request: { number: 41 },
+        sender: { login: "author" },
       },
     };
 

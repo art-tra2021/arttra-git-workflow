@@ -30,6 +30,7 @@ export interface WorkNotificationContext {
   kind: "state" | "deadline";
   threadTs: string | null;
   slackUserId: string | null;
+  actorSlackUserId?: string | null;
 }
 
 export interface WorkNotificationResult {
@@ -88,8 +89,9 @@ export class WorkNotificationService {
     this.github = github;
   }
 
-  async notifyImmediate(sourceDeliveryId?: string): Promise<number> {
+  async notifyImmediate(sourceDeliveryId?: string, actorLogin?: string | null): Promise<number> {
     const items = await this.source.loadProjectItems();
+    const actorSlackUserId = actorLogin ? await this.resolveSlackUserId(actorLogin) : null;
     let notified = 0;
     for (const item of items) {
       // CI失敗はcheck_run/check_suiteのlifecycle通知だけが扱う。周辺eventから再通知しない。
@@ -105,10 +107,15 @@ export class WorkNotificationService {
       if (previous?.fingerprint === fingerprint) {
         continue;
       }
-      const sent = await this.notifyThreaded(item, "state", {
-        intentId: notificationIntentId({ kind: "work-state", issueUrl: item.url, fingerprint }),
-        ...(sourceDeliveryId ? { sourceDeliveryId } : {}),
-      });
+      const sent = await this.notifyThreaded(
+        item,
+        "state",
+        {
+          intentId: notificationIntentId({ kind: "work-state", issueUrl: item.url, fingerprint }),
+          ...(sourceDeliveryId ? { sourceDeliveryId } : {}),
+        },
+        actorSlackUserId,
+      );
       if (!sent) continue;
       await this.store.set<WorkNotificationState>(NOTIFICATION_NAMESPACE, item.url, {
         schemaVersion: 1,
@@ -183,8 +190,28 @@ export class WorkNotificationService {
     item: HumanWorkItem,
     kind: WorkNotificationContext["kind"],
     metadata: NotificationIntentMetadata,
+    actorSlackUserId: string | null = null,
   ): Promise<boolean> {
     const slackUserId = item.owner ? await this.resolveSlackUserId(item.owner) : null;
+    const requiredActionKind =
+      item.reasonCode === "BLOCKED" ? "blocker" : item.reasonCode === "OVERDUE" ? "overdue" : null;
+    const notificationMetadata: NotificationIntentMetadata = {
+      ...metadata,
+      ...(requiredActionKind
+        ? {
+            requiredAction: {
+              kind: requiredActionKind,
+              recipientSlackUserIds: slackUserId ? [slackUserId] : [],
+              actorSlackUserId,
+            },
+          }
+        : {}),
+    };
+    const context: Omit<WorkNotificationContext, "threadTs"> = {
+      kind,
+      slackUserId,
+      ...(actorSlackUserId ? { actorSlackUserId } : {}),
+    };
     if (this.github) {
       const reference = parseIssueReferenceUrl(item.url);
       if (!reference) return false;
@@ -198,12 +225,12 @@ export class WorkNotificationService {
       if (threadRootIssue.url !== issue.url) {
         const threadTs = await this.threads.rootTs(threadRootIssue.url);
         if (!threadTs) return false;
-        await this.notifier.notify(item, { kind, threadTs, slackUserId }, metadata);
+        await this.notifier.notify(item, { ...context, threadTs }, notificationMetadata);
         return true;
       }
     }
     await this.threads.publish(item.url, (threadTs) =>
-      this.notifier.notify(item, { kind, threadTs, slackUserId }, metadata),
+      this.notifier.notify(item, { ...context, threadTs }, notificationMetadata),
     );
     return true;
   }

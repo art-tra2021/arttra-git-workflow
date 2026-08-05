@@ -163,7 +163,8 @@ mise run slack:outbox:replay -- \
 
 `AR_NOTIFICATION_REPLAY_OPERATOR_IDS`にはreplayを許可するSlack user IDを明示する。
 未設定者は監査だけ利用でき、replayは拒否される。
-Slack Appには照合用の`channels:history`と`groups:history`を追加し、scope変更後にワークスペースへ再インストールする。
+Slack Appにはchannel照合用の`channels:history`と`groups:history`、DM送信と照合用の`im:write`と`im:history`を追加する。
+scope変更後はワークスペースへ再インストールし、Bot tokenへ4 scopeが反映されたことを確認する。
 照合結果、operator、実行前後のrevision、失敗codeは追記型監査logへ保存する。
 旧GitHub deliveryは再送payloadを持たないため監査だけを行い、自動変換や自動再送はしない。
 
@@ -258,6 +259,13 @@ Project項目、Issue、PR、reviewの変更を処理したworkerはGitHub Proje
 通知済み状態はIssue URLと判定内容のfingerprintで重複排除し、通常の進行中作業は即時投稿しない。
 Intakeの受付投稿とWorkまたはBusiness単位の親投稿tsを共通state storeへ保存する。
 Task作成、期限、blocker、CI失敗、conflictなどの続報は親WorkまたはBusinessのthreadへ返信し、Task単位の親投稿をchannelへ増やさない。
+対応必須DMの対象は、個人reviewerへのレビュー依頼、reviewer未指定の承認待ち、通常のCI失敗、`BLOCKED`、`OVERDUE`の5区分である。
+レビュー依頼は個人reviewerだけへ送り、Issue担当者とGitHub team reviewerはDM対象にしない。
+差し戻し、conflict、期限接近、期限当日、情報通知、成功通知はDM対象にしない。
+DMは実行者本人を除外し、channel通知intentとSlack user IDの組を独立したoutbox intentにして一度だけ送る。
+DMが失敗しても先に完了したchannelまたはthread投稿を取り消さず、通知outboxの監査、照合、確認付き再送で個別に復旧する。
+この変更では既存のchannelまたはthread投稿の件数を変えない。
+本人単独の通常操作を含む通知削減は、Issue #159に会議の決定記録が付くまで行わない。
 日次digestはIssue別threadへ入れず、独立した一覧投稿とする。
 
 PR作成時は、GitHubが`Closes`から解決したprimary closing Taskがちょうど1件であることを確認し、そのTask本文の予定reviewer、変更fileに対するCODEOWNERS、Rulesetを再取得する。

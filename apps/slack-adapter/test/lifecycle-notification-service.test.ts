@@ -7,6 +7,7 @@ import {
   type LifecycleNotification,
   LifecycleNotificationService,
 } from "../src/lifecycle-notification-service.ts";
+import type { NotificationIntentMetadata } from "../src/notification-outbox.ts";
 import { NotificationThreadService } from "../src/notification-thread-service.ts";
 import type {
   GitHubIssueContext,
@@ -250,7 +251,6 @@ describe("LifecycleNotificationService", () => {
         slackUserIds: ["UOWNER", "UMENTIONED"],
       },
     });
-
     expect(await harness.service.process(issueClosedJob())).toBe(1);
     expect(harness.sent[3]).toMatchObject({
       threadTs: "900.1",
@@ -505,6 +505,11 @@ describe("LifecycleNotificationService", () => {
         actionUrl: "https://github.example/checks/501",
       },
     });
+    expect(harness.sent[2]?.metadata?.requiredAction).toEqual({
+      kind: "ci-failed",
+      recipientSlackUserIds: ["UAUTHOR", "UOWNER"],
+      actorSlackUserId: "UAUTHOR",
+    });
   });
 
   test("AR-PR-004だけでreviewer指定済みならCI失敗mentionを重ねない", async () => {
@@ -531,6 +536,11 @@ describe("LifecycleNotificationService", () => {
       slackUserIds: ["UAUTHOR"],
       summary: "PRのreviewer指定が必要です。",
       nextAction: "PR作成者以外のreviewerを指定してレビューを依頼する",
+    });
+    expect(harness.sent[2]?.metadata?.requiredAction).toEqual({
+      kind: "approval-wait",
+      recipientSlackUserIds: ["UAUTHOR"],
+      actorSlackUserId: null,
     });
   });
 
@@ -574,7 +584,11 @@ async function createHarness(
 ) {
   const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-lifecycle-")));
   const github = new FakeLifecycleClient();
-  const sent: Array<{ notification: LifecycleNotification; threadTs: string | null }> = [];
+  const sent: Array<{
+    notification: LifecycleNotification;
+    threadTs: string | null;
+    metadata?: NotificationIntentMetadata;
+  }> = [];
   const ids: Record<string, string> = {
     author: "UAUTHOR",
     mentioned: "UMENTIONED",
@@ -587,8 +601,8 @@ async function createHarness(
     store,
     new NotificationThreadService(store, () => Date.parse("2026-08-02T00:00:00Z")),
     {
-      notify: async (notification, threadTs) => {
-        sent.push({ notification, threadTs });
+      notify: async (notification, threadTs, metadata) => {
+        sent.push({ notification, threadTs, ...(metadata ? { metadata } : {}) });
         return { messageTs: threadTs ?? "900.1" };
       },
     },

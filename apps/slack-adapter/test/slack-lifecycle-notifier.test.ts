@@ -177,6 +177,41 @@ describe("SlackLifecycleNotifier", () => {
     });
   });
 
+  test("DMはIssue threadなしで本人だけへ送り、自己mentionを本文へ重ねない", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const notifier = new SlackLifecycleNotifier(
+      {
+        chat: {
+          postMessage: async (arguments_: Record<string, unknown>) => {
+            calls.push(arguments_);
+            return { ok: true, ts: "955.1" };
+          },
+        },
+      } as unknown as ConstructorParameters<typeof SlackLifecycleNotifier>[0],
+      "UOWNER",
+      { direct: true },
+    );
+
+    await notifier.notify(
+      {
+        ...notification("ci-failed"),
+        slackUserIds: ["UOWNER"],
+      },
+      null,
+      { intentId: "notification-direct" },
+    );
+
+    expect(calls[0]).toMatchObject({
+      channel: "UOWNER",
+      metadata: {
+        event_type: "arttra_notification",
+        event_payload: { intent_id: "notification-direct" },
+      },
+    });
+    expect(calls[0]).not.toHaveProperty("thread_ts");
+    expect(JSON.stringify(calls[0])).not.toContain("<@UOWNER>");
+  });
+
   test("セルフマージ予定には停止buttonを大きく表示する", async () => {
     const calls: Array<Record<string, unknown>> = [];
     const notifier = new SlackLifecycleNotifier(

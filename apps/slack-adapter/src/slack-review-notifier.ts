@@ -7,7 +7,6 @@ import {
   issueRootMentionLogins,
   issueRootNotification,
   resolveNotificationThreadRootIssue,
-  shouldSuppressActorMention,
 } from "./lifecycle-notification-service.ts";
 import { notificationIntentId } from "./notification-outbox.ts";
 import type { NotificationThreadService } from "./notification-thread-service.ts";
@@ -33,7 +32,7 @@ export class SlackReviewNotifier {
 
   async notify(
     model: ReviewRequestReadModel,
-    context: { sourceDeliveryId?: string } = {},
+    context: { sourceDeliveryId?: string; actorLogin?: string } = {},
   ): Promise<void> {
     if (model.closingIssueCount !== 1 || !model.primaryIssue?.labels.includes("type/task")) {
       return;
@@ -47,16 +46,20 @@ export class SlackReviewNotifier {
     if (!threadRootIssue) return;
     const assigneeLogins = issue.assigneeLogins;
     const assigneeSlackIds = await Promise.all(assigneeLogins.map(this.resolveSlackUserId));
+    const actorLogin = context.actorLogin ?? model.authorLogin;
     const [actorSlackUserId, rootResolvedUserIds, taskResolvedUserIds] = await Promise.all([
-      this.resolveSlackUserId(model.authorLogin),
+      this.resolveSlackUserId(actorLogin),
       Promise.all(issueRootMentionLogins(threadRootIssue).map(this.resolveSlackUserId)),
       Promise.all(issueRootMentionLogins(issue).map(this.resolveSlackUserId)),
     ]);
+    const reviewerSlackUserIds = [
+      ...new Set(
+        model.reviewers.flatMap((reviewer) => (reviewer.slackUserId ? [reviewer.slackUserId] : [])),
+      ),
+    ].filter((slackUserId) => slackUserId !== actorSlackUserId);
     const slackUserIds = [
       ...new Set([
-        ...model.reviewers.flatMap((reviewer) =>
-          reviewer.slackUserId ? [reviewer.slackUserId] : [],
-        ),
+        ...reviewerSlackUserIds,
         ...assigneeSlackIds.filter((value): value is string => value !== null),
       ]),
     ].filter((slackUserId) => slackUserId !== actorSlackUserId);
@@ -121,10 +124,8 @@ export class SlackReviewNotifier {
           kind: "review-requested",
           resource,
           pullRequest,
-          actorLogin: model.authorLogin,
-          actorSlackUserId: shouldSuppressActorMention("review-requested")
-            ? null
-            : actorSlackUserId,
+          actorLogin,
+          actorSlackUserId,
           slackUserIds,
           issueType: taskOpenedNotification.issueType,
           summary: "PRが作成され、レビュー依頼が設定されました。",
@@ -142,6 +143,11 @@ export class SlackReviewNotifier {
             updatedAt: model.updatedAt,
           }),
           ...(context.sourceDeliveryId ? { sourceDeliveryId: context.sourceDeliveryId } : {}),
+          requiredAction: {
+            kind: "review-requested",
+            recipientSlackUserIds: reviewerSlackUserIds,
+            actorSlackUserId,
+          },
         },
       ),
     );

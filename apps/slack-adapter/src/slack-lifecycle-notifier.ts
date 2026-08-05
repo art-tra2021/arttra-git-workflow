@@ -12,10 +12,16 @@ import { lifecycleTone, slackDivider, slackHeader, slackPlain } from "./slack-me
 export class SlackLifecycleNotifier implements LifecycleNotifier {
   private readonly client: Pick<WebClient, "chat">;
   private readonly channelId: string;
+  private readonly direct: boolean;
 
-  constructor(client: Pick<WebClient, "chat">, channelId: string) {
+  constructor(
+    client: Pick<WebClient, "chat">,
+    channelId: string,
+    options: { direct?: boolean } = {},
+  ) {
     this.client = client;
     this.channelId = channelId;
+    this.direct = options.direct ?? false;
   }
 
   async notify(
@@ -23,7 +29,7 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
     threadTs: string | null,
     metadata?: NotificationIntentMetadata,
   ): Promise<ThreadMessageResult> {
-    if (!threadTs && notification.kind !== "issue-opened") {
+    if (!this.direct && !threadTs && notification.kind !== "issue-opened") {
       throw new Error(
         `Issue threadが見つからないため、${notification.kind}通知のchannel直下への送信を停止しました。`,
       );
@@ -31,11 +37,13 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
     const recipientSlackUserIds = shouldSuppressActorMention(notification.kind)
       ? notification.slackUserIds.filter((userId) => userId !== notification.actorSlackUserId)
       : notification.slackUserIds;
-    const mentions = recipientSlackUserIds.map((userId) => `<@${userId}>`).join(" ");
+    const mentions = this.direct
+      ? ""
+      : recipientSlackUserIds.map((userId) => `<@${userId}>`).join(" ");
     const target = notification.pullRequest ?? notification.resource;
     const tone = lifecycleTone(notification.kind);
     const label = kindLabel(notification);
-    const replyBroadcast = isSelfMergeNotice(notification);
+    const replyBroadcast = !this.direct && isSelfMergeNotice(notification);
     const response = await this.client.chat.postMessage({
       channel: this.channelId,
       text: `${mentions ? `${mentions} ` : ""}${slackPlain(tone, notification.summary)} ${target.url}`,
@@ -89,7 +97,7 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
           ],
         },
       ],
-      ...(threadTs
+      ...(!this.direct && threadTs
         ? replyBroadcast
           ? { thread_ts: threadTs, reply_broadcast: true as const }
           : { thread_ts: threadTs, reply_broadcast: false as const }

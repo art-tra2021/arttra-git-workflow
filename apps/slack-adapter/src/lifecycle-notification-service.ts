@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { type GitHubCapabilityAccess, GitHubCapabilityGrants } from "./github-capabilities.ts";
 import { parseIssueRequester } from "./issue-requester.ts";
 import type { GitHubWebhookJob } from "./job-queue.ts";
-import { type NotificationIntentMetadata, notificationIntentId } from "./notification-outbox.ts";
+import {
+  type NotificationIntentMetadata,
+  type NotificationRequiredActionKind,
+  notificationIntentId,
+} from "./notification-outbox.ts";
 import type {
   NotificationThreadService,
   ThreadMessageResult,
@@ -405,6 +409,9 @@ export class LifecycleNotificationService {
           actionUrl,
           fingerprint({ headSha: context.headSha, conclusion, codes: diagnostics.policyCodes }),
           job.deliveryId,
+          null,
+          null,
+          approvalOnly ? "approval-wait" : "ci-failed",
         );
         continue;
       }
@@ -602,6 +609,7 @@ export class LifecycleNotificationService {
     sourceDeliveryId: string,
     selfMergeControl: { repository: string; issueNumber: number } | null = null,
     replyBroadcast: boolean | null = null,
+    requiredActionKind: NotificationRequiredActionKind | null = null,
   ): Promise<number> {
     const resource = issueResource(issue);
     const stateKey = `${resource.url}:${kind}`;
@@ -617,10 +625,11 @@ export class LifecycleNotificationService {
     const recipientLogins = suppressActorMention
       ? withoutLogin(mentionLogins, actorLogin)
       : mentionLogins;
-    const [slackUserIds, actorSlackUserId] = await Promise.all([
+    const [slackUserIds, resolvedActorSlackUserId] = await Promise.all([
       this.resolveMentions(recipientLogins),
-      suppressActorMention ? Promise.resolve(null) : this.resolveSlackUserId(actorLogin),
+      this.resolveSlackUserId(actorLogin),
     ]);
+    const actorSlackUserId = suppressActorMention ? null : resolvedActorSlackUserId;
     const notification: LifecycleNotification = {
       schemaVersion: 1,
       kind,
@@ -645,6 +654,15 @@ export class LifecycleNotificationService {
         eventFingerprint,
       }),
       sourceDeliveryId,
+      ...(requiredActionKind
+        ? {
+            requiredAction: {
+              kind: requiredActionKind,
+              recipientSlackUserIds: slackUserIds,
+              actorSlackUserId: resolvedActorSlackUserId,
+            },
+          }
+        : {}),
     };
     const threadRootIssue = await resolveNotificationThreadRootIssue(
       issue,

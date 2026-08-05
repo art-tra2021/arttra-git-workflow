@@ -19,11 +19,32 @@ export type NotificationOutboxStatus = "intent" | "sending" | "sent" | "needs_re
 export interface NotificationIntentMetadata {
   intentId: string;
   sourceDeliveryId?: string;
+  requiredAction?: NotificationRequiredAction;
+}
+
+export type NotificationRequiredActionKind =
+  | "review-requested"
+  | "approval-wait"
+  | "ci-failed"
+  | "blocker"
+  | "overdue";
+
+export interface NotificationRequiredAction {
+  kind: NotificationRequiredActionKind;
+  recipientSlackUserIds: string[];
+  actorSlackUserId: string | null;
+}
+
+export interface NotificationDirectDelivery {
+  kind: "direct";
+  slackUserId: string;
 }
 
 interface LifecycleNotificationPayload {
   schemaVersion: 1;
   kind: "lifecycle";
+  /** directは対応必須通知をrecipient本人のDMへ送る独立intentを表す。 */
+  delivery?: NotificationDirectDelivery;
   notification: LifecycleNotification;
   threadTs: string | null;
   metadata: NotificationIntentMetadata;
@@ -32,6 +53,8 @@ interface LifecycleNotificationPayload {
 interface WorkNotificationPayload {
   schemaVersion: 1;
   kind: "work";
+  /** directは対応必須通知をowner本人のDMへ送る独立intentを表す。 */
+  delivery?: NotificationDirectDelivery;
   item: HumanWorkItem;
   context: WorkNotificationContext;
   metadata: NotificationIntentMetadata;
@@ -235,7 +258,7 @@ export class NotificationOutboxService {
   async deliver(intent: NotificationIntent): Promise<NotificationSendResult> {
     validateIntent(intent);
     const current = await this.createOrLoad(intent);
-    assertSameIntent(current, intent);
+    assertSameIntent(current, intent, this.channelId);
     if (current.status === "sent") {
       return { messageTs: current.messageTs ?? null };
     }
@@ -695,16 +718,37 @@ export class NotificationOutboxService {
 export class DelegatingNotificationPayloadSender implements NotificationPayloadSender {
   private readonly lifecycle: LifecycleNotifier;
   private readonly work: WorkNotifier;
+  private readonly createDirectNotifiers:
+    | ((slackUserId: string) => { lifecycle: LifecycleNotifier; work: WorkNotifier })
+    | null;
 
-  constructor(lifecycle: LifecycleNotifier, work: WorkNotifier) {
+  constructor(
+    lifecycle: LifecycleNotifier,
+    work: WorkNotifier,
+    createDirectNotifiers?: (slackUserId: string) => {
+      lifecycle: LifecycleNotifier;
+      work: WorkNotifier;
+    },
+  ) {
     this.lifecycle = lifecycle;
     this.work = work;
+    this.createDirectNotifiers = createDirectNotifiers ?? null;
   }
 
   async send(payload: NotificationPayload): Promise<NotificationSendResult> {
+    const delivery = payload.kind === "work-digest" ? undefined : payload.delivery;
+    const target = delivery
+      ? this.createDirectNotifiers?.(delivery.slackUserId)
+      : { lifecycle: this.lifecycle, work: this.work };
+    if (!target) {
+      throw new NotificationOutboxError(
+        "notification_direct_sender_required",
+        "DM通知の送信先を復元できないため、再送を停止しました。",
+      );
+    }
     switch (payload.kind) {
       case "lifecycle": {
-        const result = await this.lifecycle.notify(
+        const result = await target.lifecycle.notify(
           payload.notification,
           payload.threadTs,
           payload.metadata,
@@ -712,7 +756,7 @@ export class DelegatingNotificationPayloadSender implements NotificationPayloadS
         return { messageTs: result.messageTs };
       }
       case "work": {
-        const result = await this.work.notify(payload.item, payload.context, payload.metadata);
+        const result = await target.work.notify(payload.item, payload.context, payload.metadata);
         return { messageTs: result.messageTs };
       }
       case "work-digest":
@@ -724,9 +768,14 @@ export class DelegatingNotificationPayloadSender implements NotificationPayloadS
 
 export class OutboxLifecycleNotifier implements LifecycleNotifier {
   private readonly outbox: NotificationOutboxService;
+  private readonly delivery: NotificationDirectDelivery | null;
 
-  constructor(outbox: NotificationOutboxService) {
+  constructor(
+    outbox: NotificationOutboxService,
+    delivery: NotificationDirectDelivery | null = null,
+  ) {
     this.outbox = outbox;
+    this.delivery = delivery;
   }
 
   async notify(
@@ -739,6 +788,7 @@ export class OutboxLifecycleNotifier implements LifecycleNotifier {
     const payload: LifecycleNotificationPayload = {
       schemaVersion: 1,
       kind: "lifecycle",
+      ...(this.delivery ? { delivery: this.delivery } : {}),
       notification,
       threadTs,
       metadata,
@@ -756,9 +806,14 @@ export class OutboxLifecycleNotifier implements LifecycleNotifier {
 
 export class OutboxWorkNotifier implements WorkNotifier {
   private readonly outbox: NotificationOutboxService;
+  private readonly delivery: NotificationDirectDelivery | null;
 
-  constructor(outbox: NotificationOutboxService) {
+  constructor(
+    outbox: NotificationOutboxService,
+    delivery: NotificationDirectDelivery | null = null,
+  ) {
     this.outbox = outbox;
+    this.delivery = delivery;
   }
 
   async notify(
@@ -771,6 +826,7 @@ export class OutboxWorkNotifier implements WorkNotifier {
     const payload: WorkNotificationPayload = {
       schemaVersion: 1,
       kind: "work",
+      ...(this.delivery ? { delivery: this.delivery } : {}),
       item,
       context,
       metadata,
@@ -864,10 +920,14 @@ function validateReplayCommand(command: NotificationReplayCommand): void {
   }
 }
 
-function assertSameIntent(current: NotificationOutboxState, intent: NotificationIntent): void {
+function assertSameIntent(
+  current: NotificationOutboxState,
+  intent: NotificationIntent,
+  channelId: string,
+): void {
   if (
     current.intentId === intent.metadata.intentId &&
-    current.channelId.length > 0 &&
+    current.channelId === channelId &&
     (current.payloadHash === payloadHash(intent.payload) ||
       isSentFlatTaskIssueOpenedMigration(current, intent))
   ) {
@@ -876,6 +936,16 @@ function assertSameIntent(current: NotificationOutboxState, intent: Notification
   throw new NotificationOutboxError(
     "notification_intent_collision",
     "同じ通知intent IDに異なる内容が保存されています。自動送信を停止しました。",
+  );
+}
+
+function isDirectDelivery(value: unknown): value is NotificationDirectDelivery {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const delivery = value as Partial<NotificationDirectDelivery>;
+  return (
+    delivery.kind === "direct" &&
+    typeof delivery.slackUserId === "string" &&
+    /^[UW][A-Z0-9]{2,31}$/.test(delivery.slackUserId)
   );
 }
 
@@ -952,6 +1022,7 @@ function isNotificationPayload(value: unknown): value is NotificationPayload {
   }
   if (payload.kind === "lifecycle") {
     return (
+      (payload.delivery === undefined || isDirectDelivery(payload.delivery)) &&
       payload.notification?.schemaVersion === 1 &&
       typeof payload.notification.resource?.url === "string" &&
       (payload.threadTs === null || typeof payload.threadTs === "string")
@@ -959,6 +1030,7 @@ function isNotificationPayload(value: unknown): value is NotificationPayload {
   }
   if (payload.kind === "work") {
     return (
+      (payload.delivery === undefined || isDirectDelivery(payload.delivery)) &&
       payload.item?.schemaVersion === 1 &&
       typeof payload.item.url === "string" &&
       (payload.context?.kind === "state" || payload.context?.kind === "deadline") &&

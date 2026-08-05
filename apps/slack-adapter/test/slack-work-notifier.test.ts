@@ -48,6 +48,33 @@ describe("SlackWorkNotifier", () => {
     expect(calls[0]?.reply_broadcast).toBe(false);
   });
 
+  test("DMはowner本人へ送り、channel threadと自己mentionを付けない", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const notifier = new SlackWorkNotifier(slackClient(calls, ["750.1"]), "UOWNER", {
+      direct: true,
+    });
+
+    await notifier.notify(
+      item(),
+      {
+        kind: "deadline",
+        threadTs: "700.1",
+        slackUserId: "UOWNER",
+      },
+      { intentId: "notification-direct-work" },
+    );
+
+    expect(calls[0]).toMatchObject({
+      channel: "UOWNER",
+      metadata: {
+        event_type: "arttra_notification",
+        event_payload: { intent_id: "notification-direct-work" },
+      },
+    });
+    expect(calls[0]).not.toHaveProperty("thread_ts");
+    expect(JSON.stringify(calls[0])).not.toContain("<@UOWNER>");
+  });
+
   test("digestはIssueスレッドへ入れない", async () => {
     const calls: Array<Record<string, unknown>> = [];
     const notifier = new SlackWorkNotifier(slackClient(calls, ["800.1"]), "CWORK");

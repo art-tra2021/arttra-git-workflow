@@ -3,6 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DelegatingNotificationPayloadSender,
   type NotificationIntent,
   NotificationOutboxService,
   type NotificationOutboxState,
@@ -16,6 +17,46 @@ import {
 import { LocalStateStore } from "../src/state-store.ts";
 
 describe("NotificationOutboxService", () => {
+  test("direct payloadはrecipient別senderへ委譲し、channel senderへ送らない", async () => {
+    let channelSends = 0;
+    const directRecipients: string[] = [];
+    const sender = new DelegatingNotificationPayloadSender(
+      {
+        notify: async () => {
+          channelSends += 1;
+          return { messageTs: "channel" };
+        },
+      },
+      {
+        notify: async () => {
+          channelSends += 1;
+          return { messageTs: "channel" };
+        },
+        digest: async () => {
+          channelSends += 1;
+        },
+      },
+      (slackUserId) => ({
+        lifecycle: {
+          notify: async () => {
+            directRecipients.push(slackUserId);
+            return { messageTs: "direct" };
+          },
+        },
+        work: {
+          notify: async () => ({ messageTs: "unused" }),
+          digest: async () => {},
+        },
+      }),
+    );
+
+    await expect(sender.send(directIntent("delegate-direct").payload)).resolves.toEqual({
+      messageTs: "direct",
+    });
+    expect(channelSends).toBe(0);
+    expect(directRecipients).toEqual(["UOWNER"]);
+  });
+
   test("送信済みの旧Task平投稿はthreadTsだけの移行なら再投稿せず既送信として扱う", async () => {
     const store = await localStore("flat-task-migration");
     let sends = 0;
@@ -354,6 +395,109 @@ describe("NotificationOutboxService", () => {
       ],
     });
   });
+
+  test("DM履歴にintentがあればrecord_existingで復旧し、再送しない", async () => {
+    const store = await localStore("direct-record-existing");
+    const value = directIntent("direct-record-existing");
+    let sends = 0;
+    const client: SlackConversationClient = {
+      conversations: {
+        open: async () => ({ channel: { id: "DDIRECT" } }),
+        history: async () => ({
+          messages: [
+            {
+              ts: "390.1",
+              metadata: {
+                event_type: "arttra_notification",
+                event_payload: { intent_id: value.metadata.intentId },
+              },
+            },
+          ],
+        }),
+        replies: async () => ({ messages: [] }),
+      },
+    };
+    const service = new NotificationOutboxService(
+      store,
+      {
+        send: async () => {
+          sends += 1;
+          throw new Error("timeout after Slack accepted the DM");
+        },
+      },
+      {
+        channelId: "UOWNER",
+        replayOperatorIds: ["UADMIN"],
+        reconciler: new SlackNotificationReconciler(client, store),
+      },
+    );
+
+    await expect(service.deliver(value)).rejects.toThrow("timeout after Slack accepted");
+    const failed = await requireState(service, value.metadata.intentId);
+    await expect(
+      service.replay({
+        schemaVersion: 1,
+        intentId: value.metadata.intentId,
+        expectedRevision: failed.revision,
+        operatorId: "UADMIN",
+        dryRun: false,
+        confirmed: true,
+      }),
+    ).resolves.toMatchObject({
+      action: "record_existing",
+      executed: true,
+      status: "sent",
+      messageTs: "390.1",
+    });
+    expect(sends).toBe(1);
+  });
+
+  test("DM履歴にintentがなければ確認付きreplayはDMだけを再送する", async () => {
+    const store = await localStore("direct-replay-only");
+    let channelSends = 0;
+    let directSends = 0;
+    const sender: NotificationPayloadSender = {
+      send: async (payload) => {
+        if (payload.kind === "lifecycle" && payload.delivery?.kind === "direct") {
+          directSends += 1;
+          if (directSends === 1) throw new Error("dm timeout");
+          return { messageTs: "395.2" };
+        }
+        channelSends += 1;
+        return { messageTs: "395.1" };
+      },
+    };
+    const primary = new NotificationOutboxService(store, sender, { channelId: "CWORK" });
+    await primary.deliver(intent("direct-replay-primary"));
+    const client: SlackConversationClient = {
+      conversations: {
+        open: async () => ({ channel: { id: "DDIRECT" } }),
+        history: async () => ({ messages: [] }),
+        replies: async () => ({ messages: [] }),
+      },
+    };
+    const direct = new NotificationOutboxService(store, sender, {
+      channelId: "UOWNER",
+      replayOperatorIds: ["UADMIN"],
+      reconciler: new SlackNotificationReconciler(client, store),
+    });
+    const value = directIntent("direct-replay-only");
+    await expect(direct.deliver(value)).rejects.toThrow("dm timeout");
+    const failed = await requireState(direct, value.metadata.intentId);
+
+    await expect(
+      direct.replay({
+        schemaVersion: 1,
+        intentId: value.metadata.intentId,
+        expectedRevision: failed.revision,
+        operatorId: "UADMIN",
+        dryRun: false,
+        confirmed: true,
+      }),
+    ).resolves.toMatchObject({ action: "replay", executed: true, status: "sent" });
+    expect(channelSends).toBe(1);
+    expect(directSends).toBe(2);
+  });
 });
 
 describe("SlackNotificationReconciler", () => {
@@ -413,6 +557,48 @@ describe("SlackNotificationReconciler", () => {
     ).resolves.toMatchObject({ outcome: "inconclusive", complete: false });
     expect(calls).toBe(10);
   });
+
+  test("DM intentはIssue root stateがあってもDM履歴だけを照合する", async () => {
+    const store = await localStore("reconcile-direct");
+    const value = intent("reconcile-direct");
+    if (value.payload.kind !== "lifecycle") throw new Error("lifecycle intentではありません。");
+    value.payload.delivery = { kind: "direct", slackUserId: "UOWNER" };
+    await store.set("work-thread", value.payload.notification.resource.url, {
+      schemaVersion: 1,
+      issueUrl: value.payload.notification.resource.url,
+      rootTs: "500.1",
+      createdAt: "2026-08-03T00:00:00.000Z",
+    });
+    const state = {
+      ...sendingState(value, "2026-08-03T00:00:00.000Z"),
+      channelId: "UOWNER",
+    };
+    let historyCalls = 0;
+    let replyCalls = 0;
+    const client: SlackConversationClient = {
+      conversations: {
+        open: async () => ({ channel: { id: "DDIRECT" } }),
+        history: async () => {
+          historyCalls += 1;
+          return { messages: [] };
+        },
+        replies: async () => {
+          replyCalls += 1;
+          return { messages: [] };
+        },
+      },
+    };
+
+    await expect(
+      new SlackNotificationReconciler(client, store).reconcile(state),
+    ).resolves.toMatchObject({
+      outcome: "message_not_found",
+      complete: true,
+      channelId: "DDIRECT",
+    });
+    expect(historyCalls).toBe(1);
+    expect(replyCalls).toBe(0);
+  });
 });
 
 async function localStore(name: string): Promise<LocalStateStore> {
@@ -467,6 +653,13 @@ function intent(name: string): NotificationIntent {
       metadata,
     },
   };
+}
+
+function directIntent(name: string): NotificationIntent {
+  const value = intent(name);
+  if (value.payload.kind !== "lifecycle") throw new Error("lifecycle intentではありません。");
+  value.payload.delivery = { kind: "direct", slackUserId: "UOWNER" };
+  return value;
 }
 
 function taskOpenedIntent(
