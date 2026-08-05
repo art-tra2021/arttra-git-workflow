@@ -198,7 +198,11 @@ export class LifecycleNotificationService {
         `#${issue.number} ${issue.title} がreopenされました。`,
         "再開理由と残作業を確認する",
         issue.url,
-        fingerprint({ action, state: issue.state }),
+        fingerprint({
+          action,
+          state: issue.state,
+          updatedAt: nestedString(payload, "issue", "updated_at"),
+        }),
         job.deliveryId,
       );
     }
@@ -242,7 +246,11 @@ export class LifecycleNotificationService {
       `#${issue.number} ${issue.title} がcloseされました。`,
       "残作業がなければ、このスレッドを完了記録として残す",
       issue.url,
-      fingerprint({ state: issue.state, url: issue.url }),
+      fingerprint({
+        state: issue.state,
+        url: issue.url,
+        updatedAt: nestedString(payload, "issue", "updated_at"),
+      }),
       job.deliveryId,
     );
   }
