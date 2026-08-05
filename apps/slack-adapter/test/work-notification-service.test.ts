@@ -45,7 +45,7 @@ describe("WorkNotificationService", () => {
   test("通知理由が変われば同じIssueを再通知する", async () => {
     const values = new Map<string, unknown>();
     const sent: string[] = [];
-    let items = [workItem("CHECKS_FAILED", "immediate")];
+    let items = [workItem("REVIEW_REQUESTED", "immediate")];
     const service = new WorkNotificationService(
       { loadProjectItems: async () => items },
       memoryStore(values),
@@ -61,7 +61,41 @@ describe("WorkNotificationService", () => {
     await service.notifyImmediate();
     items = [workItem("CONFLICTING", "immediate")];
     await service.notifyImmediate();
-    expect(sent).toEqual(["CHECKS_FAILED", "CONFLICTING"]);
+    expect(sent).toEqual(["REVIEW_REQUESTED", "CONFLICTING"]);
+  });
+
+  test("CI失敗は汎用通知から除外し、blocker・reviewer・期限通知を維持する", async () => {
+    const values = new Map<string, unknown>();
+    const sent: Array<{
+      code: HumanWorkItem["reasonCode"];
+      kind: WorkNotificationContext["kind"];
+    }> = [];
+    const checksFailed = workItem("CHECKS_FAILED", "immediate");
+    checksFailed.targetDate = "2026-08-04";
+    const blocked = workItem("BLOCKED", "immediate", 24);
+    blocked.targetDate = null;
+    const reviewRequested = workItem("REVIEW_REQUESTED", "immediate", 25);
+    reviewRequested.targetDate = null;
+    const service = new WorkNotificationService(
+      { loadProjectItems: async () => [checksFailed, blocked, reviewRequested] },
+      memoryStore(values),
+      {
+        notify: async (item, context) => {
+          sent.push({ code: item.reasonCode, kind: context.kind });
+          return { messageTs: `250.${sent.length}` };
+        },
+        digest: async () => {},
+      },
+      () => Date.parse("2026-08-02T03:00:00Z"),
+    );
+
+    expect(await service.notifyImmediate()).toBe(2);
+    expect(sent).toEqual([
+      { code: "BLOCKED", kind: "state" },
+      { code: "REVIEW_REQUESTED", kind: "state" },
+    ]);
+    expect(await service.notifyDeadlines()).toBe(1);
+    expect(sent.at(-1)).toEqual({ code: "DUE_SOON", kind: "deadline" });
   });
 
   test("期限接近を一度だけ担当者へ通知する", async () => {

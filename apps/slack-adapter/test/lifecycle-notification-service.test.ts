@@ -473,6 +473,7 @@ describe("LifecycleNotificationService", () => {
     harness.github.checkDiagnostics = { policyCodes: ["AR-PR-004"], complete: true };
 
     expect(await harness.service.process(checkRunFailedJob("github-actions[bot]"))).toBe(0);
+    expect(await harness.service.process(checkSuiteFailedJob())).toBe(0);
     expect(harness.sent).toHaveLength(0);
   });
 

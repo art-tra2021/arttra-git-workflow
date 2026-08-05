@@ -92,7 +92,8 @@ export class WorkNotificationService {
     const items = await this.source.loadProjectItems();
     let notified = 0;
     for (const item of items) {
-      if (item.delivery !== "immediate") {
+      // CI失敗はcheck_run/check_suiteのlifecycle通知だけが扱う。周辺eventから再通知しない。
+      if (item.delivery !== "immediate" || item.reasonCode === "CHECKS_FAILED") {
         await this.store.remove(NOTIFICATION_NAMESPACE, item.url);
         continue;
       }
