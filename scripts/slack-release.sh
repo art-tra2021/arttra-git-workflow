@@ -63,6 +63,55 @@ target_image() {
 		"${ar_region}" "${ar_project}" "${ar_artifact_repository}" "${ar_target_commit}"
 }
 
+validate_digest() {
+	local ar_name="$1"
+	local ar_value="$2"
+	if [[ ! "${ar_value}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+		fail "${ar_name} must be a lowercase sha256 digest"
+	fi
+}
+
+linux_amd64_digest() {
+	local ar_image="$1"
+	command -v docker >/dev/null || fail "docker is required to inspect the target image"
+	local ar_manifest ar_digest
+	if ! ar_manifest="$(docker buildx imagetools inspect "${ar_image}" --format '{{json .Manifest}}')"; then
+		fail "target image manifest could not be inspected"
+	fi
+	if ! ar_digest="$(jq -er '
+    [.manifests[]?
+      | select(
+          (.platform.os // "") == "linux"
+          and (.platform.architecture // "") == "amd64"
+          and (.platform.variant // "") == ""
+        )
+      | .digest]
+    | unique
+    | if length == 1 then .[0] else error("expected exactly one linux/amd64 manifest") end
+  ' <<<"${ar_manifest}")"; then
+		fail "target image must contain exactly one linux/amd64 manifest"
+	fi
+	validate_digest "target image digest" "${ar_digest}"
+	printf '%s\n' "${ar_digest}"
+}
+
+target_release() {
+	local ar_target_commit="$1"
+	local ar_image ar_digest ar_repository ar_deploy_image
+	ar_image="$(target_image "${ar_target_commit}")"
+	if ! ar_digest="$(linux_amd64_digest "${ar_image}")"; then
+		fail "target linux/amd64 digest could not be resolved"
+	fi
+	ar_repository="${ar_image%:*}"
+	ar_deploy_image="${ar_repository}@${ar_digest}"
+	jq -cn \
+		--arg commit "${ar_target_commit}" \
+		--arg image "${ar_image}" \
+		--arg digest "${ar_digest}" \
+		--arg deployImage "${ar_deploy_image}" \
+		'{commit:$commit,image:$image,digest:$digest,deployImage:$deployImage}'
+}
+
 describe_service() {
 	command -v gcloud >/dev/null || fail "gcloud is required to inspect Cloud Run"
 	gcloud run services describe "${ar_service}" \
@@ -88,15 +137,14 @@ describe_revision() {
 }
 
 revision_image() {
-	jq -er '.spec.containers[0].image // error("revision image is missing")'
+	jq -er '.status.imageDigest // .spec.containers[0].image // error("revision image is missing")'
 }
 
-commit_from_image() {
+digest_from_image() {
 	local ar_image="$1"
-	local ar_tag="${ar_image##*:}"
-	local ar_image_commit="${ar_tag%-amd64}"
-	if [[ "${ar_image_commit}" =~ ^[0-9a-f]{40}$ ]]; then
-		printf '%s\n' "${ar_image_commit}"
+	local ar_digest="${ar_image##*@}"
+	if [[ "${ar_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+		printf '%s\n' "${ar_digest}"
 	fi
 }
 
@@ -109,13 +157,13 @@ health_commit() {
 }
 
 inspect_serving_release() {
-	local ar_service_json ar_serving_revision ar_latest_ready_revision ar_revision_json ar_image ar_image_commit ar_revision_commit ar_health_commit
+	local ar_service_json ar_serving_revision ar_latest_ready_revision ar_revision_json ar_image ar_image_digest ar_revision_commit ar_health_commit
 	ar_service_json="$(describe_service)"
 	ar_serving_revision="$(serving_revision_from_service <<<"${ar_service_json}")"
 	ar_latest_ready_revision="$(jq -r '.status.latestReadyRevisionName // ""' <<<"${ar_service_json}")"
 	ar_revision_json="$(describe_revision "${ar_serving_revision}")"
 	ar_image="$(revision_image <<<"${ar_revision_json}")"
-	ar_image_commit="$(commit_from_image "${ar_image}")"
+	ar_image_digest="$(digest_from_image "${ar_image}")"
 	ar_revision_commit="$(jq -r '.metadata.labels["ar-build-revision"] // ""' <<<"${ar_revision_json}")"
 	ar_health_commit="$(health_commit "${ar_service_json}")"
 
@@ -123,10 +171,10 @@ inspect_serving_release() {
 		--arg revision "${ar_serving_revision}" \
 		--arg latestReadyRevision "${ar_latest_ready_revision}" \
 		--arg image "${ar_image}" \
-		--arg imageCommit "${ar_image_commit}" \
+		--arg imageDigest "${ar_image_digest}" \
 		--arg revisionCommit "${ar_revision_commit}" \
 		--arg healthCommit "${ar_health_commit}" \
-		'{revision:$revision,latestReadyRevision:$latestReadyRevision,image:$image,imageCommit:$imageCommit,revisionCommit:$revisionCommit,healthCommit:$healthCommit}'
+		'{revision:$revision,latestReadyRevision:$latestReadyRevision,image:$image,imageDigest:$imageDigest,revisionCommit:$revisionCommit,healthCommit:$healthCommit}'
 }
 
 require_main_target() {
@@ -141,26 +189,27 @@ require_main_target() {
 }
 
 preview_json() {
-	local ar_current_main ar_target_image ar_current
+	local ar_current_main ar_target ar_current
 	ar_current_main="$(require_main_target)"
-	ar_target_image="$(target_image "${ar_commit}")"
+	if ! ar_target="$(target_release "${ar_commit}")"; then
+		fail "target release could not be resolved"
+	fi
 	ar_current="$(inspect_serving_release)"
 	jq -cn \
 		--arg action preview \
 		--arg mainCommit "${ar_current_main}" \
-		--arg targetCommit "${ar_commit}" \
-		--arg targetImage "${ar_target_image}" \
+		--argjson target "${ar_target}" \
 		--argjson current "${ar_current}" \
 		'{
       schemaVersion:1,
       action:$action,
       mainCommit:$mainCommit,
-      target:{commit:$targetCommit,image:$targetImage},
+      target:$target,
       current:$current,
       changes:[
-        {field:"image",from:$current.image,to:$targetImage,changed:($current.image != $targetImage)},
-        {field:"commit",from:$current.healthCommit,to:$targetCommit,changed:($current.healthCommit != $targetCommit)},
-        {field:"revisionLabel",from:$current.revisionCommit,to:$targetCommit,changed:($current.revisionCommit != $targetCommit)}
+        {field:"imageDigest",from:$current.imageDigest,to:$target.digest,changed:($current.imageDigest != $target.digest)},
+        {field:"commit",from:$current.healthCommit,to:$target.commit,changed:($current.healthCommit != $target.commit)},
+        {field:"revisionLabel",from:$current.revisionCommit,to:$target.commit,changed:($current.revisionCommit != $target.commit)}
       ],
       mutationAllowed:false
     }'
@@ -171,29 +220,46 @@ preview_release() {
 }
 
 release_status() {
-	local ar_current_main ar_current ar_drift
+	local ar_expected_target="${1:-}"
+	local ar_current_main ar_current ar_drift ar_target_image
 	ar_current_main="$(resolve_main_commit)"
+	if [[ -z "${ar_expected_target}" ]]; then
+		if ! ar_expected_target="$(target_release "${ar_current_main}")"; then
+			ar_target_image="$(target_image "${ar_current_main}")"
+			ar_expected_target="$(jq -cn \
+				--arg commit "${ar_current_main}" \
+				--arg image "${ar_target_image}" \
+				'{commit:$commit,image:$image,digest:"",deployImage:""}')"
+		fi
+	fi
+	if [[ "$(jq -r '.commit // ""' <<<"${ar_expected_target}")" != "${ar_current_main}" ]]; then
+		fail "read-back target is not the current main commit"
+	fi
 	ar_current="$(inspect_serving_release)"
 	ar_drift="$(jq -n \
 		--arg main "${ar_current_main}" \
+		--argjson target "${ar_expected_target}" \
 		--argjson current "${ar_current}" \
-		'$current.healthCommit != $main or $current.imageCommit == "" or $current.imageCommit != $current.healthCommit or $current.revisionCommit != $current.healthCommit or ($current.latestReadyRevision != "" and $current.revision != $current.latestReadyRevision)')"
+		'$current.healthCommit != $main or $target.digest == "" or $current.imageDigest == "" or $current.imageDigest != $target.digest or $current.revisionCommit != $current.healthCommit or ($current.latestReadyRevision != "" and $current.revision != $current.latestReadyRevision)')"
 
 	jq -cn \
 		--arg action status \
 		--arg mainCommit "${ar_current_main}" \
+		--argjson target "${ar_expected_target}" \
 		--argjson current "${ar_current}" \
 		--argjson drift "${ar_drift}" \
 		'{
       schemaVersion:1,
       action:$action,
       mainCommit:$mainCommit,
+      target:$target,
       serving:$current,
 	      drift:{
 	        detected:$drift,
 	        mainVsHealth:($mainCommit != $current.healthCommit),
-	        imageMetadataMissing:($current.imageCommit == ""),
-	        imageVsHealth:($current.imageCommit == "" or $current.imageCommit != $current.healthCommit),
+	        targetImageMetadataMissing:($target.digest == ""),
+	        imageMetadataMissing:($current.imageDigest == ""),
+	        imageVsTarget:($target.digest == "" or $current.imageDigest == "" or $current.imageDigest != $target.digest),
 	        revisionVsHealth:($current.revisionCommit != $current.healthCommit),
 	        servingVsLatestReady:($current.latestReadyRevision != "" and $current.revision != $current.latestReadyRevision)
       }
@@ -205,21 +271,22 @@ release_status() {
 }
 
 deploy_release() {
-	local ar_plan ar_target_image
+	local ar_plan ar_deploy_image ar_target
 	ar_plan="$(preview_json)"
 	printf '%s\n' "${ar_plan}"
 	if [[ "${ar_confirmed}" != "true" ]]; then
 		fail "deploy requires the explicit --yes flag after reviewing preview"
 	fi
-	ar_target_image="$(jq -r '.target.image' <<<"${ar_plan}")"
+	ar_target="$(jq -c '.target' <<<"${ar_plan}")"
+	ar_deploy_image="$(jq -r '.deployImage' <<<"${ar_target}")"
 	gcloud run deploy "${ar_service}" \
-		--image "${ar_target_image}" \
+		--image "${ar_deploy_image}" \
 		--update-labels "ar-build-revision=${ar_commit}" \
 		--region "${ar_region}" \
 		--project "${ar_project}" \
 		--platform managed \
 		--quiet >/dev/null
-	release_status
+	release_status "${ar_target}"
 }
 
 rollback_release() {
@@ -227,18 +294,23 @@ rollback_release() {
 	if [[ ! "${ar_revision}" =~ ^${ar_service}-[0-9]{5}-[a-z0-9]{3}$ ]]; then
 		fail "revision must be an exact revision of ${ar_service}"
 	fi
-	local ar_current ar_target_revision_json ar_target_service ar_target_image ar_plan
+	local ar_current ar_target_revision_json ar_target_service ar_target_image ar_target_digest ar_target_commit ar_plan
 	ar_current="$(inspect_serving_release)"
 	ar_target_revision_json="$(describe_revision "${ar_revision}")"
 	ar_target_service="$(jq -er '.metadata.labels["serving.knative.dev/service"] // error("revision service label is missing")' <<<"${ar_target_revision_json}")"
 	[[ "${ar_target_service}" == "${ar_service}" ]] || fail "revision belongs to another service"
 	ar_target_image="$(revision_image <<<"${ar_target_revision_json}")"
+	ar_target_digest="$(digest_from_image "${ar_target_image}")"
+	[[ -n "${ar_target_digest}" ]] || fail "rollback revision image must use a sha256 digest"
+	ar_target_commit="$(jq -r '.metadata.labels["ar-build-revision"] // ""' <<<"${ar_target_revision_json}")"
 	ar_plan="$(jq -cn \
 		--arg action rollback \
 		--arg targetRevision "${ar_revision}" \
 		--arg targetImage "${ar_target_image}" \
+		--arg targetDigest "${ar_target_digest}" \
+		--arg targetCommit "${ar_target_commit}" \
 		--argjson current "${ar_current}" \
-		'{schemaVersion:1,action:$action,current:$current,target:{revision:$targetRevision,image:$targetImage},mutationAllowed:false}')"
+		'{schemaVersion:1,action:$action,current:$current,target:{revision:$targetRevision,image:$targetImage,digest:$targetDigest,commit:$targetCommit},mutationAllowed:false}')"
 	printf '%s\n' "${ar_plan}"
 	if [[ "${ar_confirmed}" != "true" ]]; then
 		fail "rollback requires the explicit --yes flag after reviewing the target revision"
