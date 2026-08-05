@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "repository": "art-tra2021/arttra-git-workflow",
+  "actor": "roz",
+  "device": "device-1785893122826-99011",
+  "branch": "fix/136-cloud-run-release-digest-rozwer",
+  "head": "1557cab06522ae1dad53ca2bcb1f410ff00f50c2",
+  "observed_at_unix_ms": 1785894341993,
+  "files": [
+    {
+      "path": "docs/slack-pr-notification-runbook.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/slack-release-test.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/slack-release.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    }
+  ]
+}
