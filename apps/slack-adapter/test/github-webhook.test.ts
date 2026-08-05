@@ -23,16 +23,50 @@ describe("GitHub webhook gateway", () => {
     });
   });
 
-  test("署名済みprojects_v2_itemをversion付きjobへ変換する", () => {
-    const body = Buffer.from('{"action":"edited"}');
+  test("署名済みprojects_v2_itemをversion付きjobへ変換しworkerで完了する", async () => {
+    const body = Buffer.from(
+      JSON.stringify({
+        action: "edited",
+        projects_v2_item: { content_node_id: "I_kwDOExample" },
+      }),
+    );
     const signature = `sha256=${createHmac("sha256", "webhook-secret").update(body).digest("hex")}`;
 
     expect(verifyGitHubWebhookSignature(body, signature, "webhook-secret")).toBe(true);
-    expect(parseGitHubWebhookJob(body, "delivery-project-item", "projects_v2_item")).toEqual({
+    const job = parseGitHubWebhookJob(body, "delivery-project-item", "projects_v2_item");
+    expect(job).toEqual({
       schemaVersion: 1,
       deliveryId: "delivery-project-item",
       event: "projects_v2_item",
-      payload: { action: "edited" },
+      payload: {
+        action: "edited",
+        projects_v2_item: { content_node_id: "I_kwDOExample" },
+      },
+    });
+    const queuedBody = JSON.stringify(job);
+    expect(verifyJobSignature(queuedBody, signJob(queuedBody, "job-secret"), "job-secret")).toBe(
+      true,
+    );
+
+    const store = memoryStore();
+    let projectListRevision = 0;
+    const processor = new GitHubWebhookProcessor(
+      null,
+      store,
+      async () => {
+        projectListRevision += 1;
+      },
+      null,
+      {
+        process: async () => 0,
+      } as unknown as LifecycleNotificationService,
+    );
+    await processor.process(JSON.parse(queuedBody));
+
+    expect(projectListRevision).toBe(1);
+    expect(await store.get("github-delivery", job.deliveryId)).toMatchObject({
+      status: "completed",
+      event: "projects_v2_item",
     });
   });
 

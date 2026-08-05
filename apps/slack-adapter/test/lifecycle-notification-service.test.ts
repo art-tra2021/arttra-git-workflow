@@ -330,6 +330,44 @@ describe("LifecycleNotificationService", () => {
     expect(harness.sent).toHaveLength(0);
   });
 
+  test("通知対象外のprojects_v2_itemはrepositoryなしでも処理できる", async () => {
+    const harness = await createHarness(GitHubCapabilityGrants.empty(), ["example/repo"]);
+
+    expect(
+      await harness.service.process({
+        schemaVersion: 1,
+        deliveryId: "delivery-project-item",
+        event: "projects_v2_item",
+        payload: {
+          action: "edited",
+          projects_v2_item: { content_node_id: "I_kwDOExample" },
+        },
+      }),
+    ).toBe(0);
+    expect(harness.sent).toHaveLength(0);
+  });
+
+  test("通知対象eventのrepository必須条件とscope境界を維持する", async () => {
+    const harness = await createHarness(GitHubCapabilityGrants.empty(), ["example/repo"]);
+    const missingRepository = issueOpenedJob();
+    delete (missingRepository.payload as { repository?: unknown }).repository;
+
+    await expect(harness.service.process(missingRepository)).rejects.toThrow(
+      "GitHub webhookのrepository.full_nameを読み取れませんでした。",
+    );
+    expect(
+      await harness.service.process({
+        ...issueOpenedJob(),
+        deliveryId: "delivery-outside-scope",
+        payload: {
+          ...issueOpenedJob().payload,
+          repository: { full_name: "outside/repo" },
+        },
+      }),
+    ).toBe(0);
+    expect(harness.sent).toHaveLength(0);
+  });
+
   test("差し戻し、修正push、マージを関連Issueのthreadへ集約する", async () => {
     const harness = await createHarness();
 
