@@ -19,7 +19,7 @@ export function parseGitHubWebhookJob(
   if (!/^[A-Za-z0-9-]{1,100}$/.test(deliveryId)) {
     throw new Error("GitHub delivery IDが不正です。");
   }
-  if (!/^[a-z_]{1,50}$/.test(event)) {
+  if (!/^[a-z_][a-z0-9_]{0,49}$/.test(event)) {
     throw new Error("GitHub event名が不正です。");
   }
   let payload: unknown;

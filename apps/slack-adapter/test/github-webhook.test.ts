@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHmac } from "node:crypto";
 import { parseGitHubWebhookJob, verifyGitHubWebhookSignature } from "../src/github-webhook.ts";
 import { GitHubWebhookProcessor } from "../src/github-webhook-processor.ts";
 import { CloudTasksGitHubJobQueue, signJob, verifyJobSignature } from "../src/job-queue.ts";
@@ -20,6 +21,29 @@ describe("GitHub webhook gateway", () => {
       event: "pull_request",
       payload: { action: "opened" },
     });
+  });
+
+  test("署名済みprojects_v2_itemをversion付きjobへ変換する", () => {
+    const body = Buffer.from('{"action":"edited"}');
+    const signature = `sha256=${createHmac("sha256", "webhook-secret").update(body).digest("hex")}`;
+
+    expect(verifyGitHubWebhookSignature(body, signature, "webhook-secret")).toBe(true);
+    expect(parseGitHubWebhookJob(body, "delivery-project-item", "projects_v2_item")).toEqual({
+      schemaVersion: 1,
+      deliveryId: "delivery-project-item",
+      event: "projects_v2_item",
+      payload: { action: "edited" },
+    });
+  });
+
+  test.each([
+    ["先頭数字", "2projects_v2_item"],
+    ["記号", "projects-v2_item"],
+    ["51文字", `a${"0".repeat(50)}`],
+  ])("不正なevent名（%s）を拒否する", (_case, event) => {
+    expect(() =>
+      parseGitHubWebhookJob(Buffer.from('{"action":"edited"}'), "delivery-invalid", event),
+    ).toThrow("GitHub event名が不正です。");
   });
 
   test("Cloud Tasks worker用signatureの改ざんを拒否する", () => {
