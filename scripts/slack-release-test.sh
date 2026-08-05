@@ -53,7 +53,8 @@ cat >"${ar_test_root}/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$1 $2 $3" == "buildx imagetools inspect" ]]
-[[ "$5" == "{{json .Manifest}}" ]]
+[[ "$5" == "--format" ]]
+[[ "$6" == "{{json .Manifest}}" ]]
 
 if [[ "${FAKE_MANIFEST_MODE:-valid}" == "missing-amd64" ]]; then
   jq -cn \
