@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "repository": "art-tra2021/arttra-git-workflow",
+  "actor": "roz",
+  "device": "device-1785919639553-72418",
+  "branch": "fix/156-delete-legacy-list-rozwer",
+  "head": "28ee413be0839b98a525825de4d943251c56bd4f",
+  "observed_at_unix_ms": 1785920809884,
+  "files": [
+    {
+      "path": "apps/slack-adapter/README.md",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "docs/workflow-v2.md",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    }
+  ]
+}
