@@ -346,17 +346,40 @@ export class LifecycleNotificationService {
         const checkName =
           optionalString(check.name) ?? (job.event === "check_run" ? "check" : "CI");
         const actionUrl = optionalString(check.html_url) ?? context.url;
+        const checkId = numberValue(check.id);
+        const diagnostics =
+          checkId > 0
+            ? await this.github.loadCheckFailureDiagnostics(repository, {
+                kind: job.event === "check_run" ? "check_run" : "check_suite",
+                id: checkId,
+              })
+            : { policyCodes: [], complete: false };
+        const approvalOnly =
+          diagnostics.complete &&
+          diagnostics.policyCodes.length === 1 &&
+          diagnostics.policyCodes[0] === "AR-PR-004";
+        const reviewerAssigned =
+          context.requestedReviewerLogins.length > 0 || context.requestedTeamSlugs.length > 0;
+        // reviewer依頼通知がすでに次の行動者を一度呼ぶため、承認待ちだけの失敗は重ねない。
+        if (approvalOnly && reviewerAssigned) continue;
+        const recipients = approvalOnly
+          ? [context.authorLogin]
+          : [context.authorLogin, ...issue.assigneeLogins];
         notified += await this.send(
           issue,
           { number: context.number, title: context.title, url: context.url },
           "ci-failed",
           actor,
-          [context.authorLogin, ...issue.assigneeLogins],
-          "PRのCIに対応が必要です。",
-          `${checkName}: ${conclusion} / head: ${context.headSha.slice(0, 12)}`,
-          "CIの失敗内容を確認し、修正または再実行する",
+          recipients,
+          approvalOnly ? "PRのreviewer指定が必要です。" : "PRのCIに対応が必要です。",
+          approvalOnly
+            ? `AR-PR-004: reviewer未指定 / head: ${context.headSha.slice(0, 12)}`
+            : `${checkName}: ${conclusion} / head: ${context.headSha.slice(0, 12)}`,
+          approvalOnly
+            ? "PR作成者以外のreviewerを指定してレビューを依頼する"
+            : "CIの失敗内容を確認し、修正または再実行する",
           actionUrl,
-          fingerprint({ headSha: context.headSha, conclusion }),
+          fingerprint({ headSha: context.headSha, conclusion, codes: diagnostics.policyCodes }),
           job.deliveryId,
         );
         continue;

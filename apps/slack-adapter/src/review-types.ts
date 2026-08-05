@@ -63,12 +63,28 @@ export interface GitHubReviewClient {
 export interface GitHubLifecycleClient
   extends Pick<GitHubReviewClient, "loadPullRequestReviewContext"> {
   loadIssueContext(repository: string, issueNumber: number): Promise<GitHubIssueContext>;
+  loadCheckFailureDiagnostics(
+    repository: string,
+    check: GitHubCheckFailure,
+  ): Promise<GitHubCheckFailureDiagnostics>;
   stopSelfMerge?(
     repository: string,
     issueNumber: number,
     actorLogin: string,
     reason: string,
   ): Promise<GitHubIssueContext>;
+}
+
+export interface GitHubCheckFailure {
+  kind: "check_run" | "check_suite";
+  id: number;
+}
+
+export interface GitHubCheckFailureDiagnostics {
+  /** GitHub Actions error annotationから抽出した決定的なPR Policy code。 */
+  policyCodes: string[];
+  /** 失敗runのすべてをPolicy codeで説明できる場合だけtrue。 */
+  complete: boolean;
 }
 
 export interface ReviewRequestReadModel {

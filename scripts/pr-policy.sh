@@ -13,6 +13,10 @@ source "${script_dir}/issue-policy-lib.sh"
 # The library is resolved from this script's directory at runtime.
 # shellcheck disable=SC1091
 source "${script_dir}/merge-authority-policy-lib.sh"
+# shellcheck source=./pr-policy-annotation-lib.sh
+# The library is resolved from this script's directory at runtime.
+# shellcheck disable=SC1091
+source "${script_dir}/pr-policy-annotation-lib.sh"
 
 merge_authority_config="${MERGE_AUTHORITY_CONFIG_PATH:-${script_dir}/../governance/merge-authority.json}"
 merge_authority_schema="${MERGE_AUTHORITY_SCHEMA_PATH:-${script_dir}/../governance/merge-authority.schema.json}"
@@ -173,7 +177,7 @@ merge/review)
       ' <<<"$pr_json"
 	)"
 	if [[ -z "$approved" ]]; then
-		echo "AR-PR-004: merge/review ではPR作成者以外の承認が1件必要です。" >&2
+		pr_policy_error "AR-PR-004" "merge/review ではPR作成者以外の承認が1件必要です。"
 		exit 1
 	fi
 	echo "✓ Issue #${issue_number}: $(tr '\n' ',' <<<"$approved" | sed 's/,$//') が承認済み"
