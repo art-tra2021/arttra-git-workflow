@@ -16,6 +16,15 @@ import type { StateStore } from "./state-store.ts";
 
 const NOTIFICATION_NAMESPACE = "lifecycle-notification";
 const ISSUE_CREATION_SETUP_NAMESPACE = "issue-creation-setup";
+const LIFECYCLE_EVENTS = new Set([
+  "issues",
+  "issue_comment",
+  "pull_request",
+  "pull_request_review",
+  "pull_request_review_comment",
+  "check_run",
+  "check_suite",
+]);
 const SUPPRESS_ACTOR_MENTION_KINDS = new Set<LifecycleNotificationKind>([
   "issue-opened",
   "issue-reopened",
@@ -139,6 +148,8 @@ export class LifecycleNotificationService {
   }
 
   async process(job: GitHubWebhookJob): Promise<number> {
+    // projects_v2_itemなど通知対象外のeventはrepositoryを持たないため、scope判定より先に除外する。
+    if (!LIFECYCLE_EVENTS.has(job.event)) return 0;
     if (this.allowedRepositories) {
       const repository = repositoryName(objectPayload(job)).toLowerCase();
       if (!this.allowedRepositories.has(repository)) return 0;
