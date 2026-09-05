@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "repository": "art-tra2021/arttra-git-workflow",
+  "actor": "moriya",
+  "device": "device-1786365446427-38997",
+  "branch": "main",
+  "head": "4e0be57378cd47781aba8b6d74bc575a56492246",
+  "observed_at_unix_ms": 1788632606067,
+  "files": [
+    {
+      "path": "mise.lock",
+      "committed": false,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    }
+  ]
+}
