@@ -1,6 +1,7 @@
 import type { LifecycleNotification, LifecycleNotifier } from "./lifecycle-notification-service.ts";
 import {
   type NotificationIntentMetadata,
+  type NotificationOutboxStatus,
   type NotificationRequiredAction,
   type NotificationRequiredActionKind,
   notificationIntentId,
@@ -198,6 +199,13 @@ export class WorkNotifierWithRequiredActionDm implements WorkNotifier {
       throw new Error("差分digestを投稿できるnotifierがありません。");
     }
     await this.primary.diffDigest(digest, metadata);
+  }
+
+  async diffDigestDeliveryStatus(intentId: string): Promise<NotificationOutboxStatus | null> {
+    if (!this.primary.diffDigestDeliveryStatus) {
+      throw new Error("差分digestの送信結果を確かめられるnotifierがありません。");
+    }
+    return this.primary.diffDigestDeliveryStatus(intentId);
   }
 }
 

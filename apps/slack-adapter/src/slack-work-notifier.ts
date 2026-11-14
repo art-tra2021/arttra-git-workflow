@@ -159,37 +159,51 @@ export function diffDigestMessage(digest: WorkDiffDigest): {
     },
     slackDivider(),
   ];
-  const footer: KnownBlock | null =
-    digest.hiddenGroupCount > 0
-      ? {
-          type: "context",
-          elements: [
-            {
-              type: "mrkdwn",
-              text: `ほか${digest.hiddenGroupCount}件のWork・Businessに${digest.hiddenGroupChangeCount}件の変化があります。GitHub Projectsで確認してください。`,
-            },
-          ],
-        }
-      : null;
-  const room = SLACK_BLOCK_LIMIT - blocks.length - (footer ? 1 : 0);
-  for (const group of digest.groups.slice(0, room)) {
+  // block数の上限で載せられないブロックも、件数の上限で省いた分と合わせてfooterに数える。
+  const available = SLACK_BLOCK_LIMIT - blocks.length;
+  const needsFooter = digest.hiddenGroupCount > 0 || digest.groups.length > available;
+  const room = needsFooter ? available - 1 : available;
+  const shown = digest.groups.slice(0, room);
+  const dropped = digest.groups.slice(room);
+  for (const group of shown) {
     blocks.push({
       type: "section",
       text: { type: "mrkdwn", text: groupSectionText(group) },
     });
   }
-  if (footer) blocks.push(footer);
+  if (needsFooter) {
+    const hiddenGroups = digest.hiddenGroupCount + dropped.length;
+    const hiddenChanges =
+      digest.hiddenGroupChangeCount +
+      dropped.reduce((total, group) => total + group.lines.length + group.hiddenLineCount, 0);
+    blocks.push({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: `ほか${hiddenGroups}件のWork・Businessに${hiddenChanges}件の変化があります。GitHub Projectsで確認してください。`,
+        },
+      ],
+    });
+  }
   return {
     text: slackPlain("digest", `ART-TRA Workの前日からの変化: ${summary}`),
     blocks,
   };
 }
 
+/** Project #8に無い親（parent）は種別が分からないため、WorkやBusinessと書かない。 */
+const GROUP_KIND_LABEL: Record<Exclude<WorkDiffDigestGroup["kind"], "other">, string> = {
+  work: "Work",
+  business: "Business",
+  parent: "親",
+};
+
 function groupSectionText(group: WorkDiffDigestGroup): string {
   const heading =
     group.kind === "other"
       ? "*その他（親の分からないTask・Intake）*"
-      : `*${group.kind === "business" ? "Business" : "Work"}: ${issueLink(group.url ?? "", group.issueNumber, group.title)}*`;
+      : `*${GROUP_KIND_LABEL[group.kind]}: ${issueLink(group.url ?? "", group.issueNumber, group.title)}*`;
   const lines = group.lines.map(lineText);
   let hidden = group.hiddenLineCount;
   const compose = () => [heading, ...lines, ...(hidden > 0 ? [`…ほか${hidden}件`] : [])].join("\n");

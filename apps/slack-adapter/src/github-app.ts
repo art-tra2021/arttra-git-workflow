@@ -362,8 +362,16 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     );
   }
 
-  /** 差分digest用。closeしたIssueも含め、種別と親IssueのURLを持つ項目を返す。 */
+  /**
+   * 差分digest用。closeしたIssueも含め、種別と親IssueのURLを持つ項目を返す。
+   * Projectが未設定の取得経路はclose済みと種別を読めないため、差分を作らず拒否する。
+   */
   async loadProjectDigestItems(): Promise<HumanWorkItem[]> {
+    if (!this.project) {
+      throw new Error(
+        "差分digestにはGitHub Project（AR_GITHUB_PROJECT_OWNER/NUMBER）の設定が必要です。",
+      );
+    }
     return (await this.workIssues(100, null, { includeClosed: true })).map((issue) =>
       projectDigestWorkItem(issue, this.config.githubLogin),
     );

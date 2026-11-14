@@ -16,6 +16,21 @@ export function parseDigestMode(value: string | undefined): DigestMode {
   throw new Error(`${DIGEST_MODE_ENV}にはlistまたはdiffを指定してください。`);
 }
 
+/**
+ * diffはProject #8の取得（closeしたIssueと種別を含む）を前提にする。
+ * Projectが未設定だとclose済みが「Projectから外れた」、種別がすべてWorkになるため、起動時に拒否する。
+ */
+export function assertDiffDigestProject(
+  mode: DigestMode,
+  project: { owner: string; number: number } | null,
+): void {
+  if (mode === "diff" && !project) {
+    throw new Error(
+      `${DIGEST_MODE_ENV}=diffにはAR_GITHUB_PROJECT_OWNERとAR_GITHUB_PROJECT_NUMBERの設定が必要です。`,
+    );
+  }
+}
+
 export type DigestItemType = "intake" | "work" | "business" | "task";
 
 /** Project #8の1項目を、差分の比較に使う欄だけへ正規化したもの。 */
@@ -71,8 +86,9 @@ export interface WorkDiffDigestLine {
 }
 
 export interface WorkDiffDigestGroup {
-  kind: "work" | "business" | "other";
-  /** 親のWork・BusinessのURL。「その他」はnull。 */
+  /** parentはProject #8に無く種別の分からない親Issue。 */
+  kind: "work" | "business" | "parent" | "other";
+  /** 親のWork・Business（またはProject外の親Issue）のURL。「その他」はnull。 */
   url: string | null;
   issueNumber: number | null;
   title: string;
@@ -101,6 +117,42 @@ export const DIGEST_LIMITS = {
   /** 1行に出すIssueタイトルの最大文字数。 */
   titleLength: 80,
 } as const;
+
+/**
+ * 取得結果が一時的に欠けた日を見分ける閾値。
+ * 権限の変更やProjectの一時的な欠落で項目が大量に消えた日に、「Projectから外れた」を大量に投稿し、
+ * 欠けたスナップショットを比較の基準にしてしまうのを防ぐ。
+ */
+export const DIGEST_SOURCE_GUARD = {
+  /** 前回のスナップショットの項目数がこれ未満なら判定しない。少ない件数では割合がぶれるため。 */
+  minPreviousItems: 10,
+  /** 「Projectから外れた」が前回の項目数のこの割合（%）以上なら欠けたとみなす。 */
+  removedPercent: 30,
+  /** 今回の未完了の項目数が前回のこの割合（%）未満なら欠けたとみなす。 */
+  retainedPercent: 50,
+} as const;
+
+/**
+ * 前回のスナップショットと今回の項目を比べ、取得結果が欠けていそうなら理由を返す。問題なければnull。
+ * 件数はどちらもスナップショットに残す未完了の項目で数える。
+ */
+export function incompleteSourceReason(
+  baseline: DigestSnapshot,
+  current: DigestSnapshotItem[],
+): string | null {
+  const previous = baseline.items.filter((item) => item.status !== "done");
+  if (previous.length < DIGEST_SOURCE_GUARD.minPreviousItems) return null;
+  const currentUrls = new Set(current.map((item) => item.url));
+  const removed = previous.filter((item) => !currentUrls.has(item.url)).length;
+  const open = current.filter((item) => item.status !== "done").length;
+  if (removed * 100 >= previous.length * DIGEST_SOURCE_GUARD.removedPercent) {
+    return `Projectから外れた項目が${removed}件で、前回の${previous.length}件の${DIGEST_SOURCE_GUARD.removedPercent}%以上です。`;
+  }
+  if (open * 100 < previous.length * DIGEST_SOURCE_GUARD.retainedPercent) {
+    return `未完了の項目が${open}件で、前回の${previous.length}件の${DIGEST_SOURCE_GUARD.retainedPercent}%未満です。`;
+  }
+  return null;
+}
 
 /** Issue URLから番号を読む。読めなければnull。 */
 export function issueNumberFromUrl(url: string): number | null {
@@ -216,7 +268,11 @@ export function buildWorkDiffDigest(
   }
   const buckets = new Map<string, Bucket>();
   const other: Bucket = { kind: "other", url: null, title: "その他", changes: [] };
-  const bucketFor = (url: string, kind: "work" | "business", title: string): Bucket => {
+  const bucketFor = (
+    url: string,
+    kind: Exclude<WorkDiffDigestGroup["kind"], "other">,
+    title: string,
+  ): Bucket => {
     const existing = buckets.get(url);
     if (existing) return existing;
     const created: Bucket = { kind, url, title, changes: [] };
@@ -234,9 +290,9 @@ export function buildWorkDiffDigest(
       const parent = known.get(item.parentUrl);
       if (!parent) {
         // 親がProjectに無くても、親のIssueは分かるのでそのブロックへまとめる。
-        // タイトルは分からないため空にし、描画側でIssue番号だけを出す。
+        // 種別とタイトルは分からないため、描画側で「親: #番号」とだけ出す。
         const title = issueNumberFromUrl(item.parentUrl) === null ? item.parentUrl : "";
-        bucketFor(item.parentUrl, "work", title).changes.push(change);
+        bucketFor(item.parentUrl, "parent", title).changes.push(change);
         continue;
       }
       if (parent.type === "work" || parent.type === "business") {

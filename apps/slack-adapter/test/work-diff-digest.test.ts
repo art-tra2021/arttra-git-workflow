@@ -3,6 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { KnownBlock } from "@slack/web-api";
+import { GitHubCliDependencies } from "../src/github-cli.ts";
 import {
   DelegatingNotificationPayloadSender,
   NotificationOutboxService,
@@ -22,7 +23,13 @@ import {
 import { LocalStateStore, type StateStore } from "../src/state-store.ts";
 import type { HumanWorkItem } from "../src/types.ts";
 import {
+  assertDiffDigestProject,
+  DIGEST_SOURCE_GUARD,
   type DigestSnapshot,
+  type DigestSnapshotItem,
+  diffDigestItems,
+  incompleteSourceReason,
+  normalizeDigestItem,
   parseDigestMode,
   type WorkDiffDigest,
 } from "../src/work-diff-digest.ts";
@@ -33,6 +40,8 @@ const REPO = "https://github.com/art-tra2021/service/issues";
 const DAY1 = Date.parse("2026-11-13T00:00:00Z");
 // 2026-11-14 09:00 JST
 const DAY2 = Date.parse("2026-11-14T00:00:00Z");
+// 2026-11-15 09:00 JST
+const DAY3 = Date.parse("2026-11-15T00:00:00Z");
 
 describe("AR_DIGEST_MODE", () => {
   test("未設定はlist、listとdiffを受け付け、それ以外は拒否する", () => {
@@ -74,6 +83,74 @@ describe("AR_DIGEST_MODE", () => {
           { digestMode: "diff" },
         ),
     ).toThrow("AR_DIGEST_MODE=diffには差分digestを投稿できるnotifierが必要です。");
+  });
+
+  test("diffモードはProject未設定の起動と、差分digest用の取得元が無い構成を拒否する", async () => {
+    expect(() => assertDiffDigestProject("diff", null)).toThrow(
+      "AR_DIGEST_MODE=diffにはAR_GITHUB_PROJECT_OWNERとAR_GITHUB_PROJECT_NUMBERの設定が必要です。",
+    );
+    expect(() => assertDiffDigestProject("list", null)).not.toThrow();
+    expect(() =>
+      assertDiffDigestProject("diff", { owner: "art-tra2021", number: 8 }),
+    ).not.toThrow();
+
+    // Project未設定のfallback経路はclose済みと種別を読めないため、差分digest用の項目を返さない。
+    const cli = new GitHubCliDependencies("art-tra2021/service", "viewer");
+    await expect(cli.loadProjectDigestItems()).rejects.toThrow(
+      "差分digestにはGitHub Project（AR_GITHUB_PROJECT_OWNER/NUMBER）の設定が必要です。",
+    );
+
+    const store = await tempStore();
+    const outbox = new OutboxWorkNotifier(
+      new NotificationOutboxService(
+        store,
+        new DelegatingNotificationPayloadSender(
+          { notify: async () => ({ messageTs: "x" }) },
+          {
+            notify: async () => ({ messageTs: "x" }),
+            digest: async () => {},
+          },
+        ),
+        { channelId: "CWORK" },
+      ),
+    );
+    expect(
+      () =>
+        new WorkNotificationService(
+          { loadProjectItems: async () => [] },
+          store,
+          outbox,
+          () => DAY1,
+          async () => null,
+          3,
+          undefined,
+          null,
+          { digestMode: "diff" },
+        ),
+    ).toThrow(
+      "AR_DIGEST_MODE=diffにはGitHub Projectから差分digest用の項目を読む取得元が必要です。",
+    );
+  });
+
+  test("Project未設定でdiffを指定するとadapterの起動が失敗する", async () => {
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "../src/start.ts")], {
+      cwd: await mkdtemp(join(tmpdir(), "arttra-digest-project-")),
+      env: {
+        PATH: process.env.PATH ?? "",
+        AR_DIGEST_MODE: "diff",
+        SLACK_BOT_TOKEN: "xoxb-test",
+        AR_GITHUB_REPO: "art-tra2021/service",
+        AR_GITHUB_LOGIN: "viewer",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const exitCode = await child.exited;
+    const stderr = await new Response(child.stderr).text();
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain(
+      "AR_DIGEST_MODE=diffにはAR_GITHUB_PROJECT_OWNERとAR_GITHUB_PROJECT_NUMBERの設定が必要です。",
+    );
   });
 
   test("既定のlistモードは従来どおり未完了一覧を投稿し、差分digestを使わない", async () => {
@@ -262,7 +339,7 @@ describe("差分digest", () => {
     expect(groups[0]?.lines.map((line) => line.issueNumber)).toEqual([22, 21]);
   });
 
-  test("親の分からないTaskとIntakeは「その他」にまとめ、最後に出す", async () => {
+  test("親の分からないTaskとIntakeは「その他」へ、Project外の親のTaskは種別を書かない見出しへまとめる", async () => {
     const harness = await diffHarness([work(1)]);
     await harness.service.sendDiffDigest();
     harness.now = DAY2;
@@ -277,13 +354,14 @@ describe("差分digest", () => {
     const groups = harness.diffDigests[0]?.groups ?? [];
     expect(groups.map((group) => [group.kind, group.url, group.title])).toEqual([
       ["work", `${REPO}/1`, "Work 1"],
-      // Projectに無い親でもURLは分かるため、そのIssueのブロックへまとめる。
-      ["work", `${REPO}/99`, ""],
+      // Projectに無い親でもURLは分かるため、そのIssueのブロックへまとめる。種別は分からない。
+      ["parent", `${REPO}/99`, ""],
       ["other", null, "その他"],
     ]);
     expect(groups[2]?.lines.map((line) => line.issueNumber)).toEqual([5, 6]);
     const text = sectionTexts(harness.posts[0]?.blocks ?? []);
-    expect(text[1]).toStartWith(`*Work: <${REPO}/99|#99>*`);
+    expect(text[1]).toStartWith(`*親: <${REPO}/99|#99>*`);
+    expect(text[1]).not.toContain("Work:");
     expect(text[2]).toStartWith("*その他（親の分からないTask・Intake）*");
   });
 
@@ -339,7 +417,52 @@ describe("差分digest", () => {
     for (const text of sectionTexts(message.blocks)) {
       expect(text.length).toBeLessThanOrEqual(SLACK_SECTION_TEXT_LIMIT);
     }
-    expect(JSON.stringify(message.blocks.at(-1))).toContain("ほか3件のWork・Business");
+    // 件数の上限で省いた3件に、block数の上限で載せられなかった14件（各5行）を足して数える。
+    expect(sectionTexts(message.blocks)).toHaveLength(SLACK_BLOCK_LIMIT - 4);
+    expect(JSON.stringify(message.blocks.at(-1))).toContain(
+      `ほか${3 + 14}件のWork・Businessに${9 + 14 * 5}件の変化があります`,
+    );
+  });
+
+  test("block数の上限で落ちたブロックは、件数の上限で省いた分が無くてもfooterに数える", () => {
+    const groups = (count: number): WorkDiffDigest["groups"] =>
+      Array.from({ length: count }, (_, index) => ({
+        kind: "work" as const,
+        url: `${REPO}/${index + 1}`,
+        issueNumber: index + 1,
+        title: `Work ${index + 1}`,
+        lines: [
+          {
+            category: "changed" as const,
+            url: `${REPO}/${1000 + index}`,
+            issueNumber: 1000 + index,
+            title: "Task",
+            detail: "状態 進行中 → レビュー中",
+          },
+        ],
+        hiddenLineCount: 2,
+      }));
+    const digest = (count: number): WorkDiffDigest => ({
+      schemaVersion: 1,
+      date: "2026-11-14",
+      baselineDate: "2026-11-13",
+      groups: groups(count),
+      hiddenGroupCount: 0,
+      hiddenGroupChangeCount: 0,
+      counts: { attention: 0, completed: 0, new: 0, changed: count * 3, removed: 0 },
+    });
+    // header、context、dividerの3つを除いた47個にちょうど収まる時はfooterを出さない。
+    const fits = diffDigestMessage(digest(SLACK_BLOCK_LIMIT - 3));
+    expect(fits.blocks).toHaveLength(SLACK_BLOCK_LIMIT);
+    expect(JSON.stringify(fits.blocks)).not.toContain("GitHub Projectsで確認してください");
+
+    // 1つでも溢れたらfooterの分を空け、載せられない2ブロック（各1行+ほか2件）を数える。
+    const overflow = diffDigestMessage(digest(SLACK_BLOCK_LIMIT - 2));
+    expect(overflow.blocks).toHaveLength(SLACK_BLOCK_LIMIT);
+    expect(sectionTexts(overflow.blocks)).toHaveLength(SLACK_BLOCK_LIMIT - 4);
+    expect(JSON.stringify(overflow.blocks.at(-1))).toContain(
+      "ほか2件のWork・Businessに6件の変化があります",
+    );
   });
 
   test("長いタイトルは1行80字で切り、通常の5行は3000字に収まる", async () => {
@@ -463,13 +586,16 @@ describe("差分digest", () => {
     });
   });
 
-  test("差分digestのintentは既存のwork-digestと別の種別で、日付だけから決まる", async () => {
+  test("差分digestのintentは既存のwork-digestと別の種別で、その日の最初の投稿は日付だけから決まる", async () => {
     const harness = await diffHarness([work(1)]);
     await harness.service.sendDiffDigest();
     harness.now = DAY2;
     harness.items = [work(1, { status: "in-review" })];
     await harness.service.sendDiffDigest();
-    const record = await harness.store.get<{ intentId: string }>("work-diff-digest", "2026-11-14");
+    const record = await harness.store.get<{ intentId: string }>(
+      "work-diff-digest",
+      "2026-11-14#1",
+    );
     const outboxStates = await harness.store.list<{ intentId: string; payload: { kind: string } }>(
       "notification-outbox",
     );
@@ -480,6 +606,263 @@ describe("差分digest", () => {
     expect(record?.intentId).toBe(
       notificationIntentId({ kind: "work-diff-digest", date: "2026-11-14" }),
     );
+  });
+
+  test("担当の並び順や大文字小文字が違うだけの項目は変化なしにする", async () => {
+    const before = normalizeDigestItem(work(1, { owner: "bob", assignees: ["bob", "Alice"] }));
+    const after = normalizeDigestItem(work(1, { owner: "alice", assignees: ["alice", "bob"] }));
+    const baseline: DigestSnapshot = {
+      schemaVersion: 1,
+      date: "2026-11-13",
+      takenAt: "2026-11-13T00:00:00.000Z",
+      baselineDate: null,
+      items: [before],
+    };
+    expect(diffDigestItems(baseline, [after], "2026-11-14")).toEqual([]);
+
+    const harness = await diffHarness([work(1, { assignees: ["carol", "bob", "alice"] })]);
+    await harness.service.sendDiffDigest();
+    harness.now = DAY2;
+    harness.items = [work(1, { assignees: ["alice", "carol", "bob"] })];
+    expect((await harness.service.sendDiffDigest()).outcome).toBe("no-changes");
+    expect(harness.posts).toHaveLength(0);
+  });
+});
+
+describe("差分digestの送信失敗と比較の基準", () => {
+  test("outboxの送信が確実に失敗したら基準を進めず、次の実行が新しいintentで失敗分を含めて投稿する", async () => {
+    const harness = await diffHarness([work(1), work(2)]);
+    await harness.service.sendDiffDigest();
+    harness.now = DAY2;
+    harness.items = [work(1, { status: "in-review" }), work(2)];
+    harness.slackError = slackApiError("not_in_channel");
+    await expect(harness.service.sendDiffDigest()).rejects.toThrow("not_in_channel");
+    expect(harness.posts).toHaveLength(0);
+    expect((await pointerOf(harness.store))?.date).toBe("2026-11-13");
+
+    // 同じ日の再実行。失敗したintentは送り直さず、基準（11-13）からの差分を作り直す。
+    harness.now = DAY2 + 60 * 60 * 1000;
+    harness.items = [
+      work(1, { status: "in-review" }),
+      work(2, { status: "blocked", reasonCode: "BLOCKED" }),
+    ];
+    expect(await harness.service.sendDiffDigest()).toEqual({
+      date: "2026-11-14",
+      baselineDate: "2026-11-13",
+      outcome: "posted",
+      lineCount: 2,
+    });
+    expect(harness.posts).toHaveLength(1);
+    expect(digestLines(harness.diffDigests.at(-1))).toEqual(["2:attention", "1:changed"]);
+    const first = await harness.store.get<{ status: string; intentId: string }>(
+      "work-diff-digest",
+      "2026-11-14#1",
+    );
+    const second = await harness.store.get<{ status: string; intentId: string }>(
+      "work-diff-digest",
+      "2026-11-14#2",
+    );
+    expect(first?.status).toBe("superseded");
+    expect(second?.status).toBe("sent");
+    expect(second?.intentId).not.toBe(first?.intentId);
+    expect(await pointerOf(harness.store)).toMatchObject({ date: "2026-11-14", pending: null });
+    expect((await harness.service.sendDiffDigest()).outcome).toBe("already-posted");
+    expect(harness.posts).toHaveLength(1);
+  });
+
+  test("送れたか分からない（要照合）間は投稿も基準の更新もせず、照合でsentになれば基準を進める", async () => {
+    const harness = await diffHarness([work(1)]);
+    await harness.service.sendDiffDigest();
+    harness.now = DAY2;
+    harness.items = [work(1, { status: "in-review" })];
+    harness.slackError = slackApiError("request_timeout");
+    await expect(harness.service.sendDiffDigest()).rejects.toThrow("request_timeout");
+
+    harness.now = DAY2 + 60 * 60 * 1000;
+    await expect(harness.service.sendDiffDigest()).rejects.toThrow("送信結果が確定していません");
+    harness.now = DAY3;
+    await expect(harness.service.sendDiffDigest()).rejects.toThrow("送信結果が確定していません");
+    expect(harness.posts).toHaveLength(0);
+    expect((await pointerOf(harness.store))?.date).toBe("2026-11-13");
+
+    // 運用者がSlackと照合し、既存の投稿をsentとして記録した場合を再現する。
+    const [state] = await harness.store.listEntries<Record<string, unknown>>("notification-outbox");
+    expect(state?.value.status).toBe("needs_review");
+    await harness.store.set("notification-outbox", state?.key as string, {
+      ...state?.value,
+      status: "sent",
+    });
+    harness.items = [work(1, { status: "in-review" }), work(2)];
+    const result = await harness.service.sendDiffDigest();
+    // 11-14の投稿を基準へ採用し、11-15は11-14からの差分だけを出す。
+    expect(result).toMatchObject({
+      date: "2026-11-15",
+      baselineDate: "2026-11-14",
+      outcome: "posted",
+    });
+    expect(digestLines(harness.diffDigests.at(-1))).toEqual(["2:new"]);
+  });
+
+  test("Slackへの投稿後に記録の更新だけが失敗しても、再実行は二重に投稿せず基準を進める", async () => {
+    const harness = await diffHarness([work(1)]);
+    await harness.service.sendDiffDigest();
+    harness.now = DAY2;
+    harness.items = [work(1, { status: "in-review" })];
+    harness.failSetNamespace = "work-digest-snapshot";
+    await expect(harness.service.sendDiffDigest()).rejects.toThrow("store_unavailable");
+    expect(harness.posts).toHaveLength(1);
+    expect(await pointerOf(harness.store)).toMatchObject({
+      date: "2026-11-13",
+      pending: { date: "2026-11-14", attempt: 1 },
+    });
+
+    harness.items = [work(1, { status: "in-review" }), work(2)];
+    expect((await harness.service.sendDiffDigest()).outcome).toBe("already-posted");
+    expect(harness.posts).toHaveLength(1);
+    expect(await pointerOf(harness.store)).toMatchObject({ date: "2026-11-14", pending: null });
+
+    harness.now = DAY3;
+    await harness.service.sendDiffDigest();
+    expect(harness.posts).toHaveLength(2);
+    expect(digestLines(harness.diffDigests.at(-1))).toEqual(["2:new"]);
+  });
+
+  test("翌日に記録の更新だけが失敗した前日分を見つけたら、前日分を基準へ採用して当日分だけを出す", async () => {
+    const harness = await diffHarness([work(1)]);
+    await harness.service.sendDiffDigest();
+    harness.now = DAY2;
+    harness.items = [work(1, { status: "in-review" })];
+    harness.failSetNamespace = "work-digest-snapshot";
+    await expect(harness.service.sendDiffDigest()).rejects.toThrow("store_unavailable");
+
+    harness.now = DAY3;
+    harness.items = [work(1, { status: "in-review" }), work(2)];
+    expect(await harness.service.sendDiffDigest()).toMatchObject({
+      date: "2026-11-15",
+      baselineDate: "2026-11-14",
+      outcome: "posted",
+    });
+    expect(harness.posts).toHaveLength(2);
+    expect(digestLines(harness.diffDigests.at(-1))).toEqual(["2:new"]);
+  });
+
+  test("送信に失敗した日の翌日は、前日分を送り直さず、最後に成功した基準から前日分を含めて一度だけ投稿する", async () => {
+    const harness = await diffHarness([work(1), work(2)]);
+    await harness.service.sendDiffDigest();
+    harness.now = DAY2;
+    harness.items = [work(1, { status: "in-review" }), work(2)];
+    harness.slackError = slackApiError("channel_not_found");
+    await expect(harness.service.sendDiffDigest()).rejects.toThrow("channel_not_found");
+
+    harness.now = DAY3;
+    harness.items = [work(1, { status: "in-review" }), work(2), work(3)];
+    expect(await harness.service.sendDiffDigest()).toEqual({
+      date: "2026-11-15",
+      baselineDate: "2026-11-13",
+      outcome: "posted",
+      lineCount: 2,
+    });
+    expect(harness.posts).toHaveLength(1);
+    expect(harness.diffDigests.at(-1)?.date).toBe("2026-11-15");
+    expect(digestLines(harness.diffDigests.at(-1))).toEqual(["3:new", "1:changed"]);
+    expect(
+      (await harness.store.get<{ status: string }>("work-diff-digest", "2026-11-14#1"))?.status,
+    ).toBe("superseded");
+  });
+
+  test("outboxへ渡す前に止まった前日分も、翌日は送り直さず当日の差分へまとめる", async () => {
+    const harness = await diffHarness([work(1)]);
+    await harness.service.sendDiffDigest();
+    harness.now = DAY2;
+    harness.items = [work(1, { status: "in-review" })];
+    harness.failBeforeOutbox = true;
+    await expect(harness.service.sendDiffDigest()).rejects.toThrow("process_stopped");
+
+    harness.now = DAY3;
+    harness.items = [work(1, { status: "in-review" }), work(2)];
+    await harness.service.sendDiffDigest();
+    expect(harness.posts).toHaveLength(1);
+    expect(harness.diffDigests.at(-1)?.baselineDate).toBe("2026-11-13");
+    expect(digestLines(harness.diffDigests.at(-1))).toEqual(["2:new", "1:changed"]);
+  });
+});
+
+describe("取得結果の欠落ガード", () => {
+  const snapshot = (items: DigestSnapshotItem[]): DigestSnapshot => ({
+    schemaVersion: 1,
+    date: "2026-11-13",
+    takenAt: "2026-11-13T00:00:00.000Z",
+    baselineDate: null,
+    items,
+  });
+  const works = (count: number) =>
+    Array.from({ length: count }, (_, index) => normalizeDigestItem(work(index + 1)));
+  const completed = (item: DigestSnapshotItem): DigestSnapshotItem => ({ ...item, status: "done" });
+
+  test("閾値は定数にまとめる", () => {
+    expect(DIGEST_SOURCE_GUARD).toEqual({
+      minPreviousItems: 10,
+      removedPercent: 30,
+      retainedPercent: 50,
+    });
+  });
+
+  test("前回10件以上で「外れた」が30%以上なら欠けたとみなし、30%未満なら通す", () => {
+    const previous = works(10);
+    expect(incompleteSourceReason(snapshot(previous), previous.slice(3))).toContain(
+      "Projectから外れた項目が3件",
+    );
+    expect(incompleteSourceReason(snapshot(previous), previous.slice(2))).toBeNull();
+  });
+
+  test("今回の未完了が前回の半分未満なら欠けたとみなし、半分ちょうどなら通す", () => {
+    const previous = works(10);
+    const sixDone = previous.map((item, index) => (index < 6 ? completed(item) : item));
+    const fiveDone = previous.map((item, index) => (index < 5 ? completed(item) : item));
+    expect(incompleteSourceReason(snapshot(previous), sixDone)).toContain("未完了の項目が4件");
+    expect(incompleteSourceReason(snapshot(previous), fiveDone)).toBeNull();
+  });
+
+  test("前回が10件未満なら、全部が外れても判定しない", () => {
+    const previous = works(9);
+    expect(incompleteSourceReason(snapshot(previous), [])).toBeNull();
+  });
+
+  test("欠けた日は投稿も基準の更新もせず、理由を返り値とログに残す", async () => {
+    const initial = Array.from({ length: 10 }, (_, index) => work(index + 1));
+    const harness = await diffHarness(initial);
+    await harness.service.sendDiffDigest();
+    harness.now = DAY2;
+    harness.items = initial.slice(3);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    let result: Awaited<ReturnType<WorkNotificationService["sendDiffDigest"]>>;
+    try {
+      result = await harness.service.sendDiffDigest();
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(result).toMatchObject({
+      date: "2026-11-14",
+      baselineDate: "2026-11-13",
+      outcome: "source-incomplete",
+      lineCount: 0,
+    });
+    expect(result.reason).toContain("Projectから外れた項目が3件");
+    expect(warnings.join("\n")).toContain("比較の基準（2026-11-13）も進めませんでした");
+    expect(harness.posts).toHaveLength(0);
+    expect((await pointerOf(harness.store))?.date).toBe("2026-11-13");
+    expect(await harness.store.get("work-digest-snapshot", "2026-11-14")).toBeNull();
+
+    // 取得が戻った日は、欠ける前の基準（11-13）と比べる。
+    harness.now = DAY3;
+    harness.items = [...initial.slice(0, 9), work(11)];
+    expect(await harness.service.sendDiffDigest()).toMatchObject({
+      baselineDate: "2026-11-13",
+      outcome: "posted",
+    });
+    expect(digestLines(harness.diffDigests.at(-1))).toEqual(["11:new", "10:removed"]);
   });
 });
 
@@ -493,13 +876,12 @@ async function diffHarness(
   initial: HumanWorkItem[],
   options: { digestMode?: "list" | "diff" } = { digestMode: "diff" },
 ) {
-  const store = await tempStore();
+  const base = await tempStore();
   const posts: PostedMessage[] = [];
   const listDigests: number[] = [];
   const diffDigests: WorkDiffDigest[] = [];
   const resolvedLogins: string[] = [];
   const harness = {
-    store,
     posts,
     listDigests,
     diffDigests,
@@ -507,12 +889,41 @@ async function diffHarness(
     items: initial,
     now: DAY1,
     failBeforeOutbox: false,
+    /** 次のSlack投稿を失敗させるエラー。一度使うと消える。 */
+    slackError: null as Error | null,
+    /** 次にこのnamespaceへ書く時だけ保存を失敗させる。 */
+    failSetNamespace: null as string | null,
+    store: null as unknown as StateStore,
     service: null as unknown as WorkNotificationService,
   };
+  // 保存の途中で止まる場合を再現するため、setだけを差し替えたstore。
+  const store: StateStore = {
+    get: (namespace, key) => base.get(namespace, key),
+    list: (namespace) => base.list(namespace),
+    listEntries: (namespace) => base.listEntries(namespace),
+    set: async (namespace, key, value) => {
+      if (harness.failSetNamespace === namespace) {
+        harness.failSetNamespace = null;
+        throw new Error("store_unavailable");
+      }
+      await base.set(namespace, key, value);
+    },
+    create: (namespace, key, value) => base.create(namespace, key, value),
+    compareAndSet: (namespace, key, revision, value) =>
+      base.compareAndSet(namespace, key, revision, value),
+    remove: (namespace, key) => base.remove(namespace, key),
+    append: (namespace, value) => base.append(namespace, value),
+  };
+  harness.store = store;
   const slack = new SlackWorkNotifier(
     {
       chat: {
         postMessage: async (message: PostedMessage) => {
+          const error = harness.slackError;
+          if (error) {
+            harness.slackError = null;
+            throw error;
+          }
           posts.push(message);
           return { ok: true, ts: `${posts.length}.0` };
         },
@@ -563,6 +974,7 @@ async function diffHarness(
         }
         await outboxNotifier.diffDigest(digest, metadata);
       },
+      diffDigestDeliveryStatus: outboxNotifier.diffDigestDeliveryStatus.bind(outboxNotifier),
     },
     () => harness.now,
     async (login) => {
@@ -575,6 +987,24 @@ async function diffHarness(
     { mode: "direct", ...(options.digestMode ? { digestMode: options.digestMode } : {}) },
   );
   return harness;
+}
+
+/** Slack APIのエラー。codeで通知outboxが確実な失敗（failed）か要照合（needs_review）かを決める。 */
+function slackApiError(code: string): Error {
+  return Object.assign(new Error(`An API error occurred: ${code}`), { data: { error: code } });
+}
+
+async function pointerOf(store: StateStore) {
+  return store.get<{ date: string; pending: { date: string; attempt: number } | null }>(
+    "work-digest-snapshot-pointer",
+    "latest",
+  );
+}
+
+function digestLines(digest: WorkDiffDigest | undefined): string[] {
+  return (digest?.groups ?? []).flatMap((group) =>
+    group.lines.map((line) => `${line.issueNumber}:${line.category}`),
+  );
 }
 
 async function tempStore(): Promise<StateStore> {

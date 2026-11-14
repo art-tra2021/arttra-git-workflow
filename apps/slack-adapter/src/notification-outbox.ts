@@ -903,6 +903,10 @@ export class OutboxWorkNotifier implements WorkNotifier {
     };
     await this.outbox.deliver({ metadata, payload });
   }
+
+  async diffDigestDeliveryStatus(intentId: string): Promise<NotificationOutboxStatus | null> {
+    return (await this.outbox.get(intentId))?.status ?? null;
+  }
 }
 
 export function notificationIntentId(value: unknown): string {

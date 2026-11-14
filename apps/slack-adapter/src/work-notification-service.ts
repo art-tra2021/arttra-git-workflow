@@ -12,6 +12,7 @@ import {
 } from "./notification-mode.ts";
 import {
   type NotificationIntentMetadata,
+  type NotificationOutboxStatus,
   type NotificationRequiredActionKind,
   notificationIntentId,
 } from "./notification-outbox.ts";
@@ -23,8 +24,10 @@ import {
   buildWorkDiffDigest,
   type DigestMode,
   type DigestSnapshot,
+  type DigestSnapshotItem,
   diffDigestItems,
   digestLineCount,
+  incompleteSourceReason,
   normalizeDigestItem,
   snapshotItems,
   type WorkDiffDigest,
@@ -42,7 +45,8 @@ export interface WorkItemSource {
   loadProjectItems(): Promise<HumanWorkItem[]>;
   /**
    * 差分digest用の項目。closeしたIssueもstatus doneで含め、issueTypeとparentUrlを埋める。
-   * 実装しないsourceではloadProjectItemsで代わりにし、closeしたIssueは「Projectから外れた」になる。
+   * AR_DIGEST_MODE=diffで必要になる。loadProjectItemsでは代わりにしない
+   * （closeしたIssueが「Projectから外れた」に、種別がすべてWorkになるため）。
    */
   loadProjectDigestItems?(): Promise<HumanWorkItem[]>;
 }
@@ -56,6 +60,11 @@ export interface WorkNotifier {
   digest(items: HumanWorkItem[], metadata?: NotificationIntentMetadata): Promise<void>;
   /** 前回からの差分digestをchannelへ投稿する。AR_DIGEST_MODE=diffで必要になる。 */
   diffDigest?(digest: WorkDiffDigest, metadata?: NotificationIntentMetadata): Promise<void>;
+  /**
+   * 差分digestのintentの通知outboxでの状態を返す。intentが無ければnull。
+   * 前回の投稿が失敗したかを確かめて、比較の基準を進めてよいかを決めるために使う。
+   */
+  diffDigestDeliveryStatus?(intentId: string): Promise<NotificationOutboxStatus | null>;
   /**
    * channel/threadへ投稿せず、metadata.requiredActionの対応必須DMだけを送る。
    * DM経路を持たないnotifierは実装しない。
@@ -93,22 +102,46 @@ interface WorkNotificationState {
 
 type DeadlineStage = "due-soon" | "due-today" | "overdue";
 
+/**
+ * 差分digestの比較の基準と、送信結果を待っている投稿。
+ * dateは比較の基準にするスナップショットの日付で、投稿がoutboxでsentになった時か、
+ * 投稿が要らないと判断した時（初回、変化なし）にだけ進める。
+ */
 interface DigestSnapshotPointer {
   schemaVersion: 1;
   date: string;
+  /** dateのスナップショットの比較元。初回はnull。 */
+  baselineDate: string | null;
+  /** dateの日に基準を進めた理由。同じ日の再実行の返り値に使う。 */
+  outcome: "baseline-saved" | "no-changes" | "posted";
+  /** 投稿記録を作ったが、outboxでsentになったと確かめていない投稿。 */
+  pending: DiffDigestRecordKey | null;
 }
 
-/** 日付ごとの差分digestの投稿記録。同じ日の再実行で二重に投稿しないために使う。 */
+interface DiffDigestRecordKey {
+  date: string;
+  attempt: number;
+}
+
+/**
+ * 差分digestの投稿記録。keyは日付と試行回数（例: 2026-11-14#1）。
+ * 送信がsentになるまで比較の基準を進めないため、基準にする予定のスナップショット（items）も持つ。
+ */
 interface DiffDigestRecord {
   schemaVersion: 1;
   date: string;
+  /** 同じ日に送り直した回数を含む試行の番号。1から始まる。 */
+  attempt: number;
   baselineDate: string;
   intentId: string;
   digest: WorkDiffDigest;
   lineCount: number;
-  status: "pending" | "sent";
+  items: DigestSnapshotItem[];
+  /** supersededは送信に失敗し、次の実行の差分へまとめ直したことを表す。 */
+  status: "pending" | "sent" | "superseded";
   createdAt: string;
   sentAt?: string;
+  supersededAt?: string;
 }
 
 export interface DiffDigestResult {
@@ -118,11 +151,14 @@ export interface DiffDigestResult {
   baselineDate: string | null;
   /**
    * baseline-savedは初回のため基準だけを保存した、no-changesは変化がなく投稿しなかった、
-   * postedは投稿した、already-postedは同じ日に投稿済みのため何もしなかったことを表す。
+   * postedは投稿した、already-postedは同じ日に投稿済みのため何もしなかった、
+   * source-incompleteは取得結果が欠けていそうなため投稿も基準の更新もしなかったことを表す。
    */
-  outcome: "baseline-saved" | "no-changes" | "posted" | "already-posted";
+  outcome: "baseline-saved" | "no-changes" | "posted" | "already-posted" | "source-incomplete";
   /** この実行で投稿した差分の行数。 */
   lineCount: number;
+  /** source-incompleteの理由。 */
+  reason?: string;
 }
 
 interface WorkDeadlineNotificationState {
@@ -169,8 +205,16 @@ export class WorkNotificationService {
     this.github = github;
     this.mode = options.mode ?? "thread";
     this.digestMode = options.digestMode ?? "list";
-    if (this.digestMode === "diff" && !notifier.diffDigest) {
+    if (
+      this.digestMode === "diff" &&
+      (!notifier.diffDigest || !notifier.diffDigestDeliveryStatus)
+    ) {
       throw new Error("AR_DIGEST_MODE=diffには差分digestを投稿できるnotifierが必要です。");
+    }
+    if (this.digestMode === "diff" && !source.loadProjectDigestItems) {
+      throw new Error(
+        "AR_DIGEST_MODE=diffにはGitHub Projectから差分digest用の項目を読む取得元が必要です。",
+      );
     }
   }
 
@@ -196,7 +240,11 @@ export class WorkNotificationService {
         item,
         "state",
         {
-          intentId: notificationIntentId({ kind: "work-state", issueUrl: item.url, fingerprint }),
+          intentId: notificationIntentId({
+            kind: "work-state",
+            issueUrl: item.url,
+            fingerprint,
+          }),
           ...(sourceDeliveryId ? { sourceDeliveryId } : {}),
         },
         actorSlackUserId,
@@ -279,51 +327,73 @@ export class WorkNotificationService {
   }
 
   /**
-   * Project #8のスナップショットを日付（JST）キーで保存し、直前のスナップショットとの差分を投稿する。
+   * Project #8のスナップショットを日付（JST）キーで保存し、比較の基準との差分を投稿する。
    *
    * - 初回は投稿せず、基準のスナップショットだけを保存する。
-   * - 変化のない日は投稿せず、スナップショットだけを更新する。
-   * - intent IDは種別と日付だけで決め、同じ日の再実行では投稿済みの記録を見て二重に投稿しない。
-   *   投稿した日の再実行ではスナップショットを上書きせず、投稿後の変化を翌日の差分へ回す。
+   * - 変化のない日は投稿せず、その日のスナップショットを基準にする。
+   * - 投稿する日は、送信がoutboxでsentになった時にだけ、その日のスナップショットを基準にする。
+   *   送信に失敗したら基準を進めず、次の実行（同じ日でも翌日でも）が最後に成功した基準と比べる。
+   * - 基準を進めた日の再実行は何もしない。その後の変化は翌日の差分に入る。
+   * - 取得結果が欠けていそうな日は、投稿も基準の更新もしない。
    */
   async sendDiffDigest(): Promise<DiffDigestResult> {
     const date = dateInTokyo(this.now());
-    const recorded = await this.store.get<DiffDigestRecord>(DIFF_DIGEST_NAMESPACE, date);
-    if (recorded) return this.resumeDiffDigest(recorded);
+    let pointer = await this.loadDigestPointer();
+    let attempt = 1;
+    if (pointer?.pending) {
+      const pending = await this.store.get<DiffDigestRecord>(
+        DIFF_DIGEST_NAMESPACE,
+        diffDigestRecordKey(pointer.pending),
+      );
+      if (pending?.status === "pending") {
+        const settled = await this.settlePendingDiffDigest(pending, date);
+        if (settled.result) return settled.result;
+        attempt = settled.nextAttempt;
+        pointer = await this.loadDigestPointer();
+      } else if (pending?.status === "superseded" && pending.date === date) {
+        // まとめ直した記録を残したままpointerの更新だけが失敗した場合も、次の試行番号で作り直す。
+        attempt = pending.attempt + 1;
+      }
+    }
+    if (pointer && pointer.date === date && !pointer.pending) {
+      return {
+        date,
+        baselineDate: pointer.baselineDate,
+        outcome: pointer.outcome === "posted" ? "already-posted" : pointer.outcome,
+        lineCount: 0,
+      };
+    }
 
-    const loaded = this.source.loadProjectDigestItems
-      ? await this.source.loadProjectDigestItems()
-      : await this.source.loadProjectItems();
-    const current = loaded.map(normalizeDigestItem);
-    const todaySnapshot = await this.store.get<DigestSnapshot>(DIGEST_SNAPSHOT_NAMESPACE, date);
-    const pointer = await this.store.get<DigestSnapshotPointer>(
-      DIGEST_SNAPSHOT_POINTER_NAMESPACE,
-      DIGEST_SNAPSHOT_POINTER_KEY,
-    );
-    // 同じ日の2回目以降は、その日の最初の実行と同じ比較元を使う。
-    const baselineDate = todaySnapshot
-      ? todaySnapshot.baselineDate
-      : pointer && pointer.date !== date
-        ? pointer.date
-        : null;
-    const baseline = baselineDate
-      ? await this.store.get<DigestSnapshot>(DIGEST_SNAPSHOT_NAMESPACE, baselineDate)
+    const loadDigestItems = this.source.loadProjectDigestItems;
+    if (!loadDigestItems) {
+      throw new Error("差分digest用の項目を読む取得元がありません。");
+    }
+    const current = (await loadDigestItems.call(this.source)).map(normalizeDigestItem);
+    const baseline = pointer
+      ? await this.store.get<DigestSnapshot>(DIGEST_SNAPSHOT_NAMESPACE, pointer.date)
       : null;
-
-    await this.store.set<DigestSnapshot>(DIGEST_SNAPSHOT_NAMESPACE, date, {
-      schemaVersion: 1,
-      date,
-      takenAt: new Date(this.now()).toISOString(),
-      baselineDate: baseline ? baseline.date : null,
-      items: snapshotItems(current),
-    });
-    await this.store.set<DigestSnapshotPointer>(
-      DIGEST_SNAPSHOT_POINTER_NAMESPACE,
-      DIGEST_SNAPSHOT_POINTER_KEY,
-      { schemaVersion: 1, date },
-    );
     if (!baseline) {
-      return { date, baselineDate: null, outcome: "baseline-saved", lineCount: 0 };
+      await this.commitDigestBaseline(date, null, snapshotItems(current), "baseline-saved");
+      return {
+        date,
+        baselineDate: null,
+        outcome: "baseline-saved",
+        lineCount: 0,
+      };
+    }
+
+    const reason = incompleteSourceReason(baseline, current);
+    if (reason) {
+      console.warn(
+        `差分digestを投稿せず、比較の基準（${baseline.date}）も進めませんでした。取得結果が欠けている可能性があります: ${reason}`,
+      );
+      return {
+        date,
+        baselineDate: baseline.date,
+        outcome: "source-incomplete",
+        lineCount: 0,
+        reason,
+      };
     }
 
     const digest = buildWorkDiffDigest(diffDigestItems(baseline, current, date), {
@@ -332,38 +402,96 @@ export class WorkNotificationService {
       knownItems: [...current, ...baseline.items],
     });
     if (!digest) {
-      return { date, baselineDate: baseline.date, outcome: "no-changes", lineCount: 0 };
+      await this.commitDigestBaseline(date, baseline.date, snapshotItems(current), "no-changes");
+      return {
+        date,
+        baselineDate: baseline.date,
+        outcome: "no-changes",
+        lineCount: 0,
+      };
     }
     const record: DiffDigestRecord = {
       schemaVersion: 1,
       date,
+      attempt,
       baselineDate: baseline.date,
-      intentId: notificationIntentId({ kind: "work-diff-digest", date }),
+      intentId: diffDigestIntentId(date, attempt),
       digest,
       lineCount: digestLineCount(digest),
+      items: snapshotItems(current),
       status: "pending",
       createdAt: new Date(this.now()).toISOString(),
     };
-    // 同時に走った実行があれば、先に記録した方の中身を投稿してoutboxのintent衝突を避ける。
-    if (!(await this.store.create(DIFF_DIGEST_NAMESPACE, date, record))) {
-      const existing = await this.store.get<DiffDigestRecord>(DIFF_DIGEST_NAMESPACE, date);
+    const key = diffDigestRecordKey(record);
+    // 同時に走った実行があれば、先に記録した方の中身を同じintentで送る。outboxが一度だけ投稿する。
+    if (!(await this.store.create(DIFF_DIGEST_NAMESPACE, key, record))) {
+      const existing = await this.store.get<DiffDigestRecord>(DIFF_DIGEST_NAMESPACE, key);
       if (!existing) throw new Error("差分digestの投稿記録を読み取れませんでした。");
-      return this.resumeDiffDigest(existing);
+      if (existing.status === "sent") {
+        return {
+          date,
+          baselineDate: existing.baselineDate,
+          outcome: "already-posted",
+          lineCount: 0,
+        };
+      }
+      if (existing.status === "superseded") {
+        throw new Error("差分digestの投稿記録が同時に更新されました。再実行してください。");
+      }
+      await this.markDigestPending(existing);
+      return this.deliverDiffDigest(existing);
     }
+    await this.markDigestPending(record);
     return this.deliverDiffDigest(record);
   }
 
-  private async resumeDiffDigest(record: DiffDigestRecord): Promise<DiffDigestResult> {
-    if (record.status === "sent") {
+  /**
+   * 送信結果を確かめていない投稿を片づける。
+   * outboxでsentなら基準を進め、送っていない・確実に失敗したなら次の差分へまとめ直す。
+   * 送れたか分からない（送信中、要照合）なら、二重に投稿しないよう止める。
+   */
+  private async settlePendingDiffDigest(
+    record: DiffDigestRecord,
+    today: string,
+  ): Promise<{ result: DiffDigestResult | null; nextAttempt: number }> {
+    const status = await this.diffDigestDeliveryStatus(record.intentId);
+    if (status === "sent") {
+      await this.commitPostedDiffDigest(record);
+      if (record.date !== today) return { result: null, nextAttempt: 1 };
       return {
-        date: record.date,
-        baselineDate: record.baselineDate,
-        outcome: "already-posted",
-        lineCount: 0,
+        result: {
+          date: today,
+          baselineDate: record.baselineDate,
+          outcome: "already-posted",
+          lineCount: 0,
+        },
+        nextAttempt: 1,
       };
     }
-    // 記録後に投稿が終わらなかった場合だけ、同じ中身を同じintentで送り直す。
-    return this.deliverDiffDigest(record);
+    if (status === "sending" || status === "needs_review") {
+      throw new Error(
+        `${record.date}の差分digest（intent ${record.intentId}）の送信結果が確定していません。通知outboxを監査し、Slackと照合してから再実行してください。`,
+      );
+    }
+    if (record.date === today && status !== "failed") {
+      // 記録後に送信まで進まなかった同じ日の投稿は、同じ中身を同じintentで送り直す。
+      return { result: await this.deliverDiffDigest(record), nextAttempt: 1 };
+    }
+    // 確実に失敗した投稿と、前日以前に送れなかった投稿は送り直さず、
+    // 最後に成功した基準からの差分（失敗した日の分を含む）として今回の投稿にまとめる。
+    await this.store.set<DiffDigestRecord>(DIFF_DIGEST_NAMESPACE, diffDigestRecordKey(record), {
+      ...record,
+      status: "superseded",
+      supersededAt: new Date(this.now()).toISOString(),
+    });
+    const pointer = await this.loadDigestPointer();
+    if (pointer) {
+      await this.saveDigestPointer({ ...pointer, pending: null });
+    }
+    return {
+      result: null,
+      nextAttempt: record.date === today ? record.attempt + 1 : 1,
+    };
   }
 
   private async deliverDiffDigest(record: DiffDigestRecord): Promise<DiffDigestResult> {
@@ -371,18 +499,83 @@ export class WorkNotificationService {
     if (!diffDigest) {
       throw new Error("差分digestを投稿できるnotifierがありません。");
     }
-    await diffDigest.call(this.notifier, record.digest, { intentId: record.intentId });
-    await this.store.set<DiffDigestRecord>(DIFF_DIGEST_NAMESPACE, record.date, {
-      ...record,
-      status: "sent",
-      sentAt: new Date(this.now()).toISOString(),
+    await diffDigest.call(this.notifier, record.digest, {
+      intentId: record.intentId,
     });
+    await this.commitPostedDiffDigest(record);
     return {
       date: record.date,
       baselineDate: record.baselineDate,
       outcome: "posted",
       lineCount: record.lineCount,
     };
+  }
+
+  private async diffDigestDeliveryStatus(
+    intentId: string,
+  ): Promise<NotificationOutboxStatus | null> {
+    const status = this.notifier.diffDigestDeliveryStatus;
+    if (!status) {
+      throw new Error("差分digestの送信結果を確かめられるnotifierがありません。");
+    }
+    return status.call(this.notifier, intentId);
+  }
+
+  /** 投稿記録を作ったことをpointerへ残す。翌日以降の実行が送信結果を確かめられるようにする。 */
+  private async markDigestPending(record: DiffDigestRecord): Promise<void> {
+    const pointer = await this.loadDigestPointer();
+    if (!pointer) throw new Error("差分digestの比較の基準を読み取れませんでした。");
+    await this.saveDigestPointer({
+      ...pointer,
+      pending: { date: record.date, attempt: record.attempt },
+    });
+  }
+
+  /** outboxでsentになった投稿のスナップショットを、比較の基準にする。 */
+  private async commitPostedDiffDigest(record: DiffDigestRecord): Promise<void> {
+    await this.commitDigestBaseline(record.date, record.baselineDate, record.items, "posted");
+    await this.store.set<DiffDigestRecord>(DIFF_DIGEST_NAMESPACE, diffDigestRecordKey(record), {
+      ...record,
+      status: "sent",
+      sentAt: new Date(this.now()).toISOString(),
+    });
+  }
+
+  private async commitDigestBaseline(
+    date: string,
+    baselineDate: string | null,
+    items: DigestSnapshotItem[],
+    outcome: DigestSnapshotPointer["outcome"],
+  ): Promise<void> {
+    await this.store.set<DigestSnapshot>(DIGEST_SNAPSHOT_NAMESPACE, date, {
+      schemaVersion: 1,
+      date,
+      takenAt: new Date(this.now()).toISOString(),
+      baselineDate,
+      items,
+    });
+    await this.saveDigestPointer({
+      schemaVersion: 1,
+      date,
+      baselineDate,
+      outcome,
+      pending: null,
+    });
+  }
+
+  private async loadDigestPointer(): Promise<DigestSnapshotPointer | null> {
+    return this.store.get<DigestSnapshotPointer>(
+      DIGEST_SNAPSHOT_POINTER_NAMESPACE,
+      DIGEST_SNAPSHOT_POINTER_KEY,
+    );
+  }
+
+  private async saveDigestPointer(pointer: DigestSnapshotPointer): Promise<void> {
+    await this.store.set<DigestSnapshotPointer>(
+      DIGEST_SNAPSHOT_POINTER_NAMESPACE,
+      DIGEST_SNAPSHOT_POINTER_KEY,
+      pointer,
+    );
   }
 
   private async notifyThreaded(
@@ -516,7 +709,13 @@ export class WorkNotificationService {
       const unreachableRecipients = unreachableUsers([...new Set(unreachable)]);
       await this.notifier.notify(
         payloadItem,
-        { kind, threadTs: null, slackUserId: null, standalone: true, unreachableRecipients },
+        {
+          kind,
+          threadTs: null,
+          slackUserId: null,
+          standalone: true,
+          unreachableRecipients,
+        },
         channelNoticeMetadata(metadata, unreachableRecipients),
       );
     }
@@ -644,5 +843,21 @@ function compareWorkItems(left: HumanWorkItem, right: HumanWorkItem): number {
     priority[left.priority] - priority[right.priority] ||
     (left.targetDate ?? "9999-12-31").localeCompare(right.targetDate ?? "9999-12-31") ||
     left.issueNumber - right.issueNumber
+  );
+}
+
+function diffDigestRecordKey(key: DiffDigestRecordKey): string {
+  return `${key.date}#${key.attempt}`;
+}
+
+/**
+ * 差分digestのintent ID。種別と日付で決め、同じ日に送り直す2回目以降だけ試行の番号を足す。
+ * outboxは同じintentに別の中身を受け付けないため、まとめ直した投稿は別のintentにする。
+ */
+function diffDigestIntentId(date: string, attempt: number): string {
+  return notificationIntentId(
+    attempt === 1
+      ? { kind: "work-diff-digest", date }
+      : { kind: "work-diff-digest", date, attempt },
   );
 }

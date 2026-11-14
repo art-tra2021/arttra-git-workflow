@@ -64,7 +64,7 @@ import { SlackRequirementNotifier } from "./slack-requirement-notifier.ts";
 import { SlackReviewNotifier } from "./slack-review-notifier.ts";
 import { SlackWorkNotifier } from "./slack-work-notifier.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
-import { DIGEST_MODE_ENV, parseDigestMode } from "./work-diff-digest.ts";
+import { assertDiffDigestProject, DIGEST_MODE_ENV, parseDigestMode } from "./work-diff-digest.ts";
 import { WorkNotificationService } from "./work-notification-service.ts";
 
 const transport = (process.env.AR_SLACK_TRANSPORT ?? "socket").trim().toLowerCase();
@@ -83,6 +83,8 @@ const owners = (process.env.AR_GITHUB_OWNERS ?? repository.split("/")[0] ?? gith
   .map((owner) => owner.trim())
   .filter(Boolean);
 const project = projectConfig();
+// diffはProject経由の取得を前提にするため、Project未設定のfallback経路では差分を作らず起動を止める。
+assertDiffDigestProject(digestMode, project);
 const approverUserIds = csv("AR_SLACK_APPROVER_IDS");
 const selfApproverUserIds = csv("AR_SLACK_SELF_APPROVER_IDS");
 const notificationReplayOperatorIds = csv("AR_NOTIFICATION_REPLAY_OPERATOR_IDS");
