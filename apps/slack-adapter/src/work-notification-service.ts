@@ -293,6 +293,18 @@ export class WorkNotificationService {
     }
     const requiredAction = workRequiredAction(item);
     if (!requiredAction) return;
+    if (requiredAction.recipientLogins.length === 0) {
+      // 担当者のいないblocker・期限超過や、PR作成者が分からないconflictは、DMの宛先がなく誰にも届かない。
+      // 拾う人がいないこと自体をチームが知る必要があるため、全員向けのchannel単独投稿にする。
+      if (requiredAction.kind !== "due-today") {
+        await this.notifier.notify(
+          payloadItem,
+          { kind, threadTs: null, slackUserId: null, standalone: true },
+          channelNoticeMetadata(metadata),
+        );
+      }
+      return;
+    }
     const { slackUserIds, unreachableLogins } = await partitionDirectRecipients(
       requiredAction.recipientLogins,
       this.resolveSlackUserId,

@@ -13,13 +13,14 @@ Slackは正本ではなく、GitHub IssuesとGitHub Projectsを人間が追い�
 本番は`direct`で運用する。
 `thread`と`direct`以外の値では、adapterは起動しない。
 
-`direct`でchannelへ出す投稿は、次の4種類だけである。
+`direct`でchannelへ出す投稿は、次の5種類だけである。
 各投稿の内容は`apps/slack-adapter/README.md`の「通知方式」の表にある。
 
 - 停止ボタン付きのセルフマージ予定の警告
 - 急ぎで未割当（Projectsで未着手・緊急かつ担当者なし）の仕事。Taskも含む
 - 日次digest
 - 対応必須の出来事で、DMを送れない宛先（GitHub未連携の人、GitHub team reviewer）がいる場合の知らせ
+- 担当者のいないblockerと期限超過、PR作成者が分からないconflict（DMの宛先がなく誰にも届かないため）
 
 DMを送れない宛先への知らせには、その人のGitHub loginと`/ar connect github`の案内を書き、誰もnative mentionしない。
 DMを送れる宛先には、channelへの投稿の有無にかかわらずDMだけを送る。

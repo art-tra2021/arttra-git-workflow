@@ -316,6 +316,33 @@ describe("directモードの作業通知", () => {
     expect(JSON.stringify(partial.channelPosts()[0])).toContain("@newcomer（Slack未連携）");
   });
 
+  test("担当者のいないblocker・期限超過と、PR作成者が不明なconflictは全員向けに一件出す", async () => {
+    for (const item of [
+      workItem("BLOCKED", { owner: null, assignees: [] }),
+      workItem("OVERDUE", { owner: null, assignees: [] }),
+      workItem("CONFLICTING"),
+    ]) {
+      const harness = await createHarness();
+      const work = harness.workService([item]);
+      await work.notifyImmediate("delivery-1");
+      await work.notifyImmediate("delivery-2");
+      const posts = harness.channelPosts();
+      expect(posts).toHaveLength(1);
+      expect(posts[0]?.thread_ts).toBeUndefined();
+      expect(String(posts[0]?.text)).not.toContain("<@");
+      expect(harness.dmRecipients()).toEqual([]);
+    }
+  });
+
+  test("担当者のいない期限当日はSlackへ出さない", async () => {
+    const harness = await createHarness();
+    await harness
+      .workService([workItem("DUE_TODAY", { owner: null, assignees: [] })])
+      .notifyImmediate("delivery-1");
+    expect(harness.channelPosts()).toHaveLength(0);
+    expect(harness.dmRecipients()).toEqual([]);
+  });
+
   test("期限当日は担当者へDMし、期限接近はSlackへ出さない", async () => {
     const harness = await createHarness();
     await harness

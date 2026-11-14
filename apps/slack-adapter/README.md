@@ -265,7 +265,7 @@ Slackへの通知方式は環境変数`AR_SLACK_NOTIFICATION_MODE`で切り替�
 `thread`と`direct`以外の値では、adapterは他の設定を読む前に起動を拒否する。
 GitHubの出来事の記録はGitHubに残るため、`direct`ではSlackへ続報を複製しない。
 
-`direct`でchannelへ出す投稿は、次の4種類だけである。
+`direct`でchannelへ出す投稿は、次の5種類だけである。
 
 | 投稿 | 内容 |
 | --- | --- |
@@ -273,6 +273,7 @@ GitHubの出来事の記録はGitHubに残るため、`direct`ではSlackへ続�
 | 急ぎで未割当の仕事 | Projectsで未着手・緊急かつ担当者なしの項目。Taskも含めて単独投稿にする |
 | 日次digest | `thread`と同じ一覧投稿 |
 | DMを送れない宛先への知らせ | 下記の対応必須の出来事で、DMを送れない宛先がいる場合だけの単独投稿 |
+| 拾う人のいない止まり | 担当者のいないblockerと期限超過、PR作成者が分からないconflict。DMの宛先がなく誰にも届かないため、単独投稿にする |
 
 Issue作成、Task作成、PR作成、レビュー依頼、コメント、Approve、差し戻し、修正push、CI失敗、期限、blocker、conflict、マージ、close、担当変更は、channelへ投稿しない。
 このうち後述の13区分に当たる出来事は、宛先本人へDMだけを送る。
