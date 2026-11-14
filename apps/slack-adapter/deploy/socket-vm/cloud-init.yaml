@@ -1,0 +1,67 @@
+#cloud-config
+# Container-Optimized OS上で、Slack adapterをSocket Modeで常駐させる。
+# COSは起動のたびにこのuser-dataを適用するため、metadata更新後のresetで設定が入れ替わる。
+# 秘密の値はmetadataやディスクへ置かず、起動のたびにSecret Managerから/run（tmpfs）へ読み出す。
+
+write_files:
+  - path: /var/lib/arttra-slack/fetch-env.sh
+    permissions: "0700"
+    owner: root
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      metadata() {
+        curl -fsS -H 'Metadata-Flavor: Google' \
+          "http://metadata.google.internal/computeMetadata/v1/$1"
+      }
+      install -d -m 0700 /run/arttra-slack
+      tmp="$(mktemp /run/arttra-slack/env.XXXXXX)"
+      trap 'rm -f "${tmp}"' EXIT
+      project="$(metadata project/project-id)"
+      token="$(metadata instance/service-accounts/default/token |
+        sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')"
+      [ -n "${token}" ] || { echo "access token is unavailable" >&2; exit 1; }
+      metadata instance/attributes/arttra-slack-env >"${tmp}"
+      printf '\n' >>"${tmp}"
+      while IFS='=' read -r name secret; do
+        [ -n "${name}" ] || continue
+        data="$(curl -fsS -H "Authorization: Bearer ${token}" \
+          "https://secretmanager.googleapis.com/v1/projects/${project}/secrets/${secret}/versions/latest:access" |
+          sed -n 's/.*"data": *"\([^"]*\)".*/\1/p')"
+        [ -n "${data}" ] || { echo "secret ${secret} is empty or unreadable" >&2; exit 1; }
+        # docker --env-fileは複数行の値を扱えないため、改行をリテラルの\nにする。
+        # GITHUB_APP_PRIVATE_KEYはadapter側で\nを改行へ戻す。
+        value="$(printf '%s' "${data}" | base64 -d)"
+        printf '%s=%s\n' "${name}" "${value//$'\n'/\\n}" >>"${tmp}"
+      done < <(metadata instance/attributes/arttra-slack-secrets; printf '\n')
+      chmod 0600 "${tmp}"
+      mv "${tmp}" /run/arttra-slack/env
+      trap - EXIT
+
+  - path: /etc/systemd/system/arttra-slack.service
+    permissions: "0644"
+    owner: root
+    content: |
+      [Unit]
+      Description=ART-TRA Slack adapter (Socket Mode)
+      Wants=network-online.target
+      After=network-online.target docker.service
+      Requires=docker.service
+      StartLimitIntervalSec=0
+
+      [Service]
+      Environment=HOME=/var/lib/arttra-slack
+      ExecStartPre=/bin/bash /var/lib/arttra-slack/fetch-env.sh
+      ExecStartPre=/usr/bin/docker-credential-gcr configure-docker --registries=asia-northeast1-docker.pkg.dev
+      ExecStartPre=-/usr/bin/docker rm -f arttra-slack
+      ExecStart=/bin/bash -c 'exec /usr/bin/docker run --rm --name arttra-slack --env-file /run/arttra-slack/env --log-driver=gcplogs --memory=640m "$(curl -fsS -H Metadata-Flavor:Google http://metadata.google.internal/computeMetadata/v1/instance/attributes/arttra-slack-image)"'
+      ExecStop=/usr/bin/docker stop arttra-slack
+      Restart=always
+      RestartSec=10
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - systemctl daemon-reload
+  - systemctl enable --now arttra-slack.service

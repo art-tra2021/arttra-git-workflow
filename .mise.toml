@@ -81,6 +81,7 @@ depends = [
   "security:actions",
   "slack:check",
   "slack-release:test",
+  "slack-socket-vm:test",
   "setup-ui:test",
   "issue-policy:test",
   "merge-authority-policy:test",
@@ -186,6 +187,26 @@ run = "bash scripts/slack-release.sh status"
 [tasks."slack:release:deploy"]
 description = "Deploy a reviewed main image only with explicit --yes"
 run = "bash scripts/slack-release.sh deploy"
+
+[tasks."slack-socket-vm:test"]
+description = "Test the Socket Mode VM deploy script with a fake gcloud"
+run = "bash scripts/slack-socket-vm-test.sh"
+
+[tasks."slack:socket:preview"]
+description = "Preview the Socket Mode VM built from the Cloud Run template"
+run = "bash scripts/slack-socket-vm.sh preview"
+
+[tasks."slack:socket:status"]
+description = "Check that the Socket Mode VM is running and connected"
+run = "bash scripts/slack-socket-vm.sh status"
+
+[tasks."slack:socket:deploy"]
+description = "Create or update the Socket Mode VM only with explicit --yes"
+run = "bash scripts/slack-socket-vm.sh deploy"
+
+[tasks."slack:socket:stop"]
+description = "Stop the Socket Mode VM only with explicit --yes"
+run = "bash scripts/slack-socket-vm.sh stop"
 
 [tasks."slack:release:rollback"]
 description = "Route traffic to an exact prior revision only with explicit --yes"
