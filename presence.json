@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "repository": "art-tra2021/arttra-git-workflow",
+  "actor": "roz",
+  "device": "device-1785565509413-24698",
+  "branch": "hotfix/184-slack-socket-vm-roz",
+  "head": "b050c1fd724f7ed976e6ce3df9e8719f40f6e9fb",
+  "observed_at_unix_ms": 1794665911307,
+  "files": [
+    {
+      "path": ".mise.toml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/README.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/deploy/socket-vm/cloud-init.yaml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "docs/slack-notification-routing-draft.md",
+      "committed": false,
+      "staged": false,
+      "unstaged": false,
+      "untracked": true
+    },
+    {
+      "path": "docs/slack-reqadd-draft.md",
+      "committed": false,
+      "staged": false,
+      "unstaged": false,
+      "untracked": true
+    },
+    {
+      "path": "docs/slack-socket-vm-runbook.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/slack-socket-vm-test.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/slack-socket-vm.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    }
+  ]
+}
