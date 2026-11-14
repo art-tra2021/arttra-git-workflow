@@ -29,6 +29,7 @@ import {
   verifyJobSignature,
 } from "./job-queue.ts";
 import { LifecycleNotificationService } from "./lifecycle-notification-service.ts";
+import { NOTIFICATION_MODE_ENV, parseNotificationMode } from "./notification-mode.ts";
 import {
   DelegatingNotificationPayloadSender,
   NotificationOutboxService,
@@ -66,6 +67,8 @@ import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
 import { WorkNotificationService } from "./work-notification-service.ts";
 
 const transport = (process.env.AR_SLACK_TRANSPORT ?? "socket").trim().toLowerCase();
+// 不正値は他の設定より先に拒否し、意図しない方式でSlackへ投稿し始めないようにする。
+const notificationMode = parseNotificationMode(process.env[NOTIFICATION_MODE_ENV]);
 if (transport !== "socket" && transport !== "http") {
   throw new Error("AR_SLACK_TRANSPORTはsocketまたはhttpを指定してください。");
 }
@@ -251,6 +254,9 @@ const workNotifier =
   primaryWorkNotifier && requiredActionDm
     ? new WorkNotifierWithRequiredActionDm(primaryWorkNotifier, requiredActionDm)
     : primaryWorkNotifier;
+if (notificationMode === "direct" && workNotificationChannelId && !requiredActionDm) {
+  throw new Error(`${NOTIFICATION_MODE_ENV}=directには対応必須DMの送信経路が必要です。`);
+}
 const workNotificationService = workNotificationChannelId
   ? new WorkNotificationService(
       sharedWorkSource,
@@ -261,6 +267,7 @@ const workNotificationService = workNotificationChannelId
       positiveInteger(process.env.AR_DEADLINE_REMINDER_DAYS ?? "3", "AR_DEADLINE_REMINDER_DAYS"),
       notificationThreads,
       dependencies instanceof GitHubAppDependencies ? dependencies : null,
+      { mode: notificationMode },
     )
   : null;
 const receiver =
@@ -282,6 +289,7 @@ const reviewService =
           notificationThreads,
           resolveSlackUserId,
           dependencies,
+          { mode: notificationMode },
         ),
         {
           slackTeamId,
@@ -305,6 +313,7 @@ const lifecycleNotificationService =
         Date.now,
         sharedRepository ? [sharedRepository] : [],
         githubCapabilities,
+        { mode: notificationMode },
       )
     : null;
 const webhookProcessor =

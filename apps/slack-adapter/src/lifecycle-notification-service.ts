@@ -3,6 +3,13 @@ import { type GitHubCapabilityAccess, GitHubCapabilityGrants } from "./github-ca
 import { parseIssueRequester } from "./issue-requester.ts";
 import type { GitHubWebhookJob } from "./job-queue.ts";
 import {
+  channelNoticeMetadata,
+  type NotificationMode,
+  partitionDirectRecipients,
+  type UnreachableRecipient,
+  unreachableUsers,
+} from "./notification-mode.ts";
+import {
   type NotificationIntentMetadata,
   type NotificationRequiredActionKind,
   notificationIntentId,
@@ -93,6 +100,13 @@ export interface LifecycleNotification {
   selfMergeControl?: { repository: string; issueNumber: number } | null;
   /** self-merge-scheduledをchannelへ展開するか。未指定の旧payloadは展開する。 */
   replyBroadcast?: boolean;
+  /**
+   * directモードのchannel単独投稿。threadを持たずchannel直下へ置く。
+   * 旧payloadには無く、既存intentのhashを変えない。
+   */
+  standalone?: boolean;
+  /** directモードで、DMを送れないためchannelで知らせる宛先。 */
+  unreachableRecipients?: UnreachableRecipient[];
 }
 
 export interface LifecycleNotifier {
@@ -121,6 +135,11 @@ export type ResolveLifecycleSlackUserId = (githubLogin: string) => Promise<strin
 interface RequiredActionPlan {
   kind: NotificationRequiredActionKind;
   recipientLogins?: string[];
+  /**
+   * directモードでDMを送れない場合にchannelで知らせてよい宛先。省くと宛先全員が対象。
+   * コメントのmentionでは、コード中の`@`をGitHub利用者と取り違えないよう絞る。
+   */
+  fallbackLogins?: string[];
 }
 
 interface LifecycleNotificationState {
@@ -165,6 +184,7 @@ export class LifecycleNotificationService {
   private readonly now: () => number;
   private readonly allowedRepositories: Set<string> | null;
   private readonly githubCapabilities: GitHubCapabilityAccess;
+  private readonly mode: NotificationMode;
 
   constructor(
     github: GitHubLifecycleClient,
@@ -175,6 +195,7 @@ export class LifecycleNotificationService {
     now: () => number = Date.now,
     allowedRepositories: readonly string[] | null = null,
     githubCapabilities: GitHubCapabilityAccess = GitHubCapabilityGrants.empty(),
+    options: { mode?: NotificationMode } = {},
   ) {
     this.github = github;
     this.store = store;
@@ -186,6 +207,7 @@ export class LifecycleNotificationService {
       ? new Set(allowedRepositories.map((repository) => repository.toLowerCase()))
       : null;
     this.githubCapabilities = githubCapabilities;
+    this.mode = options.mode ?? "thread";
   }
 
   async process(job: GitHubWebhookJob): Promise<number> {
@@ -678,7 +700,11 @@ export class LifecycleNotificationService {
       stateKey,
     );
     if (previous?.fingerprint === eventFingerprint) return 0;
-    if (kind !== "issue-opened" && issueNotificationType(issue) === "task") {
+    if (
+      this.mode === "thread" &&
+      kind !== "issue-opened" &&
+      issueNotificationType(issue) === "task"
+    ) {
       await this.ensureIssueOpened(issue, sourceDeliveryId);
     }
     const suppressActorMention = shouldSuppressActorMention(kind);
@@ -727,28 +753,32 @@ export class LifecycleNotificationService {
           }
         : {}),
     };
-    const threadRootIssue = await resolveNotificationThreadRootIssue(
-      issue,
-      this.github,
-      this.allowedRepositories,
-    );
-    if (!threadRootIssue) {
-      console.error(
-        `Task ${issue.url} の親Work/Businessを通知scope内で解決できないため、channel直下へのfallbackを停止しました。`,
-      );
-      return 0;
-    }
-    const threadRootUrl = threadRootIssue.url;
-    if (kind === "issue-opened" && threadRootUrl === resource.url) {
-      await this.threads.ensureRoot(threadRootUrl, () =>
-        this.notifier.notify(notification, null, metadata),
-      );
+    if (this.mode === "direct") {
+      await this.dispatchDirect(notification, metadata, requiredAction, recipientLogins);
     } else {
-      await this.threads.publishReply(
-        threadRootUrl,
-        () => this.createIssueRoot(threadRootIssue, sourceDeliveryId),
-        (threadTs) => this.notifier.notify(notification, threadTs, metadata),
+      const threadRootIssue = await resolveNotificationThreadRootIssue(
+        issue,
+        this.github,
+        this.allowedRepositories,
       );
+      if (!threadRootIssue) {
+        console.error(
+          `Task ${issue.url} の親Work/Businessを通知scope内で解決できないため、channel直下へのfallbackを停止しました。`,
+        );
+        return 0;
+      }
+      const threadRootUrl = threadRootIssue.url;
+      if (kind === "issue-opened" && threadRootUrl === resource.url) {
+        await this.threads.ensureRoot(threadRootUrl, () =>
+          this.notifier.notify(notification, null, metadata),
+        );
+      } else {
+        await this.threads.publishReply(
+          threadRootUrl,
+          () => this.createIssueRoot(threadRootIssue, sourceDeliveryId),
+          (threadTs) => this.notifier.notify(notification, threadTs, metadata),
+        );
+      }
     }
     await this.store.set<LifecycleNotificationState>(NOTIFICATION_NAMESPACE, stateKey, {
       schemaVersion: 1,
@@ -758,6 +788,79 @@ export class LifecycleNotificationService {
       notifiedAt: new Date(this.now()).toISOString(),
     });
     return 1;
+  }
+
+  /**
+   * directモードの送り分け。channel/threadへの続報は出さず、次の3つだけを送る。
+   * - セルフマージ予定の警告: 停止ボタン付きのchannel単独投稿
+   * - 対応必須の出来事: 宛先本人へのDM（intentは従来方式と同じchannel intentから決まる）
+   * - DMを送れない宛先がいる対応必須の出来事: その宛先のGitHub loginを書いたchannel単独投稿
+   * どれにも当たらない出来事はSlackへ出さない。
+   */
+  private async dispatchDirect(
+    notification: LifecycleNotification,
+    metadata: NotificationIntentMetadata,
+    plan: RequiredActionPlan | null,
+    defaultRecipientLogins: string[],
+  ): Promise<void> {
+    if (notification.kind === "self-merge-scheduled") {
+      const { replyBroadcast: _replyBroadcast, ...warning } = notification;
+      await this.notifier.notify(
+        { ...warning, standalone: true },
+        null,
+        channelNoticeMetadata(metadata),
+      );
+      return;
+    }
+    if (!plan) return;
+    const recipientLogins = plan.recipientLogins ?? defaultRecipientLogins;
+    const { slackUserIds, unreachableLogins } = await partitionDirectRecipients(
+      recipientLogins,
+      this.resolveSlackUserId,
+      {
+        kind: plan.kind,
+        actorLogin: notification.actorLogin,
+        ...(plan.fallbackLogins ? { fallbackLogins: plan.fallbackLogins } : {}),
+      },
+    );
+    const unreachable = [...unreachableLogins];
+    if (slackUserIds.length > 0) {
+      if (this.notifier.notifyRequiredActionOnly) {
+        await this.notifier.notifyRequiredActionOnly(notification, metadata);
+      } else {
+        // DM経路がなければ誰にも届かないため、DMできるはずの人もchannelで知らせる。
+        const resolved = await partitionDirectRecipients(recipientLogins, async () => null, {
+          kind: plan.kind,
+          actorLogin: notification.actorLogin,
+          ...(plan.fallbackLogins ? { fallbackLogins: plan.fallbackLogins } : {}),
+        });
+        unreachable.push(...resolved.unreachableLogins);
+      }
+    }
+    if (unreachable.length > 0) {
+      await this.postUnreachableNotice(notification, metadata, unreachableUsers(unreachable));
+    }
+  }
+
+  private async postUnreachableNotice(
+    notification: LifecycleNotification,
+    metadata: NotificationIntentMetadata,
+    recipients: UnreachableRecipient[],
+  ): Promise<void> {
+    const { replyBroadcast: _replyBroadcast, ...rest } = notification;
+    const unreachableRecipients = uniqueRecipients(recipients);
+    await this.notifier.notify(
+      {
+        ...rest,
+        actorSlackUserId: null,
+        slackUserIds: [],
+        selfMergeControl: null,
+        standalone: true,
+        unreachableRecipients,
+      },
+      null,
+      channelNoticeMetadata(metadata, unreachableRecipients),
+    );
   }
 
   /**
@@ -822,7 +925,7 @@ export class LifecycleNotificationService {
     kind: "issue-opened" | "issue-assignment-changed",
     sourceDeliveryId: string,
   ): Promise<void> {
-    if (!this.notifier.notifyRequiredActionOnly) return;
+    if (!this.notifier.notifyRequiredActionOnly && this.mode === "thread") return;
     const assignee = assigneeLogin.toLowerCase();
     if (assignee === actorLogin.toLowerCase()) return;
     // 解除後に古いassignedが再配信されても、現在の担当でなければ送らない。
@@ -836,25 +939,35 @@ export class LifecycleNotificationService {
       const current = await this.store.get<AssignmentDmState>(ASSIGNMENT_DM_NAMESPACE, key);
       if (current?.active) return;
       const generation = (current?.generation ?? 0) + 1;
-      if (assigneeSlackUserId) {
-        // stateより先に送る。保存前に落ちても、再処理は同じ世代の同じintentへまとまる。
+      const metadata: NotificationIntentMetadata = {
+        intentId: notificationIntentId({
+          kind: "assignment-dm",
+          resourceUrl: issue.url,
+          assigneeLogin: assignee,
+          generation,
+          schemaVersion: 1,
+        }),
+        sourceDeliveryId,
+      };
+      // stateより先に送る。保存前に落ちても、再処理は同じ世代の同じintentへまとまる。
+      if (assigneeSlackUserId && this.notifier.notifyRequiredActionOnly) {
         await this.notifier.notifyRequiredActionOnly(
           assignmentDmNotification(issue, kind, actorLogin),
           {
-            intentId: notificationIntentId({
-              kind: "assignment-dm",
-              resourceUrl: issue.url,
-              assigneeLogin: assignee,
-              generation,
-              schemaVersion: 1,
-            }),
-            sourceDeliveryId,
+            ...metadata,
             requiredAction: {
               kind: "assigned",
               recipientSlackUserIds: [assigneeSlackUserId],
               actorSlackUserId,
             },
           },
+        );
+      } else if (this.mode === "direct" && !assignee.endsWith("[bot]")) {
+        // DMを送れない担当者だけ、channelの単独投稿で担当になったことを知らせる。
+        await this.postUnreachableNotice(
+          assignmentDmNotification(issue, kind, actorLogin),
+          metadata,
+          unreachableUsers([assigneeLogin]),
         );
       }
       const next: AssignmentDmState = {
@@ -1179,13 +1292,43 @@ function mentionRequiredAction(
   const type = nestedOptionalString(payload, key, "user", "type");
   if (type === "Bot" || login.toLowerCase().endsWith("[bot]")) return null;
   const recipientLogins = withoutLogin(mentionedLogins(body), login);
-  return recipientLogins.length > 0 ? { kind: "mentioned", recipientLogins } : null;
+  return recipientLogins.length > 0
+    ? {
+        kind: "mentioned",
+        recipientLogins,
+        fallbackLogins: withoutLogin(fallbackMentionedLogins(body), login),
+      }
+    : null;
 }
 
 function mentionedLogins(body: string): string[] {
   return [...body.matchAll(/(?:^|[^A-Za-z0-9_.+-])@([A-Za-z0-9-]{1,39})\b/g)]
     .flatMap((match) => (match[1] ? [match[1]] : []))
     .filter((login, index, values) => values.indexOf(login) === index);
+}
+
+const NON_USER_MENTIONS = new Set(["here", "channel", "everyone"]);
+
+/**
+ * DMを送れないときにchannelで知らせてよい本文mention。
+ * コードの中の`@`、`@org/team`のteam指定、Slack流の`@here`などはGitHub利用者として扱わない。
+ */
+function fallbackMentionedLogins(body: string): string[] {
+  const text = body.replace(/```[\s\S]*?```/g, " ").replace(/`[^`\n]*`/g, " ");
+  return [...text.matchAll(/(?:^|[^A-Za-z0-9_.+-])@([A-Za-z0-9-]{1,39})(?![A-Za-z0-9_/-])/g)]
+    .flatMap((match) => (match[1] ? [match[1]] : []))
+    .filter((login) => !NON_USER_MENTIONS.has(login.toLowerCase()));
+}
+
+function uniqueRecipients(recipients: UnreachableRecipient[]): UnreachableRecipient[] {
+  return [
+    ...new Map(
+      recipients.map((recipient) => [
+        `${recipient.kind}:${recipient.name.toLowerCase()}`,
+        recipient,
+      ]),
+    ).values(),
+  ];
 }
 
 function uniqueNormalizedLogins(logins: string[]): string[] {

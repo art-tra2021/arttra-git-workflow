@@ -2,8 +2,35 @@
 
 ## 目的
 
-この文書は、GitHub上のIssueとPRに起きた変更を、対応するSlackスレッドへ正しく投影できているか確認するための保守手順である。
+この文書は、GitHub上のIssueとPRに起きた変更を、Slackへ正しく通知できているか確認するための保守手順である。
 Slackは正本ではなく、GitHub IssuesとGitHub Projectsを人間が追いやすくする投影先である。
+
+## 通知方式
+
+通知方式は、Cloud Runの環境変数`AR_SLACK_NOTIFICATION_MODE`で決まる。
+`thread`（未設定時の既定）は、Intake、Work、Businessごとの親投稿とthreadへ続報を集約する。
+`direct`は親投稿とthreadを作らず、対応が必要な本人へのDMと、channelへの全員向けの単独投稿だけを出す。
+本番は`direct`で運用する。
+`thread`と`direct`以外の値では、adapterは起動しない。
+
+`direct`でchannelへ出す投稿は、次の5種類だけである。
+各投稿の内容は`apps/slack-adapter/README.md`の「通知方式」の表にある。
+
+- 停止ボタン付きのセルフマージ予定の警告
+- 急ぎで未割当（Projectsで未着手・緊急かつ担当者なし）の仕事。Taskも含む
+- 日次digest
+- 対応必須の出来事で、DMを送れない宛先（GitHub未連携の人、GitHub team reviewer）がいる場合の知らせ
+- 担当者のいないblockerと期限超過、PR作成者が分からないconflict（DMの宛先がなく誰にも届かないため）
+
+DMを送れない宛先への知らせには、その人のGitHub loginと`/ar connect github`の案内を書き、誰もnative mentionしない。
+DMを送れる宛先には、channelへの投稿の有無にかかわらずDMだけを送る。
+`direct`ではIssueごとのthreadが無いため、`suppress_self_merge_channel_broadcast`を持つ利用者のセルフマージ警告もchannelへ単独投稿する。
+停止ボタンで停止した結果は、その警告への返信として置く。
+
+`thread`へ戻す場合は、環境変数を`thread`にしてdeployする。
+処理済みの出来事は通知方式によらず同じ`lifecycle-notification` stateで判定するため、切り替えの前後で同じ出来事を二度送らない。
+
+以下の「スレッド規則」と「視覚ルール」のうちthreadとmentionに関する記述、2026-08-04と2026-08-05の証跡は、`thread`の動作である。
 
 ## 本番構成
 
@@ -106,8 +133,6 @@ DMは原則として実行者本人を除外するが、check_runのsenderはpus
 channel通知intent（担当DMはIssue、担当者、付与の世代）とrecipient Slack user IDから別のoutbox intentを作るため、Webhook再送で増えない。
 担当DMは担当付与ごとに一件であり、複数人をまとめて担当に追加しても各人へ一件ずつ届く。
 DM失敗時も既存のchannelまたはthread通知は残り、DM intentだけが監査と確認付き再送の対象になる。
-この変更では既存のchannelまたはthread投稿の件数を変えない。
-channelまたはthread側の通知削減はIssue #159へ分離し、会議の決定記録が付くまで実装しない。
 
 実行者は通知先ではなく出来事の帰属表示なので、常にplainな`@github-login`で表示する。
 native mentionは、確認や対応が必要なrecipientだけに付け、Issue作成、自己assignment、自己reviewer指定、自己コメントなどの実行者本人には付けない。
@@ -145,6 +170,19 @@ fallback textにも同じ絵文字と見出しを含めるが、本文中の装�
 | エラー | `🚨` |
 
 ## E2E確認
+
+### directの確認
+
+1. Cloud Runの環境変数が`AR_SLACK_NOTIFICATION_MODE=direct`であることをread-backする。
+2. GitHub連携済みの担当者と予定reviewerを付けたWorkとTaskを作る。channelに親投稿もTask概要も出ず、作成者を除く担当者へDMが一件ずつ送られることを確認する。
+3. TaskをcloseするPRを作る。channelにレビュー依頼が出ず、個人reviewerへDMが一件送られることを確認する。
+4. CI失敗、差し戻し、修正push、Approve、本文mention付きのコメント、マージを順に起こす。channelへの投稿が0件で、README表の13区分の宛先へDMが一件ずつ送られることを確認する。
+5. `merge/self`のTaskを作り、停止ボタン付きの警告がchannelの単独投稿（`thread_ts`なし）として一件出ることを確認する。CI通過後の通知が出ないこと、停止ボタンから停止でき、停止結果が警告への返信になることを確認する。
+6. GitHub未連携の利用者を担当者またはコメントのmention先にする。その出来事だけがchannelの単独投稿として一件出て、GitHub loginと`/ar connect github`の案内があり、native mentionが無いことを確認する。
+7. Projectsで担当者なしの項目を未着手・緊急にし、channelの単独投稿が一件出ることを確認する。
+8. Organization webhookのRecent Deliveriesから同じdeliveryを再配信し、DMもchannel投稿も増えないことを確認する。
+
+### threadの確認
 
 1. 検証用Workと、その子に`merge/self`を付けたTaskを作り、Taskへ担当者と予定reviewerを設定する。
 2. Taskだけを`Closes #<Task番号>`で閉じ、親Workはnative parentの完全なIssue URLを`Relates to https://github.com/owner/repo/issues/<Work番号>`で参照するPRを作る。
@@ -276,3 +314,5 @@ Issueと障害記録へrollback理由、対象revision、image、health commit�
 同じ通知が複数届く場合は、GitHub delivery ID、`github-delivery` state、`lifecycle-notification` fingerprintを確認する。
 別スレッドへ分かれた場合は、PR本文のclosing Task、そのTaskのnative parent、`work-thread` stateのWorkまたはBusiness URLを確認する。
 メンションされない場合は、対象者がSlackからGitHub OAuth連携を完了しているか確認する。
+channelへ出ると想定した投稿が無い場合は、まず`AR_SLACK_NOTIFICATION_MODE`の値を確認する。`direct`では、セルフマージ警告、急ぎの未割当、日次digest、DMを送れない宛先への知らせ以外はchannelへ出ない。
+DMを送れない宛先への知らせが出るはずなのに無い場合は、宛先のGitHub loginが`[bot]`で終わっていないか、コメントのmentionがcode blockの中にないかを確認する。
