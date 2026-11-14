@@ -155,10 +155,22 @@ GitHubの変更はwebhookで即時に反映されるので、定期同期は取�
 間隔と時刻は`apps/slack-adapter/src/job-scheduler.ts`の`DEFAULT_JOB_CADENCES`にまとめてある。
 
 ジョブは上の表の順に1つずつ実行し、同時に重ねない（e2-microのメモリは1GBのため）。
-1つのジョブが失敗しても、次のジョブとSlackの操作処理は止まらない。
+1つのジョブが失敗しても（例外を投げても）、次のジョブとSlackの操作処理は止まらない。
 失敗した枠はその場で再試行せず、次の枠で実行する。
+
+ジョブには制限時間がある（毎時ジョブ10分、日次ジョブ15分）。
+制限時間を過ぎても終わらない（応答しないAPIを待ち続けるなど）ときは、その枠を失敗（`reason: "timeout"`）として記録し、次のジョブへ進む。
+ただし、JavaScriptでは実行中の処理を外から止められないため、終わらない処理はprocessの中で動き続ける。
+その処理が終わるまで、同じジョブは新しく始めない（次の枠も見送り、その旨をログに出す）。
+終わった後は、まだ実行していない枠があれば、次に起きたとき（最長10分後）に実行する。タイムアウトした枠そのものは実行し直さない。
+他のジョブとSlackの操作処理は、この間も動く。
+
 起動した直後は、まだ実行されていない現在の枠を実行する。
 たとえば10:30にVMが再起動した場合、その日の`work-digest`がまだなら10:30に送る。9:00より前に起動した場合は9:00まで待つ。
+日次ジョブは、予定時刻から3時間を過ぎたらその日は実行しない（`status: "skipped"`、`reason: "too-late"`）。
+たとえば23:50に起動しても、その日の日次まとめは送らず、翌日の9:00に送る。毎時ジョブにはこの上限はない。
+
+制限時間、奪い直しの余裕と回数、遅延の上限、記録の保存期間は`job-scheduler.ts`の`DEFAULT_SCHEDULER_TIMING`にまとめてある。
 
 ### 同じ枠を一度だけ実行する仕組み
 
@@ -171,6 +183,13 @@ HTTPの`/internal/*`から呼んだ場合も、枠が空いていれば同じ記
 逆に、HTTPの呼び出しは明示の要求として扱い、既に実行済みの枠でも従来どおり実行する。
 日次ジョブを予定時刻より前にHTTPで呼んだ場合は、その日の定期実行を止めないよう記録しない。
 
+実行中にprocessが落ちると（配備の`instances reset`、OOM、VMの再起動）、記録は`running`のまま残る。
+このままではその枠が二度と実行されないため、開始（`startedAt`）から「制限時間＋5分」を過ぎた`running`の記録は、止まった実行とみなす。
+schedulerはこの記録を奪い直して実行し直す（`attempt`が1増える）。
+奪い直しは記録の`revision`を条件にした書き換え（compareAndSet）で行うので、2つのprocessが同時に奪い直しても、実行し直すのは1つだけである。
+同じ枠で3回実行しても終わらなかった場合は、諦めて失敗（`reason: "attempts-exhausted"`）にする。
+日次ジョブで、予定時刻から3時間を過ぎていれば、実行し直さずに`skipped`（`reason: "too-late"`）にする。
+
 ### 実行の記録の見方
 
 記録はFirestoreの`<AR_FIRESTORE_PREFIX>_scheduled_job_run` collectionにある。本番（`AR_FIRESTORE_PREFIX=arttra_prod`）では`arttra_prod_scheduled_job_run`である。
@@ -182,10 +201,13 @@ document IDは「ジョブ名:枠」をbase64urlにした文字列で、中身�
 | `value.window` | 枠。毎時は`2026-11-14T03Z`（UTCの3時台）、日次は`2026-11-14`（JSTの日付） |
 | `value.source` | `inprocess`（VMのtimer）または`http`（`/internal/*`の呼び出し） |
 | `value.owner` | 実行したprocess（`<hostname>:<pid>:<乱数>`、HTTPは`http:<pid>`） |
-| `value.status` | `running`、`success`、`failed` |
-| `value.startedAt`、`value.finishedAt` | 開始と終了の時刻（UTC） |
-| `value.reason` | 失敗の理由 |
+| `value.status` | `running`、`success`、`failed`、`skipped`（実行せずに見送った） |
+| `value.startedAt`、`value.finishedAt` | 開始と終了の時刻（UTC）。奪い直した記録の`startedAt`は、奪い直した時刻 |
+| `value.reason` | 失敗や見送りの理由（`timeout`、`attempts-exhausted`、`too-late`、ジョブのエラー） |
 | `value.summary` | 件数などの要約（例：`itemCount=12 created=0 updated=1 deleted=0`） |
+| `value.attempt` | この枠を実行し始めた回数。奪い直すたびに1増える。見送った記録は0 |
+| `value.revision` | 記録を書き換えた回数。同時の書き換えを防ぐために使う |
+| `expireAt` | 記録を消してよい時刻（作成または更新の30日後）。TTL policyが見るため、`value`の外にDate型で置く |
 
 Firestoreの画面で`value.job`と`value.window`で絞り込む。
 特定の記録のdocument IDは次で求められる。
@@ -194,9 +216,29 @@ Firestoreの画面で`value.job`と`value.window`で絞り込む。
 printf '%s' 'work-digest:2026-11-14' | base64 | tr '+/' '-_' | tr -d '='
 ```
 
-`running`のまま`finishedAt`が空の記録は、実行中にprocessが止まったことを示す。
-その枠はもう実行されない。必要なら`/internal/<ジョブ名>`を署名付きで呼んで手動で実行する。
-記録は1日に約120件増える。自動では消さない。
+`running`のまま`finishedAt`が空の記録は、実行中か、実行中にprocessが止まったことを示す。
+止まった場合は、上に書いたとおり制限時間＋5分の後に実行し直す。
+`attempts-exhausted`や`too-late`で終わった枠を実行したいときは、`/internal/<ジョブ名>`を署名付きで呼んで手動で実行する。
+
+#### 古い記録を消す（TTL policy）
+
+記録は1日に約120件増える。
+FirestoreのTTL policyを設定すると、`expireAt`を過ぎた記録をFirestoreが自動で消す（消えるまでに通常24時間ほどかかる）。
+GCPの権限を持つ操作者が一度だけ設定する。schedulerやscriptは設定しない。
+
+```sh
+gcloud firestore fields ttls update expireAt \
+  --collection-group=arttra_prod_scheduled_job_run \
+  --enable-ttl --project bmarumado
+```
+
+設定の反映には10分以上かかる。状態は次で確かめる（`ttlConfig.state`が`ACTIVE`になればよい）。
+
+```sh
+gcloud firestore fields ttls list --collection-group=arttra_prod_scheduled_job_run --project bmarumado
+```
+
+TTL policyを設定する前に作られた記録も、`expireAt`があれば消える。
 
 ### ログの見方
 
@@ -215,6 +257,15 @@ gcloud logging read 'resource.type="gce_instance" AND "定期処理"' \
 | `定期処理 <job> (<枠>) を実行しました: <要約> (<ms>ms)` | 成功 |
 | `定期処理 <job> (<枠>) に失敗しました: <理由> (<ms>ms)` | 失敗。errorとして出る |
 | `定期処理 <job> (<枠>) は実行済みのため見送りました。` | 別のprocessかHTTPで実行済み |
+| `定期処理 <job> (<枠>) は別の実行（<owner>）が実行中のため見送りました。<時刻>に確かめ直します。` | 別のprocessかHTTPが実行中。止まった実行とみなす時刻にもう一度確かめる |
+| `定期処理 <job> (<枠>) は<時刻>からrunningのまま止まっているため、実行し直します（<n>回目）。` | 実行中に落ちたprocessの枠を奪い直した。warningとして出る |
+| `定期処理 <job> (<枠>) は<n>回実行しても終わらなかったため、諦めて失敗にしました。` | 試行回数の上限。errorとして出る |
+| `定期処理 <job> (<枠>) は別のprocessが先に記録を更新したため見送りました。` | 奪い直しを他のprocessに先を越された |
+| `定期処理 <job> (<枠>) が制限時間（<n>分）を過ぎても終わらないため、失敗として次へ進みます。` | タイムアウト。errorとして出る |
+| `定期処理 <job> (<枠>) は、制限時間を過ぎた前の実行（<枠>）がまだ終わっていないため見送りました。` | タイムアウトした処理がまだ動いている。枠ごとに1回出る |
+| `定期処理 <job> (<枠>) の、制限時間を過ぎた実行が終わりました: <要約>` | タイムアウトした処理が後から終わった。記録は書き換えない |
+| `定期処理 <job> (<枠>) は予定時刻から3時間を過ぎたため、この日は実行しません。` | 日次ジョブの遅れすぎ。warningとして出る |
+| `定期処理 <job> (<枠>) の結果を記録しませんでした。記録が別の実行に引き継がれています。` | 実行の間に他のprocessが奪い直していた |
 | `定期処理 <job> (<枠>) の実行権を取れませんでした: <理由>` | Firestoreに書けなかった。5分後に同じ枠でもう一度試す |
 | `SIGTERMを受けたため、定期処理のtimerを止めました。` | 停止時。新しいジョブを始めない |
 
@@ -235,8 +286,11 @@ gcloud logging read 'resource.type="gce_instance" AND "定期処理"' \
 | `POST /internal/github-events` | 問題なし。webhookの処理を待ってから応答する | `start.ts:788` |
 | `POST /internal/*`（定期処理7件） | 問題なし。ジョブの完了と実行記録を待ってから応答する | `start.ts:564`〜`746` |
 
-`apps/slack-adapter/src`に`setTimeout`、`setInterval`、待たれていないPromiseは無い（Biomeの`noFloatingPromises`でも検出なし）。
-例外が2つある。
+`apps/slack-adapter/src`で`setTimeout`を使うのは、`AR_SCHEDULER=inprocess`のときに動くschedulerだけである（`job-scheduler.ts`の`systemClock`。起床の予約とジョブの制限時間に使う）。
+Cloud Runには`AR_SCHEDULER`を設定しないので、Cloud Runではschedulerもその`setTimeout`も動かない。
+`setInterval`は使っていない。
+待たれていないPromiseは、schedulerが制限時間を過ぎたジョブの終わりをログに出すためのもの（`job-scheduler.ts`の`execute`）だけで、これもschedulerの中にある。
+scheduler以外の例外が2つある。
 
 - `AR_JOB_QUEUE=local`の`LocalGitHubJobQueue`は、`setImmediate`でwebhookを応答の後に処理する（`job-queue.ts:89`）。手元の開発用であり、Cloud Runでは使わない。
 - `POST /slack/events`（Socket Modeを無効にしたときだけCloud Runが受ける）は、Boltの`processBeforeResponse: false`で、受け付けの応答（ack）を返した後に処理を続ける（`start.ts:292`）。Slackの3秒制限があるため、応答前に終える形へは変えていない。Socket Modeをやめる切り戻しでは、先にCloud Runを`--no-cpu-throttling`へ戻す。
@@ -244,8 +298,29 @@ gcloud logging read 'resource.type="gce_instance" AND "定期処理"' \
 ### 移行手順
 
 GCPの権限を持つ操作者が行う。各手順の後に、次へ進んでよいかを確かめる。
+VMの定期処理とCloud Schedulerを同時に動かさないよう、先にCloud Schedulerを止める。
+HTTPの`/internal/*`は明示の要求として毎回実行するので、両方が動いていると毎時ジョブが2回ずつ走る。
+手順1から2の間（数分から数十分）は定期処理が止まる。VMは起動した時点で、その時間の毎時ジョブと、予定時刻から3時間以内の日次ジョブを実行する。
+手順2は、JSTの9:00から12:10の間には行わない。
+移行前のCloud Runは実行記録を残さないため、その日の9:00にCloud Schedulerから送った日次まとめと期限通知を、VMがもう一度送ってしまう（12:05を過ぎれば、遅れすぎとして送らない）。
 
-1. PRをmainへmergeし、Cloud RunとVMへ配備する。
+1. Cloud Schedulerの`arttra-*`ジョブを一時停止する。
+   2026-11-15時点で、`arttra-*`ジョブは`asia-northeast1`にある。
+
+   ```sh
+   ar_location="asia-northeast1"
+   ar_jobs=$(gcloud scheduler jobs list --location "${ar_location}" --project bmarumado \
+     --filter 'name~/jobs/arttra-' --format 'value(name.basename())')
+   for ar_job in ${ar_jobs}; do
+     gcloud scheduler jobs pause "${ar_job}" --location "${ar_location}" --project bmarumado
+   done
+   gcloud scheduler jobs list --location "${ar_location}" --project bmarumado \
+     --filter 'name~/jobs/arttra-' --format 'table(name.basename(),state)'
+   ```
+
+   すべて`PAUSED`になったことを確かめる。
+
+2. PRをmainへmergeし、Cloud RunとVMへ配備する。VMには`AR_SCHEDULER=inprocess`が入る。
 
    ```sh
    mise run slack:release:deploy -- --commit <main-sha> --yes
@@ -262,14 +337,13 @@ GCPの権限を持つ操作者が行う。各手順の後に、次へ進んで�
    mise run slack:socket:status
    ```
 
-2. ログで各ジョブの実行を確かめる。
+3. ログと実行記録で各ジョブの実行を確かめる。
    起動時の`定期処理をprocess内で開始しました`に7つのジョブ名が並ぶこと、毎時0分過ぎに5つの毎時ジョブの`を実行しました`が出ることを確かめる。
    翌朝9:00と9:05（JST）に`work-digest`と`deadline-reminders`が出ること、Slackに日次まとめが1件だけ届くことを確かめる。
-   Firestoreの`arttra_prod_scheduled_job_run`で、各枠の記録が1件ずつ`success`になっていることも見る。
+   Firestoreの`arttra_prod_scheduled_job_run`で、各枠の記録が1件ずつ`success`になり、`source`が`inprocess`であることも見る。
+   問題があれば[定期処理の切り戻し](#定期処理の切り戻し)に従う。
 
-3. Cloud Schedulerの`arttra-*`ジョブを削除する。
-   切り戻しに備えて、削除の前に定義を保存する。
-   2026-11-15時点で、`arttra-*`ジョブは`asia-northeast1`にある。
+4. Cloud Schedulerの`arttra-*`ジョブの定義を保存してから削除する。
 
    ```sh
    ar_location="asia-northeast1"
@@ -289,7 +363,7 @@ GCPの権限を持つ操作者が行う。各手順の後に、次へ進んで�
    gcloud scheduler jobs delete <job-id> --location "${ar_location}" --project bmarumado
    ```
 
-4. Cloud Runを要求時だけの課金へ切り替える。
+5. Cloud Runを要求時だけの課金へ切り替える。
 
    ```sh
    gcloud run services update arttra-work-slack --region asia-northeast1 --project bmarumado --cpu-throttling
@@ -298,9 +372,11 @@ GCPの権限を持つ操作者が行う。各手順の後に、次へ進んで�
    切り替えた後、GitHubでIssueにコメントするなどしてwebhookを1件起こし、Slackへの通知が届くことを確かめる。
    1日後に、Cloud Monitoringの`run.googleapis.com/container/billable_instance_time`が大きく下がったことを確かめる。
 
+6. 実行記録のTTL policyを設定する（[古い記録を消す](#古い記録を消すttl-policy)）。
+
 ### 定期処理の切り戻し
 
-VMの定期処理に問題があるときは、まず止める。
+VMの定期処理に問題があるときは、まずVMの定期処理を止める。
 
 ```sh
 mise run slack:socket:deploy -- --env AR_SCHEDULER=off --yes
@@ -309,10 +385,22 @@ mise run slack:socket:deploy -- --env AR_SCHEDULER=off --yes
 この状態は次の`--env`なしの配備で元へ戻る。
 続けて止めておくときは、`vm-overrides.conf`を`AR_SCHEDULER=off`にするPRを出す。
 
-Cloud Schedulerへ戻すときは、手順3で保存した定義から、同じ名前、schedule、本文、headerでジョブを作り直す。
+VMの定期処理を止めた後に、Cloud Schedulerを動かす。順序を逆にすると、その間は毎時ジョブが2回ずつ走る。
+
+- 手順4より前（ジョブが一時停止のまま残っている）なら、再開する。
+
+  ```sh
+  for ar_job in ${ar_jobs}; do
+    gcloud scheduler jobs resume "${ar_job}" --location "${ar_location}" --project bmarumado
+  done
+  ```
+
+- 手順4の後（削除済み）なら、保存した定義から、同じ名前、schedule、本文、headerでジョブを作り直す。
+
 `--cpu-throttling`のままでも、Cloud Schedulerから呼ばれた`/internal/*`は応答の前に処理を終えるので動く。
-VMとCloud Schedulerの両方を動かしたままにはしない。
+VMの定期処理とCloud Schedulerの両方を動かしたままにはしない。
 同じ枠をprocess内で二重に実行することは無いが、HTTPの呼び出しは毎回実行されるので、Cloud Schedulerの回数だけ処理が増える。
+VMの定期処理へ戻すときも、[移行手順](#移行手順)と同じく、先にCloud Schedulerを一時停止してから`AR_SCHEDULER=inprocess`で配備する。
 
 Cloud RunのCPUを常時確保へ戻すときは次を実行する。
 
@@ -339,7 +427,7 @@ Socket Modeをやめて、Cloud RunのHTTP受信へ戻すときは次の順で�
    mise run slack:socket:stop -- --yes
    ```
 
-5. VMを止めると定期処理も止まる。[定期処理の切り戻し](#定期処理の切り戻し)に従い、Cloud Schedulerのジョブを作り直す。
+5. VMを止めると定期処理も止まる。[定期処理の切り戻し](#定期処理の切り戻し)に従い、Cloud Schedulerのジョブを再開するか作り直す。VMを止めた後に行う。
 
 ## 障害時の確認先
 

@@ -57,15 +57,38 @@ export interface SchedulerTiming {
   minSleepMilliseconds: number;
   /** 実行権の記録（Firestore）に失敗したときに、同じ枠でもう一度実行権を取りに行くまでの時間。 */
   claimRetryMilliseconds: number;
+  /**
+   * ジョブ1回の制限時間。周期の種類ごとに決める。
+   * 超えたらその枠を失敗（reason: timeout）として次のジョブへ進む。
+   */
+  jobTimeoutMilliseconds: Readonly<Record<JobCadence["kind"], number>>;
+  /**
+   * runningのままの記録を、止まった実行とみなすまでに制限時間へ足す余裕。
+   * 実行中にprocessが落ちた（resetやOOM）記録を、この時間の後に奪い直して実行し直す。
+   */
+  staleRunGraceMilliseconds: number;
+  /** 同じ枠を実行してよい回数（初回を含む）。超えたら諦めて失敗（reason: attempts-exhausted）とする。 */
+  maxAttempts: number;
+  /** 日次ジョブを予定時刻から遅れて実行してよい長さ。過ぎたらその日は実行しない（reason: too-late）。 */
+  dailyLateLimitMilliseconds: number;
+  /** 実行記録を残す長さ。記録の`expireAt`をこの分だけ先にし、FirestoreのTTL policyが消す。 */
+  recordRetentionMilliseconds: number;
 }
 
+/** schedulerの時間の既定値。制限時間、奪い直し、遅延の上限、記録の保存期間はここだけで決める。 */
 export const DEFAULT_SCHEDULER_TIMING: Readonly<SchedulerTiming> = {
   maxSleepMilliseconds: 10 * 60_000,
   minSleepMilliseconds: 1_000,
   claimRetryMilliseconds: 5 * 60_000,
+  jobTimeoutMilliseconds: { hourly: 10 * 60_000, dailyJst: 15 * 60_000 },
+  staleRunGraceMilliseconds: 5 * 60_000,
+  maxAttempts: 3,
+  dailyLateLimitMilliseconds: 3 * 60 * 60_000,
+  recordRetentionMilliseconds: 30 * 24 * 60 * 60_000,
 };
 
-const HOUR = 60 * 60_000;
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const JST_OFFSET = 9 * HOUR;
 
@@ -89,7 +112,7 @@ export function jobWindow(cadence: JobCadence, now: number): JobWindow {
     };
   }
   const jstDayStart = Math.floor((now + JST_OFFSET) / DAY) * DAY;
-  const runAt = jstDayStart - JST_OFFSET + cadence.hour * HOUR + cadence.minute * 60_000;
+  const runAt = jstDayStart - JST_OFFSET + cadence.hour * HOUR + cadence.minute * MINUTE;
   return {
     key: new Date(jstDayStart).toISOString().slice(0, 10),
     runAt,
@@ -130,11 +153,18 @@ export interface JobRunRecord {
   window: string;
   source: JobRunSource;
   owner: string;
-  status: "running" | "success" | "failed";
+  /** skippedは、実行せずに見送った枠（日次ジョブの予定時刻から遅れすぎたときなど）。 */
+  status: "running" | "success" | "failed" | "skipped";
   startedAt: string;
   finishedAt: string | null;
   reason: string | null;
   summary: string | null;
+  /** 書き換えるたびに1増やす。compareAndSetで、他のprocessの書き換えと重ならないようにする。 */
+  revision: number;
+  /** この枠を実行し始めた回数。奪い直すたびに1増やす。見送った記録は0。 */
+  attempt: number;
+  /** 記録を消してよい時刻（UTC）。Firestoreではdocumentの最上位にもDate型で置き、TTL policyが見る。 */
+  expireAt: string;
 }
 
 export const JOB_RUN_NAMESPACE = "scheduled-job-run";
@@ -151,16 +181,24 @@ export interface JobRunClaim {
 /**
  * ジョブ名と枠ごとの実行権を、state storeの原子的なcreateで取る。
  * 先に作れたprocessだけが実行し、再起動、二重起動、HTTP経由の実行と重なっても同じ枠は一度だけになる。
+ * 作った後の書き換え（結果、奪い直し）はrevisionを使うcompareAndSetで行い、他のprocessの書き換えを上書きしない。
  */
 export class JobRunLedger {
   private readonly store: StateStore;
   private readonly owner: string;
   private readonly now: () => number;
+  private readonly retentionMilliseconds: number;
 
-  constructor(store: StateStore, owner: string, now: () => number = Date.now) {
+  constructor(
+    store: StateStore,
+    owner: string,
+    now: () => number = Date.now,
+    retentionMilliseconds: number = DEFAULT_SCHEDULER_TIMING.recordRetentionMilliseconds,
+  ) {
     this.store = store;
     this.owner = owner;
     this.now = now;
+    this.retentionMilliseconds = retentionMilliseconds;
   }
 
   /** 実行権を取れたら記録を返す。既に誰かが取っていればnull。storeの失敗は例外で返す。 */
@@ -170,6 +208,7 @@ export class JobRunLedger {
     source: JobRunSource,
   ): Promise<JobRunClaim | null> {
     const key = jobRunKey(job, window);
+    const { now, expireAt } = this.stamp();
     const record: JobRunRecord = {
       schemaVersion: 1,
       job,
@@ -177,25 +216,132 @@ export class JobRunLedger {
       source,
       owner: this.owner,
       status: "running",
-      startedAt: new Date(this.now()).toISOString(),
+      startedAt: now,
       finishedAt: null,
       reason: null,
       summary: null,
+      revision: 1,
+      attempt: 1,
+      expireAt: expireAt.toISOString(),
     };
-    return (await this.store.create(JOB_RUN_NAMESPACE, key, record)) ? { key, record } : null;
+    return (await this.store.create(JOB_RUN_NAMESPACE, key, record, { expireAt }))
+      ? { key, record }
+      : null;
   }
 
-  /** 結果を記録する。記録の失敗はログに残し、呼び出し元へは投げない。 */
+  /** 実行せずに見送った枠として記録する。既に記録があればfalse。storeの失敗は例外で返す。 */
+  async skip(
+    job: ScheduledJobName,
+    window: string,
+    source: JobRunSource,
+    reason: string,
+  ): Promise<boolean> {
+    const { now, expireAt } = this.stamp();
+    const record: JobRunRecord = {
+      schemaVersion: 1,
+      job,
+      window,
+      source,
+      owner: this.owner,
+      status: "skipped",
+      startedAt: now,
+      finishedAt: now,
+      reason,
+      summary: null,
+      revision: 1,
+      attempt: 0,
+      expireAt: expireAt.toISOString(),
+    };
+    return this.store.create(JOB_RUN_NAMESPACE, jobRunKey(job, window), record, { expireAt });
+  }
+
+  /** 枠の記録を読む。storeの失敗は例外で返す。 */
+  async read(job: ScheduledJobName, window: string): Promise<JobRunRecord | null> {
+    return this.store.get<JobRunRecord>(JOB_RUN_NAMESPACE, jobRunKey(job, window));
+  }
+
+  /**
+   * runningのまま止まった記録を奪い直し、自分の実行として始め直す。
+   * 他のprocessが先に書き換えていればnull。storeの失敗は例外で返す。
+   */
+  async reclaim(previous: JobRunRecord, source: JobRunSource): Promise<JobRunClaim | null> {
+    const key = jobRunKey(previous.job, previous.window);
+    const { now, expireAt } = this.stamp();
+    const record: JobRunRecord = {
+      ...previous,
+      source,
+      owner: this.owner,
+      status: "running",
+      startedAt: now,
+      finishedAt: null,
+      reason: null,
+      summary: null,
+      revision: previous.revision + 1,
+      attempt: previous.attempt + 1,
+      expireAt: expireAt.toISOString(),
+    };
+    return (await this.store.compareAndSet(JOB_RUN_NAMESPACE, key, previous.revision, record, {
+      expireAt,
+    }))
+      ? { key, record }
+      : null;
+  }
+
+  /**
+   * runningのまま止まった記録を、実行し直さずに終わらせる。
+   * 他のprocessが先に書き換えていればfalse。storeの失敗は例外で返す。
+   */
+  async abandon(
+    previous: JobRunRecord,
+    status: "failed" | "skipped",
+    reason: string,
+  ): Promise<boolean> {
+    const { now, expireAt } = this.stamp();
+    const record: JobRunRecord = {
+      ...previous,
+      status,
+      finishedAt: now,
+      reason,
+      revision: previous.revision + 1,
+      expireAt: expireAt.toISOString(),
+    };
+    return this.store.compareAndSet(
+      JOB_RUN_NAMESPACE,
+      jobRunKey(previous.job, previous.window),
+      previous.revision,
+      record,
+      { expireAt },
+    );
+  }
+
+  /**
+   * 結果を記録する。記録の失敗はログに残し、呼び出し元へは投げない。
+   * 実行の間に他のprocessが奪い直していれば、その記録を上書きしない。
+   */
   async finish(claim: JobRunClaim, outcome: ScheduledJobOutcome): Promise<void> {
+    const { now, expireAt } = this.stamp();
     const record: JobRunRecord = {
       ...claim.record,
       status: outcome.status,
-      finishedAt: new Date(this.now()).toISOString(),
+      finishedAt: now,
       reason: outcome.status === "failed" ? outcome.reason : null,
       summary: outcome.summary ?? null,
+      revision: claim.record.revision + 1,
+      expireAt: expireAt.toISOString(),
     };
     try {
-      await this.store.set(JOB_RUN_NAMESPACE, claim.key, record);
+      const written = await this.store.compareAndSet(
+        JOB_RUN_NAMESPACE,
+        claim.key,
+        claim.record.revision,
+        record,
+        { expireAt },
+      );
+      if (!written) {
+        console.warn(
+          `定期処理 ${claim.record.job} (${claim.record.window}) の結果を記録しませんでした。記録が別の実行に引き継がれています。`,
+        );
+      }
     } catch (error) {
       console.error(
         `定期処理 ${claim.record.job} (${claim.record.window}) の結果を記録できませんでした: ${errorReason(error)}`,
@@ -236,6 +382,14 @@ export class JobRunLedger {
       throw error;
     }
   }
+
+  private stamp(): { now: string; expireAt: Date } {
+    const now = this.now();
+    return {
+      now: new Date(now).toISOString(),
+      expireAt: new Date(now + this.retentionMilliseconds),
+    };
+  }
 }
 
 export interface SchedulerClock {
@@ -259,7 +413,8 @@ export interface JobSchedulerOptions {
   store: StateStore;
   jobs: ScheduledJob[];
   clock?: SchedulerClock;
-  timing?: SchedulerTiming;
+  /** 指定しなかった値はDEFAULT_SCHEDULER_TIMINGを使う。 */
+  timing?: Partial<SchedulerTiming>;
   owner?: string;
 }
 
@@ -267,17 +422,25 @@ export interface JobSchedulerOptions {
  * process内で定期処理を回す。
  * ジョブは直列に実行し、同時に重ならない。1つのジョブの失敗や例外は記録して次へ進み、
  * 同じ枠では再試行しない（次の枠で実行する）。
- * 起動直後は、まだ実行されていない現在の枠を実行する。日次ジョブは予定時刻まで待つ。
+ * ジョブが制限時間を過ぎても終わらなければ、その枠を失敗として次へ進む。
+ * Promiseは止められないため、終わっていない間は同じジョブを新しく始めない。
+ * 起動直後は、まだ実行されていない現在の枠を実行する。日次ジョブは予定時刻まで待ち、
+ * 予定時刻から遅れすぎた日は実行しない。
+ * 実行中にprocessが落ちてrunningのまま残った枠は、制限時間と余裕を過ぎた後に奪い直して実行し直す。
  */
 export class JobScheduler {
   private readonly jobs: ScheduledJob[];
   private readonly clock: SchedulerClock;
   private readonly timing: SchedulerTiming;
   private readonly ledger: JobRunLedger;
-  /** このprocessで実行権の判定を終えた枠。Firestoreへの問い合わせを毎回しないために持つ。 */
+  /** このprocessで判定を終えた枠。Firestoreへの問い合わせを毎回しないために持つ。 */
   private readonly settledWindow = new Map<ScheduledJobName, string>();
-  /** 実行権の記録に失敗した枠で、もう一度取りに行く時刻。 */
-  private readonly claimRetryAt = new Map<ScheduledJobName, { window: string; at: number }>();
+  /** 同じ枠をもう一度確かめる時刻。記録に失敗したときと、他の実行がrunningのときに置く。 */
+  private readonly retryAt = new Map<ScheduledJobName, { window: string; at: number }>();
+  /** 制限時間を過ぎてもまだ終わっていないジョブと、その実行の枠。 */
+  private readonly hungRun = new Map<ScheduledJobName, string>();
+  /** hungRunのために見送ったことをログに出した枠。同じ枠で何度も出さない。 */
+  private readonly hungNotice = new Map<ScheduledJobName, string>();
   private timer: unknown = null;
   private running: Promise<void> = Promise.resolve();
   private started = false;
@@ -286,11 +449,12 @@ export class JobScheduler {
   constructor(options: JobSchedulerOptions) {
     this.jobs = options.jobs;
     this.clock = options.clock ?? systemClock;
-    this.timing = options.timing ?? DEFAULT_SCHEDULER_TIMING;
+    this.timing = { ...DEFAULT_SCHEDULER_TIMING, ...options.timing };
     this.ledger = new JobRunLedger(
       options.store,
       options.owner ?? `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`,
       () => this.clock.now(),
+      this.timing.recordRetentionMilliseconds,
     );
   }
 
@@ -304,7 +468,10 @@ export class JobScheduler {
     this.runTick();
   }
 
-  /** timerを止め、新しいジョブを始めない。実行中のジョブの終わりを待つPromiseを返す。 */
+  /**
+   * timerを止め、新しいジョブを始めない。実行中のジョブの終わりを待つPromiseを返す。
+   * ジョブが終わらなくても、制限時間を過ぎれば解決する。
+   */
   stop(): Promise<void> {
     this.stopped = true;
     if (this.timer !== null) {
@@ -336,18 +503,32 @@ export class JobScheduler {
     }
   }
 
+  private timeoutOf(job: ScheduledJob): number {
+    return this.timing.jobTimeoutMilliseconds[job.cadence.kind];
+  }
+
   private async runIfDue(job: ScheduledJob): Promise<void> {
     const now = this.clock.now();
     const window = jobWindow(job.cadence, now);
     if (now < window.runAt || this.settledWindow.get(job.name) === window.key) return;
-    const retry = this.claimRetryAt.get(job.name);
+    const retry = this.retryAt.get(job.name);
     if (retry && retry.window === window.key && now < retry.at) return;
+    const hungWindow = this.hungRun.get(job.name);
+    if (hungWindow !== undefined) {
+      if (this.hungNotice.get(job.name) !== window.key) {
+        this.hungNotice.set(job.name, window.key);
+        console.warn(
+          `定期処理 ${job.name} (${window.key}) は、制限時間を過ぎた前の実行（${hungWindow}）がまだ終わっていないため見送りました。`,
+        );
+      }
+      return;
+    }
 
     let claim: JobRunClaim | null;
     try {
-      claim = await this.ledger.claim(job.name, window.key, "inprocess");
+      claim = await this.acquire(job, window, now);
     } catch (error) {
-      this.claimRetryAt.set(job.name, {
+      this.retryAt.set(job.name, {
         window: window.key,
         at: now + this.timing.claimRetryMilliseconds,
       });
@@ -356,28 +537,131 @@ export class JobScheduler {
       );
       return;
     }
-    this.claimRetryAt.delete(job.name);
-    this.settledWindow.set(job.name, window.key);
-    if (!claim) {
-      console.log(`定期処理 ${job.name} (${window.key}) は実行済みのため見送りました。`);
-      return;
+    if (claim) await this.execute(job, window.key, claim);
+  }
+
+  /**
+   * 枠の実行権を取る。取れなければ、理由をログに残してnullを返す。
+   * 日次ジョブが予定時刻から遅れすぎていれば、実行せずskippedとして記録する。
+   * runningのまま止まった記録は、試行回数の上限までは奪い直す。
+   */
+  private async acquire(
+    job: ScheduledJob,
+    window: JobWindow,
+    now: number,
+  ): Promise<JobRunClaim | null> {
+    const tooLate =
+      job.cadence.kind === "dailyJst" &&
+      now >= window.runAt + this.timing.dailyLateLimitMilliseconds;
+    const lateHours = this.timing.dailyLateLimitMilliseconds / HOUR;
+    if (tooLate) {
+      const skipped = await this.ledger.skip(job.name, window.key, "inprocess", "too-late");
+      this.retryAt.delete(job.name);
+      if (skipped) {
+        this.settledWindow.set(job.name, window.key);
+        console.warn(
+          `定期処理 ${job.name} (${window.key}) は予定時刻から${lateHours}時間を過ぎたため、この日は実行しません。`,
+        );
+        return null;
+      }
+    } else {
+      const claim = await this.ledger.claim(job.name, window.key, "inprocess");
+      this.retryAt.delete(job.name);
+      if (claim) {
+        this.settledWindow.set(job.name, window.key);
+        return claim;
+      }
     }
 
-    const startedAt = this.clock.now();
-    let outcome: ScheduledJobOutcome;
-    try {
-      outcome = await job.run();
-    } catch (error) {
-      outcome = { status: "failed", reason: errorReason(error) };
+    const existing = await this.ledger.read(job.name, window.key);
+    if (existing?.status !== "running") {
+      this.settledWindow.set(job.name, window.key);
+      console.log(`定期処理 ${job.name} (${window.key}) は実行済みのため見送りました。`);
+      return null;
     }
+    const staleMilliseconds = this.timeoutOf(job) + this.timing.staleRunGraceMilliseconds;
+    const staleAt = Date.parse(existing.startedAt) + staleMilliseconds;
+    if (now < staleAt) {
+      this.retryAt.set(job.name, { window: window.key, at: staleAt });
+      console.log(
+        `定期処理 ${job.name} (${window.key}) は別の実行（${existing.owner}）が実行中のため見送りました。${new Date(staleAt).toISOString()}に確かめ直します。`,
+      );
+      return null;
+    }
+
+    const attempt = existing.attempt;
+    const abandonReason = tooLate
+      ? "too-late"
+      : attempt >= this.timing.maxAttempts
+        ? "attempts-exhausted"
+        : null;
+    if (abandonReason) {
+      const status = tooLate ? "skipped" : "failed";
+      if (await this.ledger.abandon(existing, status, abandonReason)) {
+        this.settledWindow.set(job.name, window.key);
+        const message = tooLate
+          ? `定期処理 ${job.name} (${window.key}) は${existing.startedAt}からrunningのまま止まっており、予定時刻から${lateHours}時間を過ぎたため、この日は実行しません。`
+          : `定期処理 ${job.name} (${window.key}) は${attempt}回実行しても終わらなかったため、諦めて失敗にしました。`;
+        if (tooLate) console.warn(message);
+        else console.error(message);
+      } else {
+        this.retryAt.set(job.name, { window: window.key, at: now + staleMilliseconds });
+        console.log(
+          `定期処理 ${job.name} (${window.key}) は別のprocessが先に記録を更新したため見送りました。`,
+        );
+      }
+      return null;
+    }
+
+    const reclaimed = await this.ledger.reclaim(existing, "inprocess");
+    if (!reclaimed) {
+      this.retryAt.set(job.name, { window: window.key, at: now + staleMilliseconds });
+      console.log(
+        `定期処理 ${job.name} (${window.key}) は別のprocessが先に記録を更新したため見送りました。`,
+      );
+      return null;
+    }
+    this.settledWindow.set(job.name, window.key);
+    console.warn(
+      `定期処理 ${job.name} (${window.key}) は${existing.startedAt}からrunningのまま止まっているため、実行し直します（${reclaimed.record.attempt}回目）。`,
+    );
+    return reclaimed;
+  }
+
+  private async execute(job: ScheduledJob, window: string, claim: JobRunClaim): Promise<void> {
+    const startedAt = this.clock.now();
+    const timeout = this.timeoutOf(job);
+    const run = invoke(job);
+    let timer: unknown = null;
+    const expired = new Promise<null>((resolve) => {
+      timer = this.clock.setTimeout(() => resolve(null), timeout);
+    });
+    const outcome = await Promise.race([run, expired]);
+    this.clock.clearTimeout(timer);
     const elapsed = this.clock.now() - startedAt;
+
+    if (outcome === null) {
+      this.hungRun.set(job.name, window);
+      void run.then((late) => {
+        this.hungRun.delete(job.name);
+        this.hungNotice.delete(job.name);
+        console.log(
+          `定期処理 ${job.name} (${window}) の、制限時間を過ぎた実行が終わりました: ${describeOutcome(late)} (${this.clock.now() - startedAt}ms)`,
+        );
+      });
+      console.error(
+        `定期処理 ${job.name} (${window}) が制限時間（${timeout / MINUTE}分）を過ぎても終わらないため、失敗として次へ進みます。`,
+      );
+      await this.ledger.finish(claim, { status: "failed", reason: "timeout" });
+      return;
+    }
     if (outcome.status === "success") {
       console.log(
-        `定期処理 ${job.name} (${window.key}) を実行しました: ${outcome.summary ?? "ok"} (${elapsed}ms)`,
+        `定期処理 ${job.name} (${window}) を実行しました: ${outcome.summary ?? "ok"} (${elapsed}ms)`,
       );
     } else {
       console.error(
-        `定期処理 ${job.name} (${window.key}) に失敗しました: ${outcome.reason} (${elapsed}ms)`,
+        `定期処理 ${job.name} (${window}) に失敗しました: ${outcome.reason} (${elapsed}ms)`,
       );
     }
     await this.ledger.finish(claim, outcome);
@@ -389,18 +673,37 @@ export class JobScheduler {
     let wakeAt = now + this.timing.maxSleepMilliseconds;
     for (const job of this.jobs) {
       const window = jobWindow(job.cadence, now);
-      const retry = this.claimRetryAt.get(job.name);
-      const dueAt =
-        this.settledWindow.get(job.name) === window.key
-          ? window.nextRunAt
-          : retry && retry.window === window.key
-            ? retry.at
-            : window.runAt;
+      const settled = this.settledWindow.get(job.name) === window.key;
+      // 終わっていない実行がある間は、その終わりを最長の待ち時間ごとに確かめる。
+      if (!settled && this.hungRun.has(job.name)) continue;
+      const retry = this.retryAt.get(job.name);
+      const dueAt = settled
+        ? window.nextRunAt
+        : retry && retry.window === window.key
+          ? retry.at
+          : window.runAt;
       wakeAt = Math.min(wakeAt, dueAt);
     }
     const delay = Math.max(this.timing.minSleepMilliseconds, wakeAt - now);
     this.timer = this.clock.setTimeout(() => this.runTick(), delay);
   }
+}
+
+/** ジョブを呼び、例外は失敗の結果に直す。返すPromiseはrejectしない。 */
+function invoke(job: ScheduledJob): Promise<ScheduledJobOutcome> {
+  const failed = (error: unknown): ScheduledJobOutcome => ({
+    status: "failed",
+    reason: errorReason(error),
+  });
+  try {
+    return job.run().catch(failed);
+  } catch (error) {
+    return Promise.resolve(failed(error));
+  }
+}
+
+function describeOutcome(outcome: ScheduledJobOutcome): string {
+  return outcome.status === "success" ? (outcome.summary ?? "ok") : `失敗 ${outcome.reason}`;
 }
 
 interface SignalTarget {

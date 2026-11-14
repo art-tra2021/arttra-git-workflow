@@ -353,12 +353,19 @@ done
 
 command -v gcloud >/dev/null || fail "gcloud is required"
 command -v jq >/dev/null || fail "jq is required"
-load_vm_env
 
+# VM専用の上書きは、それを使うpreviewとdeployだけで読む。
+# 設定ファイルが壊れていても、statusでの確認とstopでの停止はできるようにする。
 case "${ar_action}" in
-preview) preview_release ;;
+preview)
+	load_vm_env
+	preview_release
+	;;
 status) status_release ;;
-deploy) deploy_release ;;
+deploy)
+	load_vm_env
+	deploy_release
+	;;
 stop) stop_release ;;
 -h | --help)
 	usage

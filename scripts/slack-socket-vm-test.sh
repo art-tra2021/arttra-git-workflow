@@ -229,4 +229,29 @@ if bash scripts/slack-socket-vm.sh stop >/dev/null 2>&1; then
 	exit 1
 fi
 
+# vm-overrides.confが壊れていても、statusとstopは動く。previewとdeployは拒否する。
+ar_broken_overrides="${ar_test_root}/broken.conf"
+printf 'not a valid line\n' >"${ar_broken_overrides}"
+export AR_SOCKET_VM_OVERRIDES_FILE="${ar_broken_overrides}"
+ar_status="$(bash scripts/slack-socket-vm.sh status)"
+jq -e '.action == "status" and .healthy == true' <<<"${ar_status}" >/dev/null
+: >"${FAKE_GCLOUD_LOG}"
+ar_stop="$(bash scripts/slack-socket-vm.sh stop --yes)"
+jq -e '.action == "stop" and .vm == "arttra-work-slack-socket"' <<<"${ar_stop}" >/dev/null
+grep -Eq '^compute instances stop arttra-work-slack-socket ' "${FAKE_GCLOUD_LOG}"
+if bash scripts/slack-socket-vm.sh preview >/dev/null 2>&1; then
+	printf 'preview must reject a broken vm-overrides.conf\n' >&2
+	exit 1
+fi
+: >"${FAKE_GCLOUD_LOG}"
+if bash scripts/slack-socket-vm.sh deploy --yes >/dev/null 2>&1; then
+	printf 'deploy must reject a broken vm-overrides.conf\n' >&2
+	exit 1
+fi
+if grep -Eq '^compute instances (create|add-metadata|reset|start)' "${FAKE_GCLOUD_LOG}"; then
+	printf 'deploy with a broken vm-overrides.conf must not mutate\n' >&2
+	exit 1
+fi
+unset AR_SOCKET_VM_OVERRIDES_FILE
+
 printf 'slack-socket-vm tests passed\n'
