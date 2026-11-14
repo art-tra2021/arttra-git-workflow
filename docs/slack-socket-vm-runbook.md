@@ -173,7 +173,7 @@ HTTPの`/internal/*`から呼んだ場合も、枠が空いていれば同じ記
 
 ### 実行の記録の見方
 
-記録はFirestoreの`arttra_scheduled_job_run` collectionにある（`AR_FIRESTORE_PREFIX`が既定の`arttra`の場合）。
+記録はFirestoreの`<AR_FIRESTORE_PREFIX>_scheduled_job_run` collectionにある。本番（`AR_FIRESTORE_PREFIX=arttra_prod`）では`arttra_prod_scheduled_job_run`である。
 document IDは「ジョブ名:枠」をbase64urlにした文字列で、中身は`value`の下にある。
 
 | field | 意味 |
@@ -265,14 +265,14 @@ GCPの権限を持つ操作者が行う。各手順の後に、次へ進んで�
 2. ログで各ジョブの実行を確かめる。
    起動時の`定期処理をprocess内で開始しました`に7つのジョブ名が並ぶこと、毎時0分過ぎに5つの毎時ジョブの`を実行しました`が出ることを確かめる。
    翌朝9:00と9:05（JST）に`work-digest`と`deadline-reminders`が出ること、Slackに日次まとめが1件だけ届くことを確かめる。
-   Firestoreの`arttra_scheduled_job_run`で、各枠の記録が1件ずつ`success`になっていることも見る。
+   Firestoreの`arttra_prod_scheduled_job_run`で、各枠の記録が1件ずつ`success`になっていることも見る。
 
 3. Cloud Schedulerの`arttra-*`ジョブを削除する。
    切り戻しに備えて、削除の前に定義を保存する。
-   ジョブのlocationは`gcloud scheduler jobs list`で確かめ、下の`<location>`に入れる。
+   2026-11-15時点で、`arttra-*`ジョブは`asia-northeast1`にある。
 
    ```sh
-   ar_location="<location>"
+   ar_location="asia-northeast1"
    mkdir -p scheduler-backup
    for ar_job in $(gcloud scheduler jobs list --location "${ar_location}" --project bmarumado \
        --filter 'name~/jobs/arttra-' --format 'value(name.basename())'); do
