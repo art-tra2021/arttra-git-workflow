@@ -3,7 +3,11 @@ import {
   parseIssueReferenceUrl,
   resolveNotificationThreadRootIssue,
 } from "./lifecycle-notification-service.ts";
-import { type NotificationIntentMetadata, notificationIntentId } from "./notification-outbox.ts";
+import {
+  type NotificationIntentMetadata,
+  type NotificationRequiredActionKind,
+  notificationIntentId,
+} from "./notification-outbox.ts";
 import { NotificationThreadService } from "./notification-thread-service.ts";
 import type { GitHubLifecycleClient } from "./review-types.ts";
 import type { StateStore } from "./state-store.ts";
@@ -171,7 +175,7 @@ export class WorkNotificationService {
       .filter((item) => item.delivery !== "silent")
       .sort(compareWorkItems);
     if (items.length > 0) {
-      await this.notifier.digest(items, {
+      await this.notifier.digest(items.map(notificationPayloadItem), {
         intentId: notificationIntentId({
           kind: "work-digest",
           date: dateInTokyo(this.now()),
@@ -193,20 +197,21 @@ export class WorkNotificationService {
     actorSlackUserId: string | null = null,
   ): Promise<boolean> {
     const slackUserId = item.owner ? await this.resolveSlackUserId(item.owner) : null;
-    const requiredActionKind =
-      item.reasonCode === "BLOCKED" ? "blocker" : item.reasonCode === "OVERDUE" ? "overdue" : null;
+    const requiredAction = workRequiredAction(item);
     const notificationMetadata: NotificationIntentMetadata = {
       ...metadata,
-      ...(requiredActionKind
+      ...(requiredAction
         ? {
             requiredAction: {
-              kind: requiredActionKind,
-              recipientSlackUserIds: slackUserId ? [slackUserId] : [],
+              kind: requiredAction.kind,
+              recipientSlackUserIds: await this.resolveSlackUserIds(requiredAction.recipientLogins),
               actorSlackUserId,
             },
           }
         : {}),
     };
+    // 宛先計算用の全担当者とPR作成者は、既存intentのpayload hashを変えないよう送信前に外す。
+    const payloadItem = notificationPayloadItem(item);
     const context: Omit<WorkNotificationContext, "threadTs"> = {
       kind,
       slackUserId,
@@ -225,15 +230,51 @@ export class WorkNotificationService {
       if (threadRootIssue.url !== issue.url) {
         const threadTs = await this.threads.rootTs(threadRootIssue.url);
         if (!threadTs) return false;
-        await this.notifier.notify(item, { ...context, threadTs }, notificationMetadata);
+        await this.notifier.notify(payloadItem, { ...context, threadTs }, notificationMetadata);
         return true;
       }
     }
     await this.threads.publish(item.url, (threadTs) =>
-      this.notifier.notify(item, { ...context, threadTs }, notificationMetadata),
+      this.notifier.notify(payloadItem, { ...context, threadTs }, notificationMetadata),
     );
     return true;
   }
+
+  private async resolveSlackUserIds(logins: string[]): Promise<string[]> {
+    const uniqueLogins = [...new Map(logins.map((login) => [login.toLowerCase(), login])).values()];
+    const resolved = await Promise.all(uniqueLogins.map((login) => this.resolveSlackUserId(login)));
+    return [...new Set(resolved.filter((value): value is string => value !== null))];
+  }
+}
+
+/**
+ * work通知のうちDMする種別と、次に動く人のGitHub login。
+ * blocker・期限は全担当者、conflictはPR作成者へ送る。旧read modelは先頭担当者だけで代替する。
+ */
+function workRequiredAction(
+  item: HumanWorkItem,
+): { kind: NotificationRequiredActionKind; recipientLogins: string[] } | null {
+  const assignees = item.assignees ?? (item.owner ? [item.owner] : []);
+  switch (item.reasonCode) {
+    case "BLOCKED":
+      return { kind: "blocker", recipientLogins: assignees };
+    case "OVERDUE":
+      return { kind: "overdue", recipientLogins: assignees };
+    case "DUE_TODAY":
+      return { kind: "due-today", recipientLogins: assignees };
+    case "CONFLICTING":
+      return {
+        kind: "conflict",
+        recipientLogins: item.pullRequestAuthor ? [item.pullRequestAuthor] : [],
+      };
+    default:
+      return null;
+  }
+}
+
+function notificationPayloadItem(item: HumanWorkItem): HumanWorkItem {
+  const { assignees: _assignees, pullRequestAuthor: _pullRequestAuthor, ...payload } = item;
+  return payload;
 }
 
 function deadlineStage(item: HumanWorkItem, today: string, leadDays: number): DeadlineStage | null {

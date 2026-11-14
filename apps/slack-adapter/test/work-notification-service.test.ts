@@ -288,7 +288,15 @@ describe("WorkNotificationService", () => {
     expect(await service.notifyDeadlines()).toBe(1);
     expect(sent).toEqual([
       { code: "DUE_SOON", threadTs: null, requiredAction: undefined },
-      { code: "DUE_TODAY", threadTs: "500.1", requiredAction: undefined },
+      {
+        code: "DUE_TODAY",
+        threadTs: "500.1",
+        requiredAction: {
+          kind: "due-today",
+          recipientSlackUserIds: ["UALICE"],
+          actorSlackUserId: null,
+        },
+      },
       {
         code: "OVERDUE",
         threadTs: "500.1",
@@ -335,6 +343,121 @@ describe("WorkNotificationService", () => {
     items = [active, completed, unassigned, noDate, far];
     expect(await service.notifyDeadlines()).toBe(1);
     expect(sent).toBe(2);
+  });
+
+  test("BLOCKEDのDM宛先は全担当者にし、threadのmentionと送信件数は先頭担当者のまま保つ", async () => {
+    const values = new Map<string, unknown>();
+    const sent: Array<{
+      item: HumanWorkItem;
+      context: WorkNotificationContext;
+      requiredAction: NotificationIntentMetadata["requiredAction"];
+    }> = [];
+    const item = { ...workItem("BLOCKED", "immediate"), assignees: ["alice", "bob", "Alice"] };
+    const service = new WorkNotificationService(
+      { loadProjectItems: async () => [item] },
+      memoryStore(values),
+      {
+        notify: async (current, context, metadata) => {
+          sent.push({ item: current, context, requiredAction: metadata?.requiredAction });
+          return { messageTs: context.threadTs ?? "700.1" };
+        },
+        digest: async () => {},
+      },
+      () => Date.parse("2026-08-01T00:00:00Z"),
+      async (login) => ({ alice: "UALICE", bob: "UBOB" })[login.toLowerCase()] ?? null,
+    );
+
+    expect(await service.notifyImmediate("delivery-blocked", "carol")).toBe(1);
+    expect(await service.notifyImmediate("delivery-blocked-redelivery", "carol")).toBe(0);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.context.slackUserId).toBe("UALICE");
+    expect(sent[0]?.requiredAction).toEqual({
+      kind: "blocker",
+      recipientSlackUserIds: ["UALICE", "UBOB"],
+      actorSlackUserId: null,
+    });
+    expect(sent[0]?.item).not.toHaveProperty("assignees");
+    expect(sent[0]?.item).toEqual(workItem("BLOCKED", "immediate"));
+  });
+
+  test("期限超過のDM宛先も全担当者にする", async () => {
+    const sent: Array<NotificationIntentMetadata["requiredAction"]> = [];
+    const item = {
+      ...workItem("ACTIVE_WORK", "digest"),
+      targetDate: "2026-08-01",
+      assignees: ["alice", "bob"],
+    };
+    const service = new WorkNotificationService(
+      { loadProjectItems: async () => [item] },
+      memoryStore(new Map()),
+      {
+        notify: async (_current, context, metadata) => {
+          sent.push(metadata?.requiredAction);
+          return { messageTs: context.threadTs ?? "710.1" };
+        },
+        digest: async () => {},
+      },
+      () => Date.parse("2026-08-02T03:00:00Z"),
+      async (login) => ({ alice: "UALICE", bob: "UBOB" })[login] ?? null,
+    );
+
+    expect(await service.notifyDeadlines()).toBe(1);
+    expect(sent).toEqual([
+      { kind: "overdue", recipientSlackUserIds: ["UALICE", "UBOB"], actorSlackUserId: null },
+    ]);
+  });
+
+  test("conflictはPR作成者だけをDM宛先にし、作成者が分からなければDMしない", async () => {
+    const sent: Array<NotificationIntentMetadata["requiredAction"]> = [];
+    const withAuthor = {
+      ...workItem("CONFLICTING", "immediate", 41),
+      assignees: ["alice"],
+      pullRequestAuthor: "carol",
+    };
+    const withoutAuthor = { ...workItem("CONFLICTING", "immediate", 42), assignees: ["alice"] };
+    const service = new WorkNotificationService(
+      { loadProjectItems: async () => [withAuthor, withoutAuthor] },
+      memoryStore(new Map()),
+      {
+        notify: async (current, context, metadata) => {
+          expect(current).not.toHaveProperty("pullRequestAuthor");
+          sent.push(metadata?.requiredAction);
+          return { messageTs: context.threadTs ?? `720.${sent.length}` };
+        },
+        digest: async () => {},
+      },
+      () => Date.parse("2026-08-01T00:00:00Z"),
+      async (login) => ({ alice: "UALICE", carol: "UCAROL", dave: "UDAVE" })[login] ?? null,
+    );
+
+    expect(await service.notifyImmediate("delivery-conflict", "dave")).toBe(2);
+    expect(sent).toEqual([
+      { kind: "conflict", recipientSlackUserIds: ["UCAROL"], actorSlackUserId: "UDAVE" },
+      { kind: "conflict", recipientSlackUserIds: [], actorSlackUserId: "UDAVE" },
+    ]);
+  });
+
+  test("digestにはDM宛先計算用の欄を載せない", async () => {
+    const digests: HumanWorkItem[][] = [];
+    const service = new WorkNotificationService(
+      {
+        loadProjectItems: async () => [
+          { ...workItem("ACTIVE_WORK", "digest"), assignees: ["alice"], pullRequestAuthor: "bob" },
+        ],
+      },
+      memoryStore(new Map()),
+      {
+        notify: async () => ({ messageTs: "730.1" }),
+        digest: async (items) => {
+          digests.push(items);
+        },
+      },
+      () => Date.parse("2026-08-01T00:00:00Z"),
+    );
+
+    expect(await service.sendDigest()).toBe(1);
+    expect(digests).toEqual([[workItem("ACTIVE_WORK", "digest")]]);
   });
 });
 

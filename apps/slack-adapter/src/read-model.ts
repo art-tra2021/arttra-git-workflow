@@ -10,6 +10,8 @@ export function toHumanWorkItem(snapshot: WorkItemSnapshot, viewer: string): Hum
     status: snapshot.project.status,
     priority: snapshot.project.priority,
     owner: snapshot.project.owner,
+    ...(snapshot.project.assignees ? { assignees: snapshot.project.assignees } : {}),
+    ...(snapshot.pullRequest?.author ? { pullRequestAuthor: snapshot.pullRequest.author } : {}),
     targetDate: snapshot.project.targetDate,
   };
   const owner = snapshot.project.owner ?? "担当者未定";

@@ -28,6 +28,8 @@ export interface WorkItemSnapshot {
     status: WorkStatus;
     priority: Priority;
     owner: string | null;
+    /** 全担当者。ownerは先頭担当者で、旧snapshotではこの欄が欠落し得る。 */
+    assignees?: string[];
     targetDate: string | null;
   };
   relationships: {
@@ -39,6 +41,8 @@ export interface WorkItemSnapshot {
     checks: "none" | "pending" | "passed" | "failed";
     mergeState: "unknown" | "clean" | "behind" | "conflicting";
     requestedReviewers: string[];
+    /** PR作成者のGitHub login。conflictのDM宛先に使う。 */
+    author?: string | null;
   } | null;
 }
 
@@ -54,6 +58,12 @@ export interface HumanWorkItem {
   status: WorkStatus;
   priority: Priority;
   owner: string | null;
+  /**
+   * 対応必須DMの宛先計算だけに使う全担当者とPR作成者。
+   * 通知outboxのpayloadには含めず、既存intentのhashを変えない。
+   */
+  assignees?: string[];
+  pullRequestAuthor?: string | null;
   targetDate: string | null;
   delivery: Delivery;
   reasonCode:
