@@ -1,9 +1,10 @@
 name: Project Status drift audit
 
 on:
+  # 定期実行（schedule: cron "37 */4 * * *"）は#180で一時停止している。
+  # github.tokenではOrganization Project #8を読めないため、
+  # 読み取り用tokenをARTTRA_PROJECT_AUDIT_TOKENへ登録した後にscheduleを戻す。
   workflow_dispatch:
-  schedule:
-    - cron: "37 */4 * * *"
 
 permissions:
   contents: read
