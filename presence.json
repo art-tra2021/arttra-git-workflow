@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "repository": "art-tra2021/arttra-git-workflow",
+  "actor": "roz",
+  "device": "device-1794667823782-31734",
+  "branch": "feature/192-daily-diff-digest-roz",
+  "head": "1919c2af3614236af8905a317b1bcd24d85bb8e4",
+  "observed_at_unix_ms": 1794669307770,
+  "files": [
+    {
+      "path": "apps/slack-adapter/README.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/github-app.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/github-cli.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/notification-outbox.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/project-read-model.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/required-action-dm-service.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-work-notifier.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/start.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/types.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/work-diff-digest.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/work-notification-service.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/work-diff-digest.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "docs/slack-pr-notification-runbook.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    }
+  ]
+}
