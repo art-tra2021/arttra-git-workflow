@@ -208,7 +208,10 @@ Cloud Runのinstanceが切り替わっても同じcacheを利用し、操作の�
 
 ## Cloud Run runtime
 
-本番では`AR_SLACK_TRANSPORT=http`を指定し、`/slack/events`でSlash Commandとinteractionを受信する。
+本番のCloud Runでは`AR_SLACK_TRANSPORT=http`を指定し、GitHub webhook、定期job、OAuth callbackを受信する。
+Slack AppのSocket Modeを有効にした場合、Slash Commandとinteractionは同じimageを`AR_SLACK_TRANSPORT=socket`で動かす常駐VMが受ける。
+Cloud Runは停止状態からの起動がSlackの3秒応答に間に合わないためである。配備と切り戻しは[Socket Mode常駐VM runbook](../../docs/slack-socket-vm-runbook.md)に従う。
+Socket Modeを無効にしている間は、Cloud Runが`/slack/events`でSlash Commandとinteractionを受信する。
 `AR_GITHUB_BACKEND=app`を指定し、GitHub Appのinstallation token経由でGitHub REST APIを利用する。
 production imageに`gh`は含めず、個人のGitHub tokenにも依存しない。
 `/health`はCloud Runのstartup、liveness、readiness確認に利用でき、image build時の完全なGit commitを`commit`として返す。
