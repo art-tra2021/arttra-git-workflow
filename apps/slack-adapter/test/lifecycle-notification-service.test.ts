@@ -9,6 +9,10 @@ import {
 } from "../src/lifecycle-notification-service.ts";
 import type { NotificationIntentMetadata } from "../src/notification-outbox.ts";
 import { NotificationThreadService } from "../src/notification-thread-service.ts";
+import {
+  LifecycleNotifierWithRequiredActionDm,
+  RequiredActionDmService,
+} from "../src/required-action-dm-service.ts";
 import type {
   GitHubIssueContext,
   GitHubLifecycleClient,
@@ -576,6 +580,164 @@ describe("LifecycleNotificationService", () => {
       nextAction: "CIの失敗内容を確認し、修正または再実行する",
     });
   });
+
+  test("自分でpushしたPRのCI失敗でもPR作成者本人へDMし、thread通知は一件のまま", async () => {
+    const harness = await createHarness();
+
+    expect(await harness.service.process(checkRunFailedJob("author"))).toBe(1);
+    expect(
+      await harness.service.process({
+        ...checkRunFailedJob("author"),
+        deliveryId: "delivery-check-failure-redelivery",
+      }),
+    ).toBe(0);
+
+    expect(harness.sent).toHaveLength(3);
+    expect(harness.dms).toEqual([
+      { slackUserId: "UAUTHOR", kind: "ci-failed", notificationKind: "ci-failed" },
+      { slackUserId: "UOWNER", kind: "ci-failed", notificationKind: "ci-failed" },
+    ]);
+  });
+
+  test("差し戻しはPR作成者へ、修正pushは差し戻したreviewerへ一度だけDMする", async () => {
+    const harness = await createHarness();
+
+    expect(await harness.service.process(changesRequestedJob())).toBe(1);
+    expect(
+      await harness.service.process({ ...changesRequestedJob(), deliveryId: "delivery-review-2" }),
+    ).toBe(0);
+    expect(await harness.service.process(synchronizeJob("head-2"))).toBe(1);
+    expect(
+      await harness.service.process(synchronizeJob("head-2", "delivery-sync-redelivery")),
+    ).toBe(0);
+
+    expect(harness.sent.map((value) => value.notification.kind)).toEqual([
+      "issue-opened",
+      "issue-opened",
+      "review-changes-requested",
+      "revision-pushed",
+    ]);
+    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UAUTHOR"]);
+    expect(harness.dms).toEqual([
+      {
+        slackUserId: "UAUTHOR",
+        kind: "changes-requested",
+        notificationKind: "review-changes-requested",
+      },
+      { slackUserId: "UREVIEWER", kind: "revision-pushed", notificationKind: "revision-pushed" },
+    ]);
+  });
+
+  test("差し戻し本文のmentionはthreadに残し、DMはPR作成者だけへ送る", async () => {
+    const harness = await createHarness();
+    const job = changesRequestedJob();
+    job.payload.review.body = "@mentioned も確認してください";
+
+    expect(await harness.service.process(job)).toBe(1);
+    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UAUTHOR", "UMENTIONED"]);
+    expect(harness.dms.map((value) => value.slackUserId)).toEqual(["UAUTHOR"]);
+  });
+
+  test("ApproveはPR作成者へ一度だけDMし、自分のApproveはDMしない", async () => {
+    const harness = await createHarness();
+
+    expect(await harness.service.process(approvedJob("reviewer"))).toBe(1);
+    expect(
+      await harness.service.process({
+        ...approvedJob("reviewer"),
+        deliveryId: "delivery-approve-redelivery",
+      }),
+    ).toBe(0);
+    expect(harness.sent).toHaveLength(3);
+    expect(harness.dms).toEqual([
+      { slackUserId: "UAUTHOR", kind: "approved", notificationKind: "review-approved" },
+    ]);
+
+    const selfHarness = await createHarness();
+    expect(await selfHarness.service.process(approvedJob("author", 203))).toBe(1);
+    expect(selfHarness.dms).toEqual([]);
+  });
+
+  test("Issueコメントは本文で明示mentionされた人だけへDMし、担当者への参考mentionはDMしない", async () => {
+    const harness = await createHarness();
+    const comment = issueCommentJob("delivery-comment");
+
+    expect(await harness.service.process(comment)).toBe(1);
+    expect(
+      await harness.service.process({ ...comment, deliveryId: "delivery-comment-redelivery" }),
+    ).toBe(0);
+
+    expect(harness.sent).toHaveLength(3);
+    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UOWNER", "UMENTIONED"]);
+    expect(harness.dms).toEqual([
+      { slackUserId: "UMENTIONED", kind: "mentioned", notificationKind: "comment-created" },
+    ]);
+  });
+
+  test("PR会話コメントのmentionもその人だけへDMし、PR作成者へはDMしない", async () => {
+    const harness = await createHarness();
+
+    expect(await harness.service.process(pullRequestCommentJob())).toBe(1);
+    expect(await harness.service.process(reviewCommentJob())).toBe(1);
+
+    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UAUTHOR", "UMENTIONED"]);
+    expect(harness.dms).toEqual([
+      { slackUserId: "UMENTIONED", kind: "mentioned", notificationKind: "comment-created" },
+    ]);
+  });
+
+  test("自分自身へのmentionとbotコメントはDMしない", async () => {
+    const harness = await createHarness();
+    const selfMention = issueCommentJob("delivery-self-mention", "mentioned");
+    const botComment = commentWithId(issueCommentJob("delivery-bot", "arttra-app[bot]"), 102);
+    const typedBot = commentWithId(issueCommentJob("delivery-typed-bot", "ci-helper"), 103);
+    const typedBotUser: { login: string; type?: string } = typedBot.payload.comment.user;
+    typedBotUser.type = "Bot";
+
+    expect(await harness.service.process(selfMention)).toBe(1);
+    expect(await harness.service.process(botComment)).toBe(1);
+    expect(await harness.service.process(typedBot)).toBe(1);
+
+    expect(
+      harness.sent.filter((value) => value.notification.kind === "comment-created"),
+    ).toHaveLength(3);
+    expect(harness.dms).toEqual([]);
+  });
+
+  test("担当変更は新しい担当者へ一度だけDMし、自己assignmentと解除はDMしない", async () => {
+    const harness = await createHarness();
+    expect(await harness.service.process(issueOpenedJob())).toBe(1);
+    harness.github.issue = { ...harness.github.issue, assigneeLogins: ["owner", "reviewer"] };
+    const assigned = issueAssignedJob("merger", 44, "delivery-assign-reviewer");
+    assigned.payload.assignee = { login: "reviewer" };
+
+    expect(await harness.service.process(assigned)).toBe(1);
+    expect(
+      await harness.service.process({ ...assigned, deliveryId: "delivery-assign-redelivery" }),
+    ).toBe(0);
+    expect(harness.dms).toEqual([
+      { slackUserId: "UREVIEWER", kind: "assigned", notificationKind: "issue-assignment-changed" },
+    ]);
+
+    harness.github.issue = { ...harness.github.issue, assigneeLogins: ["owner"] };
+    const unassigned = issueAssignedJob("merger", 44, "delivery-unassign-reviewer");
+    unassigned.payload.action = "unassigned";
+    unassigned.payload.assignee = { login: "reviewer" };
+    expect(await harness.service.process(unassigned)).toBe(1);
+    harness.github.issue = { ...harness.github.issue, assigneeLogins: ["owner", "mentioned"] };
+    expect(
+      await harness.service.process(issueAssignedJob("mentioned", 44, "delivery-self-assign")),
+    ).toBe(1);
+
+    expect(harness.sent.map((value) => value.notification.kind)).toEqual([
+      "issue-opened",
+      "issue-opened",
+      "issue-assignment-changed",
+      "issue-assignment-changed",
+      "issue-assignment-changed",
+    ]);
+    expect(harness.dms).toHaveLength(1);
+  });
 });
 
 async function createHarness(
@@ -596,22 +758,47 @@ async function createHarness(
     requester: "UREQUESTER",
     reviewer: "UREVIEWER",
   };
-  const service = new LifecycleNotificationService(
-    github,
-    store,
-    new NotificationThreadService(store, () => Date.parse("2026-08-02T00:00:00Z")),
+  const dms: Array<{
+    slackUserId: string;
+    kind: string | undefined;
+    notificationKind: LifecycleNotification["kind"];
+  }> = [];
+  // channel/thread通知の記録はDM wrapperの有無で変わらない。DMは別配列へ記録する。
+  const notifier = new LifecycleNotifierWithRequiredActionDm(
     {
       notify: async (notification, threadTs, metadata) => {
         sent.push({ notification, threadTs, ...(metadata ? { metadata } : {}) });
         return { messageTs: threadTs ?? "900.1" };
       },
     },
+    new RequiredActionDmService((slackUserId) => ({
+      lifecycle: {
+        notify: async (notification, _threadTs, metadata) => {
+          dms.push({
+            slackUserId,
+            kind: metadata?.requiredAction?.kind,
+            notificationKind: notification.kind,
+          });
+          return { messageTs: "990.1" };
+        },
+      },
+      work: {
+        notify: async () => ({ messageTs: "990.2" }),
+        digest: async () => {},
+      },
+    })),
+  );
+  const service = new LifecycleNotificationService(
+    github,
+    store,
+    new NotificationThreadService(store, () => Date.parse("2026-08-02T00:00:00Z")),
+    notifier,
     async (login) => ids[login] ?? null,
     () => Date.parse("2026-08-02T00:00:00Z"),
     allowedRepositories,
     githubCapabilities,
   );
-  return { service, github, sent };
+  return { service, github, sent, dms };
 }
 
 class FakeLifecycleClient implements GitHubLifecycleClient {
@@ -711,6 +898,12 @@ function issueCommentJob(deliveryId: string, actor = "commenter") {
       },
     },
   };
+}
+
+function commentWithId(job: ReturnType<typeof issueCommentJob>, id: number) {
+  job.payload.comment.id = id;
+  job.payload.comment.html_url = `https://github.example/example/repo/issues/44#issuecomment-${id}`;
+  return job;
 }
 
 function issueClosedJob(deliveryId = "delivery-close", updatedAt = "2026-08-02T00:00:00Z") {
@@ -852,6 +1045,29 @@ function changesRequestedJob() {
         body: "ここを修正してください",
         html_url: "https://github.example/example/repo/pull/45#pullrequestreview-201",
         user: { login: "reviewer" },
+      },
+    },
+  };
+}
+
+function approvedJob(actor: string, reviewId = 202) {
+  return {
+    schemaVersion: 1 as const,
+    deliveryId: `delivery-approve-${reviewId}`,
+    event: "pull_request_review",
+    payload: {
+      ...basePayload(),
+      action: "submitted",
+      pull_request: {
+        number: 45,
+        html_url: "https://github.example/example/repo/pull/45",
+      },
+      review: {
+        id: reviewId,
+        state: "approved",
+        body: "",
+        html_url: `https://github.example/example/repo/pull/45#pullrequestreview-${reviewId}`,
+        user: { login: actor },
       },
     },
   };

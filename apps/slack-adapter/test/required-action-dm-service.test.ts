@@ -108,10 +108,10 @@ describe("RequiredActionDmService", () => {
       }),
     ).toBe(0);
     expect(
-      await service.notifyLifecycle(notification("ci-failed", ["UACTOR"]), {
+      await service.notifyLifecycle(notification("review-approved", ["UACTOR"]), {
         intentId: "notification-channel-self",
         requiredAction: {
-          kind: "ci-failed",
+          kind: "approved",
           recipientSlackUserIds: ["UACTOR"],
           actorSlackUserId: "UACTOR",
         },
@@ -120,10 +120,72 @@ describe("RequiredActionDmService", () => {
     expect(directCount).toBe(0);
   });
 
+  test.each(["ci-failed", "approval-wait"] as const)(
+    "%sは自分でpushしたPRでも実行者本人へDMする",
+    async (kind) => {
+      const recipients: string[] = [];
+      const service = new RequiredActionDmService((slackUserId) => ({
+        lifecycle: lifecycleNotifier(async (_value, _threadTs, metadata) => {
+          recipients.push(slackUserId);
+          expect(metadata?.requiredAction).toEqual({
+            kind,
+            recipientSlackUserIds: [slackUserId],
+            actorSlackUserId: "UAUTHOR",
+          });
+          return { messageTs: "225.1" };
+        }),
+        work: workNotifier(),
+      }));
+
+      expect(
+        await service.notifyLifecycle(notification("ci-failed", ["UAUTHOR", "UOWNER"]), {
+          intentId: `notification-channel-self-${kind}`,
+          requiredAction: {
+            kind,
+            recipientSlackUserIds: ["UAUTHOR", "UOWNER"],
+            actorSlackUserId: "UAUTHOR",
+          },
+        }),
+      ).toBe(2);
+      expect(recipients).toEqual(["UAUTHOR", "UOWNER"]);
+    },
+  );
+
+  test.each([
+    ["changes-requested", "review-changes-requested"],
+    ["revision-pushed", "revision-pushed"],
+    ["approved", "review-approved"],
+    ["mentioned", "comment-created"],
+    ["assigned", "issue-assignment-changed"],
+  ] as const)("%sは実行者を除いた次に動く人へDMする", async (kind, notificationKind) => {
+    const recipients: string[] = [];
+    const service = new RequiredActionDmService((slackUserId) => ({
+      lifecycle: lifecycleNotifier(async () => {
+        recipients.push(slackUserId);
+        return { messageTs: "230.1" };
+      }),
+      work: workNotifier(),
+    }));
+
+    expect(
+      await service.notifyLifecycle(notification(notificationKind, ["UOTHER"]), {
+        intentId: `notification-channel-${kind}`,
+        requiredAction: {
+          kind,
+          recipientSlackUserIds: ["UACTOR", "UNEXT", "UNEXT"],
+          actorSlackUserId: "UACTOR",
+        },
+      }),
+    ).toBe(1);
+    expect(recipients).toEqual(["UNEXT"]);
+  });
+
   test.each([
     ["BLOCKED", "blocker"],
     ["OVERDUE", "overdue"],
-  ] as const)("%sは現在のownerへDMし、既存thread通知を維持する", async (reasonCode, kind) => {
+    ["DUE_TODAY", "due-today"],
+    ["CONFLICTING", "conflict"],
+  ] as const)("%sは計画された宛先へDMし、既存thread通知を維持する", async (reasonCode, kind) => {
     const order: string[] = [];
     const primary = workNotifier(async () => {
       order.push("channel");
@@ -158,6 +220,34 @@ describe("RequiredActionDmService", () => {
     );
 
     expect(order).toEqual(["channel", "dm:UOWNER"]);
+  });
+
+  test("work通知の全担当者へDMし、実行者本人は除外する", async () => {
+    const recipients: string[] = [];
+    const service = new RequiredActionDmService((slackUserId) => ({
+      lifecycle: lifecycleNotifier(),
+      work: workNotifier(async (_item, context) => {
+        recipients.push(slackUserId);
+        expect(context.slackUserId).toBe(slackUserId);
+        return { messageTs: "320.1" };
+      }),
+    }));
+
+    expect(
+      await service.notifyWork(
+        item("BLOCKED"),
+        { kind: "state", threadTs: "290.1", slackUserId: "UOWNER", actorSlackUserId: "UOWNER" },
+        {
+          intentId: "notification-channel-blocked-all",
+          requiredAction: {
+            kind: "blocker",
+            recipientSlackUserIds: ["UOWNER", "USECOND", "UTHIRD"],
+            actorSlackUserId: "UOWNER",
+          },
+        },
+      ),
+    ).toBe(2);
+    expect(recipients).toEqual(["USECOND", "UTHIRD"]);
   });
 
   test("同じeventとrecipientのDM intentはoutboxで一件にする", async () => {
@@ -198,6 +288,81 @@ describe("RequiredActionDmService", () => {
       threadTs: null,
       metadata: { sourceDeliveryId: "delivery-ci" },
     });
+  });
+
+  test.each([
+    ["changes-requested", "review-changes-requested"],
+    ["revision-pushed", "revision-pushed"],
+    ["approved", "review-approved"],
+    ["mentioned", "review-commented"],
+    ["assigned", "issue-assignment-changed"],
+  ] as const)("%sの再配信でもDMはoutboxで一件にする", async (kind, notificationKind) => {
+    const store = new LocalStateStore(await mkdtemp(join(tmpdir(), "arttra-required-new-")));
+    const sent: NotificationPayload[] = [];
+    const sender: NotificationPayloadSender = {
+      send: async (payload) => {
+        sent.push(payload);
+        return { messageTs: `410.${sent.length}` };
+      },
+    };
+    const direct = new RequiredActionDmService((slackUserId) => {
+      const outbox = new NotificationOutboxService(store, sender, { channelId: slackUserId });
+      const delivery = { kind: "direct" as const, slackUserId };
+      return {
+        lifecycle: new OutboxLifecycleNotifier(outbox, delivery),
+        work: new OutboxWorkNotifier(outbox, delivery),
+      };
+    });
+    const metadata = {
+      intentId: notificationIntentId({ test: kind }),
+      requiredAction: {
+        kind,
+        recipientSlackUserIds: ["UNEXT"],
+        actorSlackUserId: "UACTOR",
+      },
+    };
+
+    expect(await direct.notifyLifecycle(notification(notificationKind, ["UNEXT"]), metadata)).toBe(
+      1,
+    );
+    expect(await direct.notifyLifecycle(notification(notificationKind, ["UNEXT"]), metadata)).toBe(
+      1,
+    );
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      delivery: { kind: "direct", slackUserId: "UNEXT" },
+      metadata: { requiredAction: { kind, recipientSlackUserIds: ["UNEXT"] } },
+    });
+  });
+
+  test("DM intent IDはchannel intentとSlack user IDだけで決まる", async () => {
+    const intents: string[] = [];
+    const service = new RequiredActionDmService(() => ({
+      lifecycle: lifecycleNotifier(async (_value, _threadTs, metadata) => {
+        intents.push(metadata?.intentId ?? "");
+        return { messageTs: "420.1" };
+      }),
+      work: workNotifier(),
+    }));
+    const channelIntentId = notificationIntentId({ test: "dm-intent" });
+
+    await service.notifyLifecycle(notification("ci-failed", ["UOWNER"]), {
+      intentId: channelIntentId,
+      requiredAction: {
+        kind: "ci-failed",
+        recipientSlackUserIds: ["UOWNER"],
+        actorSlackUserId: "UACTOR",
+      },
+    });
+
+    expect(intents).toEqual([
+      notificationIntentId({
+        kind: "required-action-dm",
+        sourceIntentId: channelIntentId,
+        recipientSlackUserId: "UOWNER",
+        schemaVersion: 1,
+      }),
+    ]);
   });
 
   test("同じeventとrecipientを並列処理してもDM送信は一度だけ", async () => {

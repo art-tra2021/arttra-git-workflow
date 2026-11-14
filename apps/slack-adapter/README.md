@@ -259,10 +259,35 @@ Project項目、Issue、PR、reviewの変更を処理したworkerはGitHub Proje
 通知済み状態はIssue URLと判定内容のfingerprintで重複排除し、通常の進行中作業は即時投稿しない。
 Intakeの受付投稿とWorkまたはBusiness単位の親投稿tsを共通state storeへ保存する。
 Task作成、期限、blocker、CI失敗、conflictなどの続報は親WorkまたはBusinessのthreadへ返信し、Task単位の親投稿をchannelへ増やさない。
-対応必須DMの対象は、個人reviewerへのレビュー依頼、reviewer未指定の承認待ち、通常のCI失敗、`BLOCKED`、`OVERDUE`の5区分である。
+対応必須DMは、次に動く人へ一度だけ送る。対象と宛先は次の12区分である。
+
+| 出来事 | DM宛先 | 実行者本人 |
+| --- | --- | --- |
+| 個人reviewerへのレビュー依頼 | 個人reviewer | 除外 |
+| reviewer未指定の承認待ち | PR作成者 | 除外しない |
+| 通常のCI失敗 | PR作成者とIssue担当者 | 除外しない |
+| 差し戻し | PR作成者 | 除外 |
+| 差し戻し後の修正push | 差し戻したreviewer | 除外 |
+| Approve | PR作成者 | 除外 |
+| Issue/PRコメントの本文mention | 本文で明示された`@login`だけ | 除外 |
+| 担当変更 | 新しく追加された担当者 | 除外 |
+| conflict | PR作成者 | 除外 |
+| `BLOCKED` | 全担当者 | 除外 |
+| 期限当日 | 全担当者 | 対象外（実行者なし） |
+| `OVERDUE` | 全担当者 | 対象外（実行者なし） |
+
+check_runのsenderはpushした本人で、通常はPR作成者と同じため、CI失敗と承認待ちだけは実行者本人もDMする。
 レビュー依頼は個人reviewerだけへ送り、Issue担当者とGitHub team reviewerはDM対象にしない。
-差し戻し、conflict、期限接近、期限当日、情報通知、成功通知はDM対象にしない。
-DMは実行者本人を除外し、channel通知intentとSlack user IDの組を独立したoutbox intentにして一度だけ送る。
+コメントは本文で明示mentionされた人だけをDM対象にし、threadで参考mentionする担当者やPR作成者、botのコメントはDMしない。
+差し戻し本文のmentionはthreadにだけ残し、DMはPR作成者へ送る。
+期限接近、情報通知、成功通知はDM対象にしない。
+DM宛先はchannel通知intentの`metadata.requiredAction`に置き、payload hashの対象外なので既存のchannelまたはthread intentを変えない。
+全担当者とPR作成者はGitHub Projectsの読み取りモデルから宛先計算だけに使い、通知outboxのpayloadへは入れない。
+GitHub loginからSlack user IDへの変換は検証済みmappingだけを使い、表示名やメールから推測しない。
+channel通知intentとSlack user IDの組を独立したoutbox intentにするため、Webhook再送でもDMは増えない。
+DMはHeader Blockを使わず、1行目に依頼内容と依頼元、2行目にIssueまたはPRの番号とタイトルのリンク、3行目に次の操作を置き、「GitHubで開く」ボタンを付ける。
+依頼元は操作したGitHub loginとし、CI失敗と承認待ちはpushした本人ではなくGitHub Checks、work通知はGitHub Projectsの状態または目標日とする。
+fallback textにも1行目と同じ依頼文を入れる。
 DMが失敗しても先に完了したchannelまたはthread投稿を取り消さず、通知outboxの監査、照合、確認付き再送で個別に復旧する。
 この変更では既存のchannelまたはthread投稿の件数を変えない。
 本人単独の通常操作を含む通知削減は、Issue #159に会議の決定記録が付くまで行わない。

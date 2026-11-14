@@ -96,10 +96,14 @@ Issue作成時点の担当者は最初のIssue概要に含め、初期`assigned`
 | マージ | Issue担当者 |
 | Issue完了 | Issue担当者 |
 
-対応必須DMの対象は、個人reviewerへのレビュー依頼、reviewer未指定の承認待ち、通常のCI失敗、`BLOCKED`、`OVERDUE`の5区分である。
+対応必須DMの対象と宛先は、`apps/slack-adapter/README.md`の表にある12区分である。
+レビュー依頼、承認待ち、CI失敗、差し戻し、修正push、Approve、コメントの本文mention、担当変更、conflict、`BLOCKED`、期限当日、`OVERDUE`が対象になる。
 レビュー依頼では個人reviewerだけをDM対象とし、Issue担当者とGitHub team reviewerは対象にしない。
-差し戻し、conflict、期限接近、期限当日、情報通知、成功通知はDMへ転送しない。
-DMは実行者本人を除外し、channel通知intentとrecipient Slack user IDから別のoutbox intentを作るため、Webhook再送で増えない。
+コメントは本文で明示mentionされた人だけをDM対象にし、参考mentionの担当者やPR作成者、botのコメントはDMしない。
+`BLOCKED`、期限当日、`OVERDUE`は全担当者へ、conflictはPR作成者へDMする。
+期限接近、情報通知、成功通知はDMへ転送しない。
+DMは原則として実行者本人を除外するが、check_runのsenderはpushした本人なので、CI失敗と承認待ちだけは実行者本人も対象にする。
+channel通知intentとrecipient Slack user IDから別のoutbox intentを作るため、Webhook再送で増えない。
 DM失敗時も既存のchannelまたはthread通知は残り、DM intentだけが監査と確認付き再送の対象になる。
 この変更では既存のchannelまたはthread投稿の件数を変えない。
 channelまたはthread側の通知削減はIssue #159へ分離し、会議の決定記録が付くまで実装しない。
@@ -151,7 +155,7 @@ fallback textにも同じ絵文字と見出しを含めるが、本文中の装�
 8. 通常のセルフマージ実行者では初回だけchannelへ展開され、`suppress_self_merge_channel_broadcast`のgrant対象者では初回からthread内だけになることを確認する。どちらも停止ボタンがあり、CI通過通知はthread内だけであることを確認する。
 9. Intake、Work、Business、Taskの作成時に、担当者表示を含む最初の概要とは別の初期assignment返信がないことを確認する。その後のunassignmentと再assignmentは通知されることを確認する。
 10. Task作成からPR完了までの通知が同じWorkまたはBusinessスレッドにあり、WorkまたはBusiness概要、Task概要、後続eventの順で、同じイベントの重複通知がないことを確認する。
-11. 個人reviewerへのレビュー依頼、reviewer未指定の承認待ち、通常のCI失敗、`BLOCKED`、`OVERDUE`で、対処者本人のDMが一件あり、同じeventの再配信では増えないことを確認する。実行者本人だけがrecipientの場合はDMが0件であることも確認する。差し戻し、conflict、期限接近、期限当日はDMが0件であることを確認する。
+11. README表の12区分で、次に動く人のDMが一件あり、同じeventの再配信では増えないことを確認する。自分でpushしたPRのCI失敗ではPR作成者本人へDMが届き、それ以外の区分で実行者本人だけがrecipientの場合はDMが0件であることを確認する。DMの1行目に依頼内容と依頼元があり、Header Blockがないことを確認する。期限接近と情報通知はDMが0件であることを確認する。
 12. DM送信を一度失敗させ、既存のchannelまたはthread通知が一件残り、DM intentだけをoutboxの監査・照合・確認付き再送で復旧できることを確認する。
 13. Organization webhook `660129617`のdeliveryが`202`であること、Cloud Run log、Cloud Tasksの失敗件数を確認する。
 

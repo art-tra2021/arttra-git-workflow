@@ -26,9 +26,20 @@ export type NotificationRequiredActionKind =
   | "review-requested"
   | "approval-wait"
   | "ci-failed"
+  | "changes-requested"
+  | "revision-pushed"
+  | "approved"
+  | "mentioned"
+  | "assigned"
   | "blocker"
-  | "overdue";
+  | "overdue"
+  | "due-today"
+  | "conflict";
 
+/**
+ * 対応必須DMの計画。payload hashの対象外なので、既存channel/thread intentを変えずに付け外しできる。
+ * recipientSlackUserIdsはDM宛先であり、channel/threadのmention先とは別に決める。
+ */
 export interface NotificationRequiredAction {
   kind: NotificationRequiredActionKind;
   recipientSlackUserIds: string[];

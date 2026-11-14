@@ -19,7 +19,7 @@ describe("GitHub Projects read model", () => {
                 url: "https://github.example/issues/42",
                 repository: { nameWithOwner: "art-tra2021/work" },
                 labels: { nodes: [{ name: "type/work" }, { name: "priority/P3" }] },
-                assignees: { nodes: [{ login: "alice" }] },
+                assignees: { nodes: [{ login: "alice" }, { login: "carol" }] },
                 blockedBy: {
                   nodes: [
                     {
@@ -43,6 +43,7 @@ describe("GitHub Projects read model", () => {
                       url: "https://github.example/pull/51",
                       state: "OPEN",
                       mergeable: "CONFLICTING",
+                      author: { login: "dave" },
                       reviewRequests: {
                         nodes: [{ requestedReviewer: { login: "bob" } }],
                       },
@@ -79,6 +80,7 @@ describe("GitHub Projects read model", () => {
         status: "in-progress",
         priority: "P1",
         owner: "alice",
+        assignees: ["alice", "carol"],
         targetDate: "2026-08-10",
       },
       relationships: {
@@ -89,6 +91,7 @@ describe("GitHub Projects read model", () => {
         checks: "failed",
         mergeState: "conflicting",
         requestedReviewers: ["bob"],
+        author: "dave",
       },
     });
   });

@@ -104,6 +104,15 @@ export interface LifecycleNotifier {
 
 export type ResolveLifecycleSlackUserId = (githubLogin: string) => Promise<string | null>;
 
+/**
+ * 対応必須DMの宛先。recipientLoginsを省くとchannel/threadのmention先をそのまま使う。
+ * mention先とDM宛先を分けたい場合（コメントの本文mentionだけ等）はGitHub loginで明示する。
+ */
+interface RequiredActionPlan {
+  kind: NotificationRequiredActionKind;
+  recipientLogins?: string[];
+}
+
 interface LifecycleNotificationState {
   schemaVersion: 1;
   resourceUrl: string;
@@ -233,6 +242,9 @@ export class LifecycleNotificationService {
           issue.url,
           fingerprint({ action, assignees: issue.assigneeLogins }),
           job.deliveryId,
+          null,
+          null,
+          action === "assigned" ? { kind: "assigned", recipientLogins: [assignee] } : null,
         ))
       );
     }
@@ -269,6 +281,7 @@ export class LifecycleNotificationService {
     const commentUrl = nestedString(payload, "comment", "html_url");
     const commentId = nestedNumber(payload, "comment", "id");
     const issuePayload = nestedObject(payload, "issue");
+    const mentionPlan = mentionRequiredAction(payload, "comment", body);
     if ("pull_request" in issuePayload) {
       const context = await this.github.loadPullRequestReviewContext(repository, issueNumber);
       return this.sendToPullRequestTargets(
@@ -282,6 +295,7 @@ export class LifecycleNotificationService {
         commentUrl,
         fingerprint({ commentId, commentUrl }),
         job.deliveryId,
+        mentionPlan,
       );
     }
     const issue = await this.github.loadIssueContext(repository, issueNumber);
@@ -297,6 +311,9 @@ export class LifecycleNotificationService {
       commentUrl,
       fingerprint({ commentId, commentUrl }),
       job.deliveryId,
+      null,
+      null,
+      mentionPlan,
     );
   }
 
@@ -321,6 +338,7 @@ export class LifecycleNotificationService {
         context.url,
         fingerprint({ headSha: context.headSha }),
         job.deliveryId,
+        { kind: "revision-pushed", recipientLogins: context.changesRequestedReviewerLogins },
       );
     }
     if (!nestedBoolean(payload, "pull_request", "merged")) return 0;
@@ -411,7 +429,7 @@ export class LifecycleNotificationService {
           job.deliveryId,
           null,
           null,
-          approvalOnly ? "approval-wait" : "ci-failed",
+          { kind: approvalOnly ? "approval-wait" : "ci-failed" },
         );
         continue;
       }
@@ -504,6 +522,7 @@ export class LifecycleNotificationService {
         reviewUrl,
         fingerprint({ reviewId, state }),
         job.deliveryId,
+        { kind: "changes-requested", recipientLogins: [context.authorLogin] },
       );
     }
     if (state === "APPROVED") {
@@ -518,6 +537,7 @@ export class LifecycleNotificationService {
         reviewUrl,
         fingerprint({ reviewId, state }),
         job.deliveryId,
+        { kind: "approved", recipientLogins: [context.authorLogin] },
       );
     }
     if (state === "COMMENTED" && body.trim()) {
@@ -532,6 +552,7 @@ export class LifecycleNotificationService {
         reviewUrl,
         fingerprint({ reviewId, state }),
         job.deliveryId,
+        mentionRequiredAction(payload, "review", body),
       );
     }
     return 0;
@@ -558,6 +579,7 @@ export class LifecycleNotificationService {
       commentUrl,
       fingerprint({ commentId, commentUrl }),
       job.deliveryId,
+      mentionRequiredAction(payload, "comment", body),
     );
   }
 
@@ -572,6 +594,7 @@ export class LifecycleNotificationService {
     actionUrl: string,
     eventFingerprint: string,
     sourceDeliveryId: string,
+    requiredAction: RequiredActionPlan | null = null,
   ): Promise<number> {
     const issue = primaryIssue(context);
     if (!issue) return 0;
@@ -592,6 +615,9 @@ export class LifecycleNotificationService {
       actionUrl,
       eventFingerprint,
       sourceDeliveryId,
+      null,
+      null,
+      requiredAction,
     );
   }
 
@@ -609,7 +635,7 @@ export class LifecycleNotificationService {
     sourceDeliveryId: string,
     selfMergeControl: { repository: string; issueNumber: number } | null = null,
     replyBroadcast: boolean | null = null,
-    requiredActionKind: NotificationRequiredActionKind | null = null,
+    requiredAction: RequiredActionPlan | null = null,
   ): Promise<number> {
     const resource = issueResource(issue);
     const stateKey = `${resource.url}:${kind}`;
@@ -625,9 +651,12 @@ export class LifecycleNotificationService {
     const recipientLogins = suppressActorMention
       ? withoutLogin(mentionLogins, actorLogin)
       : mentionLogins;
-    const [slackUserIds, resolvedActorSlackUserId] = await Promise.all([
+    const [slackUserIds, resolvedActorSlackUserId, directSlackUserIds] = await Promise.all([
       this.resolveMentions(recipientLogins),
       this.resolveSlackUserId(actorLogin),
+      requiredAction?.recipientLogins
+        ? this.resolveMentions(requiredAction.recipientLogins)
+        : Promise.resolve(null),
     ]);
     const actorSlackUserId = suppressActorMention ? null : resolvedActorSlackUserId;
     const notification: LifecycleNotification = {
@@ -654,11 +683,11 @@ export class LifecycleNotificationService {
         eventFingerprint,
       }),
       sourceDeliveryId,
-      ...(requiredActionKind
+      ...(requiredAction
         ? {
             requiredAction: {
-              kind: requiredActionKind,
-              recipientSlackUserIds: slackUserIds,
+              kind: requiredAction.kind,
+              recipientSlackUserIds: directSlackUserIds ?? slackUserIds,
               actorSlackUserId: resolvedActorSlackUserId,
             },
           }
@@ -945,6 +974,22 @@ function issueSectionSummary(body: string, heading: string): string | null {
     .trim()
     .replace(/^- \[[ xX]\]\s*/u, "");
   return section ? excerpt(section) : null;
+}
+
+/**
+ * コメント本文で明示mentionされた人だけをDM宛先にする。
+ * 担当者やPR作成者への参考mentionはthreadに残し、botのコメントはDMしない。
+ */
+function mentionRequiredAction(
+  payload: Record<string, unknown>,
+  key: "comment" | "review",
+  body: string,
+): RequiredActionPlan | null {
+  const login = nestedOptionalString(payload, key, "user", "login") ?? "";
+  const type = nestedOptionalString(payload, key, "user", "type");
+  if (type === "Bot" || login.toLowerCase().endsWith("[bot]")) return null;
+  const recipientLogins = withoutLogin(mentionedLogins(body), login);
+  return recipientLogins.length > 0 ? { kind: "mentioned", recipientLogins } : null;
 }
 
 function mentionedLogins(body: string): string[] {
