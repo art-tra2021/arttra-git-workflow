@@ -3,7 +3,18 @@ import {
   parseIssueReferenceUrl,
   resolveNotificationThreadRootIssue,
 } from "./lifecycle-notification-service.ts";
-import { type NotificationIntentMetadata, notificationIntentId } from "./notification-outbox.ts";
+import {
+  channelNoticeMetadata,
+  type NotificationMode,
+  partitionDirectRecipients,
+  type UnreachableRecipient,
+  unreachableUsers,
+} from "./notification-mode.ts";
+import {
+  type NotificationIntentMetadata,
+  type NotificationRequiredActionKind,
+  notificationIntentId,
+} from "./notification-outbox.ts";
 import { NotificationThreadService } from "./notification-thread-service.ts";
 import type { GitHubLifecycleClient } from "./review-types.ts";
 import type { StateStore } from "./state-store.ts";
@@ -24,6 +35,15 @@ export interface WorkNotifier {
     metadata?: NotificationIntentMetadata,
   ): Promise<WorkNotificationResult>;
   digest(items: HumanWorkItem[], metadata?: NotificationIntentMetadata): Promise<void>;
+  /**
+   * channel/threadへ投稿せず、metadata.requiredActionの対応必須DMだけを送る。
+   * DM経路を持たないnotifierは実装しない。
+   */
+  notifyRequiredActionOnly?(
+    item: HumanWorkItem,
+    context: WorkNotificationContext,
+    metadata: NotificationIntentMetadata,
+  ): Promise<number>;
 }
 
 export interface WorkNotificationContext {
@@ -31,6 +51,10 @@ export interface WorkNotificationContext {
   threadTs: string | null;
   slackUserId: string | null;
   actorSlackUserId?: string | null;
+  /** directモードのchannel単独投稿。旧payloadには無く、既存intentのhashを変えない。 */
+  standalone?: boolean;
+  /** directモードで、DMを送れないためchannelで知らせる宛先。 */
+  unreachableRecipients?: UnreachableRecipient[];
 }
 
 export interface WorkNotificationResult {
@@ -65,6 +89,7 @@ export class WorkNotificationService {
   private readonly deadlineLeadDays: number;
   private readonly threads: NotificationThreadService;
   private readonly github: Pick<GitHubLifecycleClient, "loadIssueContext"> | null;
+  private readonly mode: NotificationMode;
 
   constructor(
     source: WorkItemSource,
@@ -75,6 +100,7 @@ export class WorkNotificationService {
     deadlineLeadDays = 3,
     threads: NotificationThreadService = new NotificationThreadService(store, now),
     github: Pick<GitHubLifecycleClient, "loadIssueContext"> | null = null,
+    options: { mode?: NotificationMode } = {},
   ) {
     if (!Number.isSafeInteger(deadlineLeadDays) || deadlineLeadDays < 1 || deadlineLeadDays > 30) {
       throw new Error("期限通知の日数は1日から30日で指定してください。");
@@ -87,6 +113,7 @@ export class WorkNotificationService {
     this.deadlineLeadDays = deadlineLeadDays;
     this.threads = threads;
     this.github = github;
+    this.mode = options.mode ?? "thread";
   }
 
   async notifyImmediate(sourceDeliveryId?: string, actorLogin?: string | null): Promise<number> {
@@ -115,6 +142,7 @@ export class WorkNotificationService {
           ...(sourceDeliveryId ? { sourceDeliveryId } : {}),
         },
         actorSlackUserId,
+        actorLogin ?? null,
       );
       if (!sent) continue;
       await this.store.set<WorkNotificationState>(NOTIFICATION_NAMESPACE, item.url, {
@@ -171,7 +199,7 @@ export class WorkNotificationService {
       .filter((item) => item.delivery !== "silent")
       .sort(compareWorkItems);
     if (items.length > 0) {
-      await this.notifier.digest(items, {
+      await this.notifier.digest(items.map(notificationPayloadItem), {
         intentId: notificationIntentId({
           kind: "work-digest",
           date: dateInTokyo(this.now()),
@@ -191,22 +219,28 @@ export class WorkNotificationService {
     kind: WorkNotificationContext["kind"],
     metadata: NotificationIntentMetadata,
     actorSlackUserId: string | null = null,
+    actorLogin: string | null = null,
   ): Promise<boolean> {
+    if (this.mode === "direct") {
+      await this.notifyDirect(item, kind, metadata, actorSlackUserId, actorLogin);
+      return true;
+    }
     const slackUserId = item.owner ? await this.resolveSlackUserId(item.owner) : null;
-    const requiredActionKind =
-      item.reasonCode === "BLOCKED" ? "blocker" : item.reasonCode === "OVERDUE" ? "overdue" : null;
+    const requiredAction = workRequiredAction(item);
     const notificationMetadata: NotificationIntentMetadata = {
       ...metadata,
-      ...(requiredActionKind
+      ...(requiredAction
         ? {
             requiredAction: {
-              kind: requiredActionKind,
-              recipientSlackUserIds: slackUserId ? [slackUserId] : [],
+              kind: requiredAction.kind,
+              recipientSlackUserIds: await this.resolveSlackUserIds(requiredAction.recipientLogins),
               actorSlackUserId,
             },
           }
         : {}),
     };
+    // 宛先計算用の全担当者とPR作成者は、既存intentのpayload hashを変えないよう送信前に外す。
+    const payloadItem = notificationPayloadItem(item);
     const context: Omit<WorkNotificationContext, "threadTs"> = {
       kind,
       slackUserId,
@@ -225,15 +259,133 @@ export class WorkNotificationService {
       if (threadRootIssue.url !== issue.url) {
         const threadTs = await this.threads.rootTs(threadRootIssue.url);
         if (!threadTs) return false;
-        await this.notifier.notify(item, { ...context, threadTs }, notificationMetadata);
+        await this.notifier.notify(payloadItem, { ...context, threadTs }, notificationMetadata);
         return true;
       }
     }
     await this.threads.publish(item.url, (threadTs) =>
-      this.notifier.notify(item, { ...context, threadTs }, notificationMetadata),
+      this.notifier.notify(payloadItem, { ...context, threadTs }, notificationMetadata),
     );
     return true;
   }
+
+  /**
+   * directモードの送り分け。Issueごとのthreadは使わない。
+   * 急ぎの未割当はTaskも含めて全員向けのchannel単独投稿にする。
+   * blocker・期限・conflictは宛先本人へDMし、DMを送れない宛先がいるときだけchannelで知らせる。
+   * それ以外（期限接近、進行中の更新など）はSlackへ出さない。
+   */
+  private async notifyDirect(
+    item: HumanWorkItem,
+    kind: WorkNotificationContext["kind"],
+    metadata: NotificationIntentMetadata,
+    actorSlackUserId: string | null,
+    actorLogin: string | null,
+  ): Promise<void> {
+    const payloadItem = notificationPayloadItem(item);
+    if (item.reasonCode === "URGENT_UNASSIGNED") {
+      await this.notifier.notify(
+        payloadItem,
+        { kind, threadTs: null, slackUserId: null, standalone: true },
+        channelNoticeMetadata(metadata),
+      );
+      return;
+    }
+    const requiredAction = workRequiredAction(item);
+    if (!requiredAction) return;
+    if (requiredAction.recipientLogins.length === 0) {
+      // 担当者のいないblocker・期限超過や、PR作成者が分からないconflictは、DMの宛先がなく誰にも届かない。
+      // 拾う人がいないこと自体をチームが知る必要があるため、全員向けのchannel単独投稿にする。
+      if (requiredAction.kind !== "due-today") {
+        await this.notifier.notify(
+          payloadItem,
+          { kind, threadTs: null, slackUserId: null, standalone: true },
+          channelNoticeMetadata(metadata),
+        );
+      }
+      return;
+    }
+    const { slackUserIds, unreachableLogins } = await partitionDirectRecipients(
+      requiredAction.recipientLogins,
+      this.resolveSlackUserId,
+      { kind: requiredAction.kind, actorLogin },
+    );
+    const unreachable = [...unreachableLogins];
+    if (slackUserIds.length > 0) {
+      if (this.notifier.notifyRequiredActionOnly) {
+        // 従来方式と同じcontextとintentを渡し、DM intentを再配信やモード切り替えで増やさない。
+        const slackUserId = item.owner ? await this.resolveSlackUserId(item.owner) : null;
+        await this.notifier.notifyRequiredActionOnly(
+          payloadItem,
+          {
+            kind,
+            threadTs: null,
+            slackUserId,
+            ...(actorSlackUserId ? { actorSlackUserId } : {}),
+          },
+          {
+            ...metadata,
+            requiredAction: {
+              kind: requiredAction.kind,
+              recipientSlackUserIds: slackUserIds,
+              actorSlackUserId,
+            },
+          },
+        );
+      } else {
+        const all = await partitionDirectRecipients(
+          requiredAction.recipientLogins,
+          async () => null,
+          { kind: requiredAction.kind, actorLogin },
+        );
+        unreachable.push(...all.unreachableLogins);
+      }
+    }
+    if (unreachable.length > 0) {
+      const unreachableRecipients = unreachableUsers([...new Set(unreachable)]);
+      await this.notifier.notify(
+        payloadItem,
+        { kind, threadTs: null, slackUserId: null, standalone: true, unreachableRecipients },
+        channelNoticeMetadata(metadata, unreachableRecipients),
+      );
+    }
+  }
+
+  private async resolveSlackUserIds(logins: string[]): Promise<string[]> {
+    const uniqueLogins = [...new Map(logins.map((login) => [login.toLowerCase(), login])).values()];
+    const resolved = await Promise.all(uniqueLogins.map((login) => this.resolveSlackUserId(login)));
+    return [...new Set(resolved.filter((value): value is string => value !== null))];
+  }
+}
+
+/**
+ * work通知のうちDMする種別と、次に動く人のGitHub login。
+ * blocker・期限は全担当者、conflictはPR作成者へ送る。旧read modelは先頭担当者だけで代替する。
+ */
+function workRequiredAction(
+  item: HumanWorkItem,
+): { kind: NotificationRequiredActionKind; recipientLogins: string[] } | null {
+  const assignees = item.assignees ?? (item.owner ? [item.owner] : []);
+  switch (item.reasonCode) {
+    case "BLOCKED":
+      return { kind: "blocker", recipientLogins: assignees };
+    case "OVERDUE":
+      return { kind: "overdue", recipientLogins: assignees };
+    case "DUE_TODAY":
+      return { kind: "due-today", recipientLogins: assignees };
+    case "CONFLICTING":
+      return {
+        kind: "conflict",
+        recipientLogins: item.pullRequestAuthor ? [item.pullRequestAuthor] : [],
+      };
+    default:
+      return null;
+  }
+}
+
+function notificationPayloadItem(item: HumanWorkItem): HumanWorkItem {
+  const { assignees: _assignees, pullRequestAuthor: _pullRequestAuthor, ...payload } = item;
+  return payload;
 }
 
 function deadlineStage(item: HumanWorkItem, today: string, leadDays: number): DeadlineStage | null {

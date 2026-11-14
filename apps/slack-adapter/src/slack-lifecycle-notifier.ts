@@ -5,6 +5,7 @@ import type {
   LifecycleNotifier,
 } from "./lifecycle-notification-service.ts";
 import { shouldSuppressActorMention } from "./lifecycle-notification-service.ts";
+import { unreachableRecipientLines } from "./notification-mode.ts";
 import type { NotificationIntentMetadata } from "./notification-outbox.ts";
 import type { ThreadMessageResult } from "./notification-thread-service.ts";
 import { lifecycleTone, slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
@@ -29,7 +30,12 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
     threadTs: string | null,
     metadata?: NotificationIntentMetadata,
   ): Promise<ThreadMessageResult> {
-    if (!this.direct && !threadTs && notification.kind !== "issue-opened") {
+    if (
+      !this.direct &&
+      !threadTs &&
+      notification.kind !== "issue-opened" &&
+      notification.standalone !== true
+    ) {
       throw new Error(
         `Issue threadが見つからないため、${notification.kind}通知のchannel直下への送信を停止しました。`,
       );
@@ -61,6 +67,14 @@ export class SlackLifecycleNotifier implements LifecycleNotifier {
                 : null,
               `*実行者:* ${actorLabel(notification)}`,
               `*内容:* ${escapeMrkdwn(notification.detail)}`,
+              ...(notification.unreachableRecipients?.length
+                ? unreachableRecipientLines(
+                    notification.unreachableRecipients.map((recipient) => ({
+                      ...recipient,
+                      name: escapeMrkdwn(recipient.name),
+                    })),
+                  )
+                : []),
             ]
               .filter((value): value is string => Boolean(value))
               .join("\n"),

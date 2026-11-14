@@ -150,6 +150,13 @@ export class SlackNotificationReconciler implements NotificationReconciler {
     ) {
       return null;
     }
+    // directモードの単独投稿はchannel直下にあるため、同じIssueの旧threadを探さない。
+    if (state.payload.kind === "lifecycle" && state.payload.notification.standalone === true) {
+      return null;
+    }
+    if (state.payload.kind === "work" && state.payload.context.standalone === true) {
+      return null;
+    }
     if (state.payload.kind === "lifecycle" && state.payload.threadTs) {
       return state.payload.threadTs;
     }

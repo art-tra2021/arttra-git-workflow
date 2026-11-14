@@ -47,4 +47,26 @@ describe("人間向けread model", () => {
     expect(item.reasonCode).toBe("REVIEW_REQUESTED");
     expect(item.nextActor).toBe("reviewer");
   });
+
+  test("conflictではDM宛先計算用に全担当者とPR作成者を持つ", () => {
+    const base = snapshot();
+    const item = toHumanWorkItem(
+      snapshot({
+        project: { ...base.project, owner: "alice", assignees: ["alice", "carol"] },
+        pullRequest: {
+          number: 24,
+          url: "https://github.com/example/repo/pull/24",
+          checks: "passed",
+          mergeState: "conflicting",
+          requestedReviewers: [],
+          author: "dave",
+        },
+      }),
+      "reviewer",
+    );
+    expect(item.reasonCode).toBe("CONFLICTING");
+    expect(item.owner).toBe("alice");
+    expect(item.assignees).toEqual(["alice", "carol"]);
+    expect(item.pullRequestAuthor).toBe("dave");
+  });
 });

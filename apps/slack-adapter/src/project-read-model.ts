@@ -23,6 +23,7 @@ query ArttraWorkItems($owner: String!, $name: String!, $limit: Int!, $assignee: 
             url
             state
             mergeable
+            author { login }
             reviewRequests(first: 20) {
               nodes { requestedReviewer { ... on User { login } } }
             }
@@ -87,6 +88,7 @@ query ArttraOrganizationProjectItems($owner: String!, $number: Int!, $limit: Int
                   url
                   state
                   mergeable
+                  author { login }
                   reviewRequests(first: 20) {
                     nodes { requestedReviewer { ... on User { login } } }
                   }
@@ -119,6 +121,7 @@ export interface ProjectIssueNode {
       url: string;
       state?: string;
       mergeable?: string;
+      author?: { login?: string } | null;
       reviewRequests?: {
         nodes: Array<{ requestedReviewer?: { login?: string } | null }>;
       };
@@ -243,6 +246,7 @@ export function projectIssueSnapshot(issue: ProjectIssueNode): WorkItemSnapshot 
       status: projectStatus(fieldValue(fields, "Status")) ?? labelStatus(labels) ?? "todo",
       priority: projectPriority(fieldValue(fields, "Priority")) ?? labelPriority(labels) ?? "P2",
       owner: issue.assignees.nodes[0]?.login ?? null,
+      assignees: issue.assignees.nodes.map((assignee) => assignee.login),
       targetDate: fieldDate(fields, "Target date"),
     },
     relationships: {
@@ -278,6 +282,7 @@ function pullRequestSnapshot(issue: ProjectIssueNode): WorkItemSnapshot["pullReq
     requestedReviewers: (pullRequest.reviewRequests?.nodes ?? []).flatMap((request) =>
       request.requestedReviewer?.login ? [request.requestedReviewer.login] : [],
     ),
+    author: pullRequest.author?.login ?? null,
   };
 }
 

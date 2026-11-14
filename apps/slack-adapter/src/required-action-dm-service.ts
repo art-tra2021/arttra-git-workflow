@@ -1,6 +1,7 @@
 import type { LifecycleNotification, LifecycleNotifier } from "./lifecycle-notification-service.ts";
 import {
   type NotificationIntentMetadata,
+  type NotificationRequiredAction,
   type NotificationRequiredActionKind,
   notificationIntentId,
 } from "./notification-outbox.ts";
@@ -15,9 +16,33 @@ const LIFECYCLE_DM_KINDS = new Set<NotificationRequiredActionKind>([
   "review-requested",
   "approval-wait",
   "ci-failed",
+  "changes-requested",
+  "revision-pushed",
+  "approved",
+  "mentioned",
+  "assigned",
 ]);
 
-const WORK_DM_KINDS = new Set<NotificationRequiredActionKind>(["blocker", "overdue"]);
+const WORK_DM_KINDS = new Set<NotificationRequiredActionKind>([
+  "blocker",
+  "overdue",
+  "due-today",
+  "conflict",
+]);
+
+/**
+ * check_runのsenderはpushした本人で、通常はPR作成者と同じである。
+ * 自分のpushで起きたCI失敗や承認待ちも本人が直す対象なので、実行者を除外しない。
+ */
+const ACTOR_INCLUDED_KINDS = new Set<NotificationRequiredActionKind>([
+  "ci-failed",
+  "approval-wait",
+]);
+
+/** 実行者本人も対処者として宛先に残す種別か。 */
+export function requiredActionIncludesActor(kind: NotificationRequiredActionKind): boolean {
+  return ACTOR_INCLUDED_KINDS.has(kind);
+}
 
 export interface RequiredActionDirectNotifiers {
   lifecycle: LifecycleNotifier;
@@ -61,14 +86,14 @@ export class RequiredActionDmService {
   ): Promise<number> {
     const plan = channelMetadata.requiredAction;
     if (!plan || !LIFECYCLE_DM_KINDS.has(plan.kind)) return 0;
-    const recipients = directRecipients(plan.recipientSlackUserIds, plan.actorSlackUserId);
+    const recipients = directRecipients(plan);
     let delivered = 0;
     for (const slackUserId of recipients) {
       try {
         await this.createDirectNotifiers(slackUserId).lifecycle.notify(
           { ...notification, slackUserIds: [slackUserId] },
           null,
-          directMetadata(channelMetadata, slackUserId),
+          directMetadata(channelMetadata, plan, slackUserId),
         );
         delivered += 1;
       } catch (error) {
@@ -85,14 +110,14 @@ export class RequiredActionDmService {
   ): Promise<number> {
     const plan = channelMetadata.requiredAction;
     if (!plan || !WORK_DM_KINDS.has(plan.kind)) return 0;
-    const recipients = directRecipients(plan.recipientSlackUserIds, plan.actorSlackUserId);
+    const recipients = directRecipients(plan);
     let delivered = 0;
     for (const slackUserId of recipients) {
       try {
         await this.createDirectNotifiers(slackUserId).work.notify(
           item,
           { ...context, threadTs: null, slackUserId },
-          directMetadata(channelMetadata, slackUserId),
+          directMetadata(channelMetadata, plan, slackUserId),
         );
         delivered += 1;
       } catch (error) {
@@ -123,6 +148,14 @@ export class LifecycleNotifierWithRequiredActionDm implements LifecycleNotifier 
     await this.direct.notifyLifecycle(notification, metadata);
     return result;
   }
+
+  /** 担当付与のように、channel/threadの投稿と独立して決まるDMだけを送る。 */
+  async notifyRequiredActionOnly(
+    notification: LifecycleNotification,
+    metadata: NotificationIntentMetadata,
+  ): Promise<number> {
+    return this.direct.notifyLifecycle(notification, metadata);
+  }
 }
 
 export class WorkNotifierWithRequiredActionDm implements WorkNotifier {
@@ -146,6 +179,15 @@ export class WorkNotifierWithRequiredActionDm implements WorkNotifier {
     return result;
   }
 
+  /** channel/threadへ投稿せず、metadata.requiredActionの対応必須DMだけを送る。 */
+  async notifyRequiredActionOnly(
+    item: HumanWorkItem,
+    context: WorkNotificationContext,
+    metadata: NotificationIntentMetadata,
+  ): Promise<number> {
+    return this.direct.notifyWork(item, context, metadata);
+  }
+
   async digest(items: HumanWorkItem[], metadata?: NotificationIntentMetadata): Promise<void> {
     await this.primary.digest(items, metadata);
   }
@@ -153,6 +195,7 @@ export class WorkNotifierWithRequiredActionDm implements WorkNotifier {
 
 function directMetadata(
   channelMetadata: NotificationIntentMetadata,
+  plan: NotificationRequiredAction,
   slackUserId: string,
 ): NotificationIntentMetadata {
   return {
@@ -165,6 +208,12 @@ function directMetadata(
     ...(channelMetadata.sourceDeliveryId
       ? { sourceDeliveryId: channelMetadata.sourceDeliveryId }
       : {}),
+    // payload hashはmetadataのintentIdだけを見るため、DM文面の種別を足してもintentは変わらない。
+    requiredAction: {
+      kind: plan.kind,
+      recipientSlackUserIds: [slackUserId],
+      actorSlackUserId: plan.actorSlackUserId,
+    },
   };
 }
 
@@ -172,8 +221,9 @@ function isSlackUserId(value: string): boolean {
   return /^[UW][A-Z0-9]{2,31}$/.test(value);
 }
 
-function directRecipients(values: string[], actorSlackUserId: string | null): string[] {
-  return [...new Set(values)]
-    .filter((slackUserId) => slackUserId !== actorSlackUserId)
+function directRecipients(plan: NotificationRequiredAction): string[] {
+  const includeActor = ACTOR_INCLUDED_KINDS.has(plan.kind);
+  return [...new Set(plan.recipientSlackUserIds)]
+    .filter((slackUserId) => includeActor || slackUserId !== plan.actorSlackUserId)
     .filter(isSlackUserId);
 }

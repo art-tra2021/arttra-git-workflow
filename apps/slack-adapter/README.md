@@ -98,6 +98,7 @@ Issue modalの担当者と予定レビュワーはSlackのネイティブなメ�
 申請者本人による直通を許すPL等は、`AR_SLACK_SELF_APPROVER_IDS`にも明示する。
 通知上の追加権限は`AR_GITHUB_CAPABILITY_GRANTS_JSON`でGitHub loginへ明示的に付与する。
 `suppress_self_merge_channel_broadcast`はセルフマージ初回警告を親WorkまたはBusiness thread内だけに留める権限であり、Task警告と停止ボタンは残る。
+この権限は`AR_SLACK_NOTIFICATION_MODE=thread`のときだけ働く。`direct`では、権限があっても警告を停止ボタン付きのchannel単独投稿として出す。
 この権限はrepositoryのadmin権限や`AR_SLACK_SELF_APPROVER_IDS`から暗黙には付与しない。
 直通にはこのSlack設定に加え、OAuthで確認したGitHub loginが対象repositoryで`write`、`maintain`、`admin`のいずれかを持つことを要求する。
 未設定者、GitHub未連携者、権限不足者、権限を確認できない場合は拒否せず、理由と申請者・repository・マージ方針を示したnative mentionと承認ボタンを承認者へ送る。
@@ -254,6 +255,51 @@ PR reviewer自動設定にはPull requests read/write、Ruleset確認にはAdmin
 Webhook URLは`AR_PUBLIC_BASE_URL/github/events`とし、`issues`、`issue_comment`、`projects_v2_item`、`pull_request`、`pull_request_review`、`pull_request_review_comment`、`check_run`、`check_suite`を購読する。
 `GITHUB_WEBHOOK_SECRET`でGitHub署名を検証し、生payloadをSlackへ表示しない。
 
+### 通知方式
+
+Slackへの通知方式は環境変数`AR_SLACK_NOTIFICATION_MODE`で切り替える。
+
+| 値 | 方式 |
+| --- | --- |
+| `thread`（未設定時の既定） | Intake、Work、Businessごとの親投稿を作り、配下の出来事をそのthreadへ返信する |
+| `direct` | 親投稿とthreadを作らない。対応が必要な本人へDMを送り、channelには全員向けの投稿だけを出す |
+
+既存の挙動を守るため既定は`thread`とし、本番はCloud Runの環境変数で`direct`を指定する。
+`thread`と`direct`以外の値では、adapterは他の設定を読む前に起動を拒否する。
+GitHubの出来事の記録はGitHubに残るため、`direct`ではSlackへ続報を複製しない。
+
+`direct`でchannelへ出す投稿は、次の5種類だけである。
+
+| 投稿 | 内容 |
+| --- | --- |
+| セルフマージ予定の警告 | 停止ボタン付きの単独投稿。CI通過後の通知は出さない |
+| 急ぎで未割当の仕事 | Projectsで未着手・緊急かつ担当者なしの項目。Taskも含めて単独投稿にする |
+| 日次digest | `thread`と同じ一覧投稿 |
+| DMを送れない宛先への知らせ | 下記の対応必須の出来事で、DMを送れない宛先がいる場合だけの単独投稿 |
+| 拾う人のいない止まり | 担当者のいないblockerと期限超過、PR作成者が分からないconflict。DMの宛先がなく誰にも届かないため、単独投稿にする |
+
+Issue作成、Task作成、PR作成、レビュー依頼、コメント、Approve、差し戻し、修正push、CI失敗、期限、blocker、conflict、マージ、close、担当変更は、channelへ投稿しない。
+このうち後述の13区分に当たる出来事は、宛先本人へDMだけを送る。
+DMは`thread`と同じchannel通知intent（担当DMはIssue、担当者、付与の世代）とSlack user IDから決まるintentで送る。
+このため、Webhookの再配信でも、親投稿がまだ無いTaskでも、DMは一人一件になる。
+
+DMを送れない宛先とは、GitHub OAuthで連携しておらずSlack user IDを解決できない人と、GitHub team reviewerである。
+対応必須の出来事の宛先にこれらがいる場合だけ、その出来事をchannelへ単独投稿する。
+この投稿には解決できない人のGitHub loginと`/ar connect github`の案内を書き、DMを送れる人を含めて誰もnative mentionしない。
+コメント本文のmentionでは、code blockとinline codeの中の`@`、`@org/team`のteam指定、`@here`などのSlack流の呼びかけを、DMを送れない宛先として扱わない。
+`[bot]`で終わるGitHub loginは、DMとchannelのどちらの対象にもしない。
+
+channelへの単独投稿は、元の出来事のintent IDから決まる新しいintent IDで通知outboxへ記録する。
+既存のchannel/thread intentのIDと中身は変えず、Firestoreの既存stateも消さない。
+監査と再送の照合では、単独投稿は同じIssueの旧threadではなくchannelの履歴から探す。
+
+`direct`には同じIssueごとのthreadが無いため、`suppress_self_merge_channel_broadcast`を持つ利用者のセルフマージ警告もchannelへ単独投稿し、停止の機会を残す。
+停止ボタンで停止した結果は、警告の投稿への返信として置き、channelへは展開しない。
+
+レビュー依頼の再通知（既定24時間）では、`thread`と同じく、DMとDMを送れない宛先への知らせを再び送る。
+
+以下の段落のうち、親投稿、thread、channelでのmentionに関する記述は`thread`の動作である。
+
 本番gatewayは検証済みwebhookをCloud Tasksへ積み、`/internal/github-events`のworker処理と分離する。
 `AR_JOB_QUEUE=cloud-tasks`を指定し、project、location、queue、任意のOIDC service accountを設定する。
 job本文は`AR_JOB_SECRET`でも署名し、GitHub delivery IDをCloud Tasks task IDに利用して重複投入を抑止する。
@@ -262,13 +308,41 @@ Project項目、Issue、PR、reviewの変更を処理したworkerはGitHub Proje
 通知済み状態はIssue URLと判定内容のfingerprintで重複排除し、通常の進行中作業は即時投稿しない。
 Intakeの受付投稿とWorkまたはBusiness単位の親投稿tsを共通state storeへ保存する。
 Task作成、期限、blocker、CI失敗、conflictなどの続報は親WorkまたはBusinessのthreadへ返信し、Task単位の親投稿をchannelへ増やさない。
-対応必須DMの対象は、個人reviewerへのレビュー依頼、reviewer未指定の承認待ち、通常のCI失敗、`BLOCKED`、`OVERDUE`の5区分である。
+対応必須DMは、次に動く人へ一度だけ送る。対象と宛先は次の13区分である。
+
+| 出来事 | DM宛先 | 実行者本人 |
+| --- | --- | --- |
+| 個人reviewerへのレビュー依頼 | 個人reviewer | 除外 |
+| reviewer未指定の承認待ち | PR作成者 | 除外しない |
+| 通常のCI失敗 | PR作成者とIssue担当者 | 除外しない |
+| 差し戻し | PR作成者 | 除外 |
+| 差し戻し後の修正push | 差し戻したreviewer | 除外 |
+| Approve | PR作成者 | 除外 |
+| Issue/PRコメント、コードコメント、COMMENTEDレビューの本文mention | 本文で明示された`@login`だけ | 除外 |
+| Issue作成時の担当指定 | Issue作成者と検証済み依頼者を除いた作成時の担当者 | 除外 |
+| 担当変更 | 新しく追加された担当者 | 除外 |
+| conflict | PR作成者 | 除外 |
+| `BLOCKED` | 全担当者 | 除外 |
+| 期限当日 | 全担当者 | 対象外（実行者なし） |
+| `OVERDUE` | 全担当者 | 対象外（実行者なし） |
+
+check_runのsenderはpushした本人で、通常はPR作成者と同じため、CI失敗と承認待ちだけは実行者本人もDMする。
 レビュー依頼は個人reviewerだけへ送り、Issue担当者とGitHub team reviewerはDM対象にしない。
-差し戻し、conflict、期限接近、期限当日、情報通知、成功通知はDM対象にしない。
-DMは実行者本人を除外し、channel通知intentとSlack user IDの組を独立したoutbox intentにして一度だけ送る。
+コメントは本文で明示mentionされた人だけをDM対象にし、threadで参考mentionする担当者やPR作成者、botのコメントはDMしない。
+差し戻し本文のmentionはthreadにだけ残し、DMはPR作成者へ送る。
+Issue作成時の担当者は、初期`assigned`の返信をthreadへ出さず、Issue概要とは別に担当DMを送る。
+担当DMはIssueと担当者の組ごとの永続stateで担当付与を一件と数え、channelやthreadの重複排除に依存しない。
+このため、`opened`と`assigned`の両方、まとめての担当追加、再配信のどれでも一人一件になり、親投稿が別経路で先に作られていても作成時の担当者へ届く。
+担当を外して付け直した場合は、新しい付与として一件送る。
+期限接近、情報通知、成功通知はDM対象にしない。
+担当DM以外のDM宛先はchannel通知intentの`metadata.requiredAction`に置き、payload hashの対象外なので既存のchannelまたはthread intentを変えない。
+全担当者とPR作成者はGitHub Projectsの読み取りモデルから宛先計算だけに使い、通知outboxのpayloadへは入れない。
+GitHub loginからSlack user IDへの変換は検証済みmappingだけを使い、表示名やメールから推測しない。
+channel通知intent（担当DMはIssue、担当者、付与の世代）とSlack user IDの組を独立したoutbox intentにするため、Webhook再送でもDMは増えない。
+DMはHeader Blockを使わず、1行目に依頼内容と依頼元、2行目にIssueまたはPRの番号とタイトルのリンク、3行目に次の操作を置き、「GitHubで開く」ボタンを付ける。
+依頼元は操作したGitHub loginとし、CI失敗と承認待ちはpushした本人ではなくGitHub Checks、work通知はGitHub Projectsの状態または目標日とする。
+fallback textにも1行目と同じ依頼文を入れる。
 DMが失敗しても先に完了したchannelまたはthread投稿を取り消さず、通知outboxの監査、照合、確認付き再送で個別に復旧する。
-この変更では既存のchannelまたはthread投稿の件数を変えない。
-本人単独の通常操作を含む通知削減は、Issue #159に会議の決定記録が付くまで行わない。
 日次digestはIssue別threadへ入れず、独立した一覧投稿とする。
 
 PR作成時は、GitHubが`Closes`から解決したprimary closing Taskがちょうど1件であることを確認し、そのTask本文の予定reviewer、変更fileに対するCODEOWNERS、Rulesetを再取得する。
