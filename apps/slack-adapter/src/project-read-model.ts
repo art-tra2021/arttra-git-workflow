@@ -3,7 +3,8 @@ import {
   type RepositoryScope,
   repositoryFromUrl,
 } from "./project-scope.ts";
-import type { Priority, WorkItemSnapshot, WorkStatus } from "./types.ts";
+import { toHumanWorkItem } from "./read-model.ts";
+import type { HumanWorkItem, Priority, WorkItemSnapshot, WorkStatus } from "./types.ts";
 
 export const PROJECT_ISSUES_QUERY = `
 query ArttraWorkItems($owner: String!, $name: String!, $limit: Int!, $assignee: String) {
@@ -79,6 +80,7 @@ query ArttraOrganizationProjectItems($owner: String!, $number: Int!, $limit: Int
               url
               repository { nameWithOwner }
               state
+              parent { url }
               labels(first: 20) { nodes { name } }
               assignees(first: 10) { nodes { login } }
               blockedBy(first: 20) { nodes { number title url state } }
@@ -110,6 +112,10 @@ export interface ProjectIssueNode {
   title: string;
   url: string;
   repository?: { nameWithOwner?: string | null } | null;
+  /** Organization Project経由の取得だけが持つ。差分digestでcloseを完了として扱う。 */
+  state?: string;
+  /** 親IssueのURL。Organization Project経由の取得だけが持つ。 */
+  parent?: { url?: string | null } | null;
   labels: { nodes: Array<{ name: string }> };
   assignees: { nodes: Array<{ login: string }> };
   blockedBy?: {
@@ -145,7 +151,7 @@ export interface ProjectIssuesResponse {
 }
 
 interface OrganizationProjectItemNode {
-  content?: (Omit<ProjectIssueNode, "projectItems"> & { state?: string }) | null;
+  content?: Omit<ProjectIssueNode, "projectItems"> | null;
   fieldValues: ProjectIssueNode["projectItems"]["nodes"][number]["fieldValues"];
 }
 
@@ -188,6 +194,7 @@ export function organizationProjectIssuePage(
   projectNumber: number,
   assignee: string | null = null,
   scope?: RepositoryScope,
+  options: { includeClosed?: boolean } = {},
 ): OrganizationProjectIssuePage {
   throwGraphqlErrors(response.errors);
   const organization = response.data?.organization;
@@ -201,7 +208,8 @@ export function organizationProjectIssuePage(
   const normalizedAssignee = assignee?.trim().toLowerCase();
   const issues = (project.items?.nodes ?? []).flatMap((item) => {
     const content = item.content;
-    if (content?.state?.toUpperCase() !== "OPEN") {
+    const state = content?.state?.toUpperCase();
+    if (!content || (state !== "OPEN" && !(options.includeClosed && state === "CLOSED"))) {
       return [];
     }
     if (
@@ -256,6 +264,27 @@ export function projectIssueSnapshot(issue: ProjectIssueNode): WorkItemSnapshot 
     },
     pullRequest: pullRequestSnapshot(issue),
   };
+}
+
+/**
+ * 差分digest用の項目。closeしたIssueはProjectのStatusによらず完了として扱い、
+ * Work・Businessごとにまとめるための種別と親IssueのURLを足す。
+ */
+export function projectDigestWorkItem(issue: ProjectIssueNode, viewer: string): HumanWorkItem {
+  const snapshot = projectIssueSnapshot(issue);
+  const closed = issue.state?.toUpperCase() === "CLOSED";
+  const item = toHumanWorkItem(
+    closed
+      ? {
+          ...snapshot,
+          project: { ...snapshot.project, status: "done" },
+          relationships: { blockedBy: [] },
+          pullRequest: null,
+        }
+      : snapshot,
+    viewer,
+  );
+  return { ...item, issueType: snapshot.issue.type, parentUrl: issue.parent?.url ?? null };
 }
 
 function pullRequestSnapshot(issue: ProjectIssueNode): WorkItemSnapshot["pullRequest"] {

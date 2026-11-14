@@ -64,11 +64,13 @@ import { SlackRequirementNotifier } from "./slack-requirement-notifier.ts";
 import { SlackReviewNotifier } from "./slack-review-notifier.ts";
 import { SlackWorkNotifier } from "./slack-work-notifier.ts";
 import { createStateStoreFromEnvironment } from "./state-store-factory.ts";
+import { DIGEST_MODE_ENV, parseDigestMode } from "./work-diff-digest.ts";
 import { WorkNotificationService } from "./work-notification-service.ts";
 
 const transport = (process.env.AR_SLACK_TRANSPORT ?? "socket").trim().toLowerCase();
 // 不正値は他の設定より先に拒否し、意図しない方式でSlackへ投稿し始めないようにする。
 const notificationMode = parseNotificationMode(process.env[NOTIFICATION_MODE_ENV]);
+const digestMode = parseDigestMode(process.env[DIGEST_MODE_ENV]);
 if (transport !== "socket" && transport !== "http") {
   throw new Error("AR_SLACK_TRANSPORTはsocketまたはhttpを指定してください。");
 }
@@ -191,6 +193,13 @@ const sharedWorkSource = {
           sharedRepository,
         ])
       : [],
+  // 差分digestだけが使う。closeしたIssueを含め、公開を許可したrepositoryに絞る。
+  loadProjectDigestItems: async () =>
+    sharedRepository
+      ? filterItemsByAccessibleRepositories(await dependencies.loadProjectDigestItems(), [
+          sharedRepository,
+        ])
+      : [],
 };
 const sharedProjectListService = new ProjectListSyncService(
   slackClient as unknown as ProjectListClient,
@@ -267,7 +276,7 @@ const workNotificationService = workNotificationChannelId
       positiveInteger(process.env.AR_DEADLINE_REMINDER_DAYS ?? "3", "AR_DEADLINE_REMINDER_DAYS"),
       notificationThreads,
       dependencies instanceof GitHubAppDependencies ? dependencies : null,
-      { mode: notificationMode },
+      { mode: notificationMode, digestMode },
     )
   : null;
 const receiver =

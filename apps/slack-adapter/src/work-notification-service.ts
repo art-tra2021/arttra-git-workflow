@@ -19,13 +19,32 @@ import { NotificationThreadService } from "./notification-thread-service.ts";
 import type { GitHubLifecycleClient } from "./review-types.ts";
 import type { StateStore } from "./state-store.ts";
 import type { HumanWorkItem } from "./types.ts";
+import {
+  buildWorkDiffDigest,
+  type DigestMode,
+  type DigestSnapshot,
+  diffDigestItems,
+  digestLineCount,
+  normalizeDigestItem,
+  snapshotItems,
+  type WorkDiffDigest,
+} from "./work-diff-digest.ts";
 
 const NOTIFICATION_NAMESPACE = "work-notification";
 const DEADLINE_NAMESPACE = "work-deadline-notification";
+const DIGEST_SNAPSHOT_NAMESPACE = "work-digest-snapshot";
+const DIGEST_SNAPSHOT_POINTER_NAMESPACE = "work-digest-snapshot-pointer";
+const DIGEST_SNAPSHOT_POINTER_KEY = "latest";
+const DIFF_DIGEST_NAMESPACE = "work-diff-digest";
 const DAY_MILLISECONDS = 24 * 60 * 60 * 1000;
 
 export interface WorkItemSource {
   loadProjectItems(): Promise<HumanWorkItem[]>;
+  /**
+   * 差分digest用の項目。closeしたIssueもstatus doneで含め、issueTypeとparentUrlを埋める。
+   * 実装しないsourceではloadProjectItemsで代わりにし、closeしたIssueは「Projectから外れた」になる。
+   */
+  loadProjectDigestItems?(): Promise<HumanWorkItem[]>;
 }
 
 export interface WorkNotifier {
@@ -35,6 +54,8 @@ export interface WorkNotifier {
     metadata?: NotificationIntentMetadata,
   ): Promise<WorkNotificationResult>;
   digest(items: HumanWorkItem[], metadata?: NotificationIntentMetadata): Promise<void>;
+  /** 前回からの差分digestをchannelへ投稿する。AR_DIGEST_MODE=diffで必要になる。 */
+  diffDigest?(digest: WorkDiffDigest, metadata?: NotificationIntentMetadata): Promise<void>;
   /**
    * channel/threadへ投稿せず、metadata.requiredActionの対応必須DMだけを送る。
    * DM経路を持たないnotifierは実装しない。
@@ -72,6 +93,38 @@ interface WorkNotificationState {
 
 type DeadlineStage = "due-soon" | "due-today" | "overdue";
 
+interface DigestSnapshotPointer {
+  schemaVersion: 1;
+  date: string;
+}
+
+/** 日付ごとの差分digestの投稿記録。同じ日の再実行で二重に投稿しないために使う。 */
+interface DiffDigestRecord {
+  schemaVersion: 1;
+  date: string;
+  baselineDate: string;
+  intentId: string;
+  digest: WorkDiffDigest;
+  lineCount: number;
+  status: "pending" | "sent";
+  createdAt: string;
+  sentAt?: string;
+}
+
+export interface DiffDigestResult {
+  /** 実行した日付（JST）。 */
+  date: string;
+  /** 比較元にしたスナップショットの日付。初回はnull。 */
+  baselineDate: string | null;
+  /**
+   * baseline-savedは初回のため基準だけを保存した、no-changesは変化がなく投稿しなかった、
+   * postedは投稿した、already-postedは同じ日に投稿済みのため何もしなかったことを表す。
+   */
+  outcome: "baseline-saved" | "no-changes" | "posted" | "already-posted";
+  /** この実行で投稿した差分の行数。 */
+  lineCount: number;
+}
+
 interface WorkDeadlineNotificationState {
   schemaVersion: 1;
   issueUrl: string;
@@ -90,6 +143,7 @@ export class WorkNotificationService {
   private readonly threads: NotificationThreadService;
   private readonly github: Pick<GitHubLifecycleClient, "loadIssueContext"> | null;
   private readonly mode: NotificationMode;
+  private readonly digestMode: DigestMode;
 
   constructor(
     source: WorkItemSource,
@@ -100,7 +154,7 @@ export class WorkNotificationService {
     deadlineLeadDays = 3,
     threads: NotificationThreadService = new NotificationThreadService(store, now),
     github: Pick<GitHubLifecycleClient, "loadIssueContext"> | null = null,
-    options: { mode?: NotificationMode } = {},
+    options: { mode?: NotificationMode; digestMode?: DigestMode } = {},
   ) {
     if (!Number.isSafeInteger(deadlineLeadDays) || deadlineLeadDays < 1 || deadlineLeadDays > 30) {
       throw new Error("期限通知の日数は1日から30日で指定してください。");
@@ -114,6 +168,10 @@ export class WorkNotificationService {
     this.threads = threads;
     this.github = github;
     this.mode = options.mode ?? "thread";
+    this.digestMode = options.digestMode ?? "list";
+    if (this.digestMode === "diff" && !notifier.diffDigest) {
+      throw new Error("AR_DIGEST_MODE=diffには差分digestを投稿できるnotifierが必要です。");
+    }
   }
 
   async notifyImmediate(sourceDeliveryId?: string, actorLogin?: string | null): Promise<number> {
@@ -194,7 +252,13 @@ export class WorkNotificationService {
     return notified;
   }
 
+  /**
+   * 日次digestを投稿する。listモードは未完了一覧の件数、diffモードは投稿した差分の行数を返す。
+   */
   async sendDigest(): Promise<number> {
+    if (this.digestMode === "diff") {
+      return (await this.sendDiffDigest()).lineCount;
+    }
     const items = (await this.source.loadProjectItems())
       .filter((item) => item.delivery !== "silent")
       .sort(compareWorkItems);
@@ -212,6 +276,113 @@ export class WorkNotificationService {
       });
     }
     return items.length;
+  }
+
+  /**
+   * Project #8のスナップショットを日付（JST）キーで保存し、直前のスナップショットとの差分を投稿する。
+   *
+   * - 初回は投稿せず、基準のスナップショットだけを保存する。
+   * - 変化のない日は投稿せず、スナップショットだけを更新する。
+   * - intent IDは種別と日付だけで決め、同じ日の再実行では投稿済みの記録を見て二重に投稿しない。
+   *   投稿した日の再実行ではスナップショットを上書きせず、投稿後の変化を翌日の差分へ回す。
+   */
+  async sendDiffDigest(): Promise<DiffDigestResult> {
+    const date = dateInTokyo(this.now());
+    const recorded = await this.store.get<DiffDigestRecord>(DIFF_DIGEST_NAMESPACE, date);
+    if (recorded) return this.resumeDiffDigest(recorded);
+
+    const loaded = this.source.loadProjectDigestItems
+      ? await this.source.loadProjectDigestItems()
+      : await this.source.loadProjectItems();
+    const current = loaded.map(normalizeDigestItem);
+    const todaySnapshot = await this.store.get<DigestSnapshot>(DIGEST_SNAPSHOT_NAMESPACE, date);
+    const pointer = await this.store.get<DigestSnapshotPointer>(
+      DIGEST_SNAPSHOT_POINTER_NAMESPACE,
+      DIGEST_SNAPSHOT_POINTER_KEY,
+    );
+    // 同じ日の2回目以降は、その日の最初の実行と同じ比較元を使う。
+    const baselineDate = todaySnapshot
+      ? todaySnapshot.baselineDate
+      : pointer && pointer.date !== date
+        ? pointer.date
+        : null;
+    const baseline = baselineDate
+      ? await this.store.get<DigestSnapshot>(DIGEST_SNAPSHOT_NAMESPACE, baselineDate)
+      : null;
+
+    await this.store.set<DigestSnapshot>(DIGEST_SNAPSHOT_NAMESPACE, date, {
+      schemaVersion: 1,
+      date,
+      takenAt: new Date(this.now()).toISOString(),
+      baselineDate: baseline ? baseline.date : null,
+      items: snapshotItems(current),
+    });
+    await this.store.set<DigestSnapshotPointer>(
+      DIGEST_SNAPSHOT_POINTER_NAMESPACE,
+      DIGEST_SNAPSHOT_POINTER_KEY,
+      { schemaVersion: 1, date },
+    );
+    if (!baseline) {
+      return { date, baselineDate: null, outcome: "baseline-saved", lineCount: 0 };
+    }
+
+    const digest = buildWorkDiffDigest(diffDigestItems(baseline, current, date), {
+      date,
+      baselineDate: baseline.date,
+      knownItems: [...current, ...baseline.items],
+    });
+    if (!digest) {
+      return { date, baselineDate: baseline.date, outcome: "no-changes", lineCount: 0 };
+    }
+    const record: DiffDigestRecord = {
+      schemaVersion: 1,
+      date,
+      baselineDate: baseline.date,
+      intentId: notificationIntentId({ kind: "work-diff-digest", date }),
+      digest,
+      lineCount: digestLineCount(digest),
+      status: "pending",
+      createdAt: new Date(this.now()).toISOString(),
+    };
+    // 同時に走った実行があれば、先に記録した方の中身を投稿してoutboxのintent衝突を避ける。
+    if (!(await this.store.create(DIFF_DIGEST_NAMESPACE, date, record))) {
+      const existing = await this.store.get<DiffDigestRecord>(DIFF_DIGEST_NAMESPACE, date);
+      if (!existing) throw new Error("差分digestの投稿記録を読み取れませんでした。");
+      return this.resumeDiffDigest(existing);
+    }
+    return this.deliverDiffDigest(record);
+  }
+
+  private async resumeDiffDigest(record: DiffDigestRecord): Promise<DiffDigestResult> {
+    if (record.status === "sent") {
+      return {
+        date: record.date,
+        baselineDate: record.baselineDate,
+        outcome: "already-posted",
+        lineCount: 0,
+      };
+    }
+    // 記録後に投稿が終わらなかった場合だけ、同じ中身を同じintentで送り直す。
+    return this.deliverDiffDigest(record);
+  }
+
+  private async deliverDiffDigest(record: DiffDigestRecord): Promise<DiffDigestResult> {
+    const diffDigest = this.notifier.diffDigest;
+    if (!diffDigest) {
+      throw new Error("差分digestを投稿できるnotifierがありません。");
+    }
+    await diffDigest.call(this.notifier, record.digest, { intentId: record.intentId });
+    await this.store.set<DiffDigestRecord>(DIFF_DIGEST_NAMESPACE, record.date, {
+      ...record,
+      status: "sent",
+      sentAt: new Date(this.now()).toISOString(),
+    });
+    return {
+      date: record.date,
+      baselineDate: record.baselineDate,
+      outcome: "posted",
+      lineCount: record.lineCount,
+    };
   }
 
   private async notifyThreaded(
@@ -384,7 +555,13 @@ function workRequiredAction(
 }
 
 function notificationPayloadItem(item: HumanWorkItem): HumanWorkItem {
-  const { assignees: _assignees, pullRequestAuthor: _pullRequestAuthor, ...payload } = item;
+  const {
+    assignees: _assignees,
+    pullRequestAuthor: _pullRequestAuthor,
+    issueType: _issueType,
+    parentUrl: _parentUrl,
+    ...payload
+  } = item;
   return payload;
 }
 

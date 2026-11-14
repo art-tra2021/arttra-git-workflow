@@ -18,7 +18,7 @@ Slackは正本ではなく、GitHub IssuesとGitHub Projectsを人間が追い�
 
 - 停止ボタン付きのセルフマージ予定の警告
 - 急ぎで未割当（Projectsで未着手・緊急かつ担当者なし）の仕事。Taskも含む
-- 日次digest
+- 日次digest（`AR_DIGEST_MODE`で一覧と前日からの差分を切り替える。下記「日次digest」）
 - 対応必須の出来事で、DMを送れない宛先（GitHub未連携の人、GitHub team reviewer）がいる場合の知らせ
 - 担当者のいないblockerと期限超過、PR作成者が分からないconflict（DMの宛先がなく誰にも届かないため）
 
@@ -29,6 +29,33 @@ DMを送れる宛先には、channelへの投稿の有無にかかわらずDMだ
 
 `thread`へ戻す場合は、環境変数を`thread`にしてdeployする。
 処理済みの出来事は通知方式によらず同じ`lifecycle-notification` stateで判定するため、切り替えの前後で同じ出来事を二度送らない。
+
+### 日次digest
+
+日次digestの中身は、環境変数`AR_DIGEST_MODE`で決まる。
+`list`（未設定時の既定）は、その時点の未完了作業を最大20行の一覧として投稿する。
+`diff`は、ART-TRA Work（Project #8）の前回のスナップショットからの変化だけを、Work・Businessごとにまとめて投稿する。
+本番はいま`list`で、`diff`への切り替えは後で行う。
+`list`と`diff`以外の値では、adapterは起動しない。
+判定の規則、並び、件数の上限は`apps/slack-adapter/README.md`の日次digestの節にある。
+
+`diff`で使うFirestoreの状態は次の3つである。
+
+| collection（namespace） | key | 中身 |
+| --- | --- | --- |
+| `work-digest-snapshot` | JSTの日付（例: `2026-11-14`） | 正規化した項目の一覧と、比較元にした日付 |
+| `work-digest-snapshot-pointer` | `latest` | 最後にスナップショットを保存した日付 |
+| `work-diff-digest` | JSTの日付 | その日に投稿した差分の中身、intent ID、`pending`または`sent` |
+
+`diff`へ切り替えた最初の実行は投稿せず、基準のスナップショットだけを保存する。差分の投稿は翌日の実行から始まる。
+変化のない日も投稿しない。
+同じ日に再実行しても、`work-diff-digest`の記録が`sent`なら投稿しない。
+記録が`pending`のまま残っている場合は、次の実行が同じ中身を同じintentで送り直す。
+通知outboxが`needs_review`になった場合は、ほかの通知と同じく通知outboxの監査と照合で復旧する。
+
+`diff`から`list`へ戻す場合は、環境変数を`list`にしてdeployする。
+`diff`用の状態は消さずに残してよい。再び`diff`にすると、最後のスナップショットとの差分から再開する。
+間が何日も空いた場合は、その間の変化がまとめて1回分の差分になる。
 
 以下の「スレッド規則」と「視覚ルール」のうちthreadとmentionに関する記述、2026-08-04と2026-08-05の証跡は、`thread`の動作である。
 
@@ -315,4 +342,5 @@ Issueと障害記録へrollback理由、対象revision、image、health commit�
 別スレッドへ分かれた場合は、PR本文のclosing Task、そのTaskのnative parent、`work-thread` stateのWorkまたはBusiness URLを確認する。
 メンションされない場合は、対象者がSlackからGitHub OAuth連携を完了しているか確認する。
 channelへ出ると想定した投稿が無い場合は、まず`AR_SLACK_NOTIFICATION_MODE`の値を確認する。`direct`では、セルフマージ警告、急ぎの未割当、日次digest、DMを送れない宛先への知らせ以外はchannelへ出ない。
+日次digestが出ない場合は、`AR_DIGEST_MODE`の値を確認する。`diff`では、初回と変化のない日は投稿しない。`/internal/work-digest`の応答の`itemCount`が0なら投稿していない。その日の`work-digest-snapshot`と`work-diff-digest`を見て、初回か、変化なしか、投稿済みかを切り分ける。
 DMを送れない宛先への知らせが出るはずなのに無い場合は、宛先のGitHub loginが`[bot]`で終わっていないか、コメントのmentionがcode blockの中にないかを確認する。

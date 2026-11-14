@@ -6,6 +6,7 @@ import {
   notificationIntentId,
 } from "./notification-outbox.ts";
 import type { HumanWorkItem } from "./types.ts";
+import type { WorkDiffDigest } from "./work-diff-digest.ts";
 import type {
   WorkNotificationContext,
   WorkNotificationResult,
@@ -190,6 +191,13 @@ export class WorkNotifierWithRequiredActionDm implements WorkNotifier {
 
   async digest(items: HumanWorkItem[], metadata?: NotificationIntentMetadata): Promise<void> {
     await this.primary.digest(items, metadata);
+  }
+
+  async diffDigest(digest: WorkDiffDigest, metadata?: NotificationIntentMetadata): Promise<void> {
+    if (!this.primary.diffDigest) {
+      throw new Error("差分digestを投稿できるnotifierがありません。");
+    }
+    await this.primary.diffDigest(digest, metadata);
   }
 }
 

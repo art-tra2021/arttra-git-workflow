@@ -1,9 +1,15 @@
-import type { WebClient } from "@slack/web-api";
+import type { KnownBlock, WebClient } from "@slack/web-api";
 import { unreachableRecipientLines } from "./notification-mode.ts";
 import type { NotificationIntentMetadata } from "./notification-outbox.ts";
 import { workItemBlocks } from "./presentation.ts";
 import { slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
 import type { HumanWorkItem } from "./types.ts";
+import type {
+  DigestCategory,
+  WorkDiffDigest,
+  WorkDiffDigestGroup,
+  WorkDiffDigestLine,
+} from "./work-diff-digest.ts";
 import type {
   WorkNotificationContext,
   WorkNotificationResult,
@@ -101,6 +107,117 @@ export class SlackWorkNotifier implements WorkNotifier {
       unfurl_media: false,
     });
   }
+
+  async diffDigest(digest: WorkDiffDigest, metadata?: NotificationIntentMetadata): Promise<void> {
+    const message = diffDigestMessage(digest);
+    await this.client.chat.postMessage({
+      channel: this.channelId,
+      text: message.text,
+      blocks: message.blocks,
+      ...(metadata ? { metadata: slackMetadata(metadata.intentId) } : {}),
+      unfurl_links: false,
+      unfurl_media: false,
+    });
+  }
+}
+
+/** Slackのsection textとblock数の上限。 */
+export const SLACK_SECTION_TEXT_LIMIT = 3000;
+export const SLACK_BLOCK_LIMIT = 50;
+
+const CATEGORY_LABEL: Record<DigestCategory, { emoji: string; label: string }> = {
+  attention: { emoji: "🚨", label: "止まり・期限超過" },
+  completed: { emoji: "✅", label: "完了" },
+  new: { emoji: "🆕", label: "新規" },
+  changed: { emoji: "🔁", label: "変更" },
+  removed: { emoji: "📤", label: "Projectから外れた" },
+};
+
+const CATEGORY_ORDER: DigestCategory[] = ["attention", "completed", "new", "changed", "removed"];
+
+/**
+ * 差分digestをSlackの投稿へ描画する。人名はmentionせずGitHub loginのまま書く。
+ * Work・Businessごとに1つのsectionにし、section textとblock数の上限を超えないよう行を削る。
+ */
+export function diffDigestMessage(digest: WorkDiffDigest): {
+  text: string;
+  blocks: KnownBlock[];
+} {
+  const summary = CATEGORY_ORDER.filter((category) => digest.counts[category] > 0)
+    .map((category) => `${CATEGORY_LABEL[category].label} ${digest.counts[category]}件`)
+    .join("、");
+  const blocks: KnownBlock[] = [
+    slackHeader("digest", `ART-TRA Work 前日からの変化（${digest.date}）`),
+    {
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: escapeSlackText(`${digest.baselineDate} からの変化: ${summary}`),
+        },
+      ],
+    },
+    slackDivider(),
+  ];
+  const footer: KnownBlock | null =
+    digest.hiddenGroupCount > 0
+      ? {
+          type: "context",
+          elements: [
+            {
+              type: "mrkdwn",
+              text: `ほか${digest.hiddenGroupCount}件のWork・Businessに${digest.hiddenGroupChangeCount}件の変化があります。GitHub Projectsで確認してください。`,
+            },
+          ],
+        }
+      : null;
+  const room = SLACK_BLOCK_LIMIT - blocks.length - (footer ? 1 : 0);
+  for (const group of digest.groups.slice(0, room)) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: groupSectionText(group) },
+    });
+  }
+  if (footer) blocks.push(footer);
+  return {
+    text: slackPlain("digest", `ART-TRA Workの前日からの変化: ${summary}`),
+    blocks,
+  };
+}
+
+function groupSectionText(group: WorkDiffDigestGroup): string {
+  const heading =
+    group.kind === "other"
+      ? "*その他（親の分からないTask・Intake）*"
+      : `*${group.kind === "business" ? "Business" : "Work"}: ${issueLink(group.url ?? "", group.issueNumber, group.title)}*`;
+  const lines = group.lines.map(lineText);
+  let hidden = group.hiddenLineCount;
+  const compose = () => [heading, ...lines, ...(hidden > 0 ? [`…ほか${hidden}件`] : [])].join("\n");
+  // 長いタイトルが続いても3000字を超えないよう、末尾の行から「ほか n 件」へ回す。
+  while (compose().length > SLACK_SECTION_TEXT_LIMIT && lines.length > 0) {
+    lines.pop();
+    hidden += 1;
+  }
+  const text = compose();
+  return text.length > SLACK_SECTION_TEXT_LIMIT
+    ? `${text.slice(0, SLACK_SECTION_TEXT_LIMIT - 1)}…`
+    : text;
+}
+
+function lineText(line: WorkDiffDigestLine): string {
+  return `${CATEGORY_LABEL[line.category].emoji} ${issueLink(line.url, line.issueNumber, line.title)} — ${escapeSlackText(line.detail)}`;
+}
+
+function issueLink(url: string, issueNumber: number | null, title: string): string {
+  const label = escapeSlackText(
+    issueNumber !== null ? [`#${issueNumber}`, title].filter(Boolean).join(" ") : title,
+  );
+  return url ? `<${url}|${label}>` : label;
+}
+
+/** mrkdwnの制御文字を無効にし、<!channel>や<@U…>のようなmentionを作らせない。 */
+function escapeSlackText(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
 function slackMetadata(intentId: string) {

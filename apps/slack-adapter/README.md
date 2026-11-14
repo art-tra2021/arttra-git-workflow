@@ -274,7 +274,7 @@ GitHubの出来事の記録はGitHubに残るため、`direct`ではSlackへ続�
 | --- | --- |
 | セルフマージ予定の警告 | 停止ボタン付きの単独投稿。CI通過後の通知は出さない |
 | 急ぎで未割当の仕事 | Projectsで未着手・緊急かつ担当者なしの項目。Taskも含めて単独投稿にする |
-| 日次digest | `thread`と同じ一覧投稿 |
+| 日次digest | `thread`と同じ投稿。`AR_DIGEST_MODE`で一覧と前日からの差分を切り替える（後述） |
 | DMを送れない宛先への知らせ | 下記の対応必須の出来事で、DMを送れない宛先がいる場合だけの単独投稿 |
 | 拾う人のいない止まり | 担当者のいないblockerと期限超過、PR作成者が分からないconflict。DMの宛先がなく誰にも届かないため、単独投稿にする |
 
@@ -393,9 +393,55 @@ Slackの通常操作はこのcacheだけを読み、GitHubの一時的な遅延�
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
 接続済み利用者ごとに本人担当項目だけを再取得し、手動の`/ar calendar sync`と同じserviceで投影する。
 
-日次作業一覧は、固定JSON `{"schemaVersion":1,"kind":"work.digest"}` を`/internal/work-digest`へ送る。
+日次digestは、固定JSON `{"schemaVersion":1,"kind":"work.digest"}` を`/internal/work-digest`へ送る。
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から一日一回実行する。
-優先度、期限、次の行動で整列した未完了作業を一投稿へまとめ、生のGitHub eventを連続投稿しない。
+生のGitHub eventを連続投稿せず、一日分を一投稿へまとめる。
+投稿の中身は環境変数`AR_DIGEST_MODE`で切り替える。
+
+| 値 | 方式 |
+| --- | --- |
+| `list`（未設定時の既定） | 優先度、期限、次の行動で整列した未完了作業を、最大20行の一覧として投稿する |
+| `diff` | ART-TRA Work（Project #8）の前回からの変化だけを、Work・Businessごとにまとめて投稿する |
+
+既存の挙動を守るため既定は`list`とする。
+`list`と`diff`以外の値では、adapterは起動を拒否する。
+`list`へ戻せば従来の一覧投稿に戻り、`diff`用に保存したstateは使われずに残る。
+
+`diff`では、実行のたびにProject #8の項目を次の欄へ正規化し、JSTの日付をkeyにしたスナップショットとしてFirestoreの`work-digest-snapshot`へ保存する。
+
+- URL、種別（Intake、Work、Business、Task）、親IssueのURL、タイトル
+- 状態、担当者（GitHub login）の一覧、目標日、通知理由（`reasonCode`）
+
+スナップショットには完了済み（Done、close）の項目を残さない。
+直前のスナップショットと比べ、次の変化を投稿する。
+
+| 並び | 変化 | 判定 |
+| --- | --- | --- |
+| 1 | 止まり・期限超過 | 通知理由が`BLOCKED`へ変わった。または目標日を過ぎた状態に新しくなった |
+| 2 | 完了 | 前回は未完了で、今回はStatusがDone、またはIssueがclose済み |
+| 3 | 新規 | 前回のスナップショットに無い未完了の項目。closeから開き直したIssueもここに入る |
+| 4 | 状態・担当・期限の変更 | Status、担当者の一覧、目標日のいずれかが変わった。止まりの解消もここに書く |
+| 5 | Projectから外れた | 前回はあったが、今回はProject #8に無い。完了とは分ける |
+
+1つの項目に複数の変化があれば1行にまとめ、最も上の並びに置く。
+Work・Businessごとに1ブロックとし、TaskはparentUrlの親のブロックへ入れる。
+親がProject #8に無いTaskも、親IssueのURLが分かれば番号だけのブロックへまとめる。
+親が分からないTaskとIntakeは、最後の「その他」ブロックへ入れる。
+変化のないWork・Businessは出さない。
+止まり・期限超過を含むブロックから順に出し、Work・Businessは最大10ブロック、各ブロックは最大5行とする。
+超えた分は「ほか n 件」と書く。
+各行にはIssueへのリンクを付け、タイトルは80字で切る。
+Slackのsection textの3000字とblockの50個を超えないよう、超えそうなら末尾の行を「ほか n 件」へ回す。
+担当者はGitHub loginをそのまま書き、Slackのmentionにしない。日次のまとめで通知を鳴らさないためである。
+タイトル中の`<`、`>`、`&`はSlackの記法として働かないよう置き換える。
+
+初回（前回のスナップショットが無いとき）は投稿せず、基準のスナップショットだけを保存する。
+変化のない日は投稿せず、スナップショットだけを更新する。
+通知outboxのintent IDは種別`work-diff-digest`とJSTの日付だけで決める。既存の`work-digest`とは別の種別にし、既存intentの中身を変えない。
+投稿する差分は、送る前に`work-diff-digest`へ日付keyで記録する。
+同じ日の再実行では、この記録が送信済みなら何もせず、送信前に止まっていれば記録した同じ中身を同じintentで送り直す。
+投稿した日の再実行ではスナップショットを上書きしない。投稿後に起きた変化は翌日の差分に入る。
+`/internal/work-digest`の応答の`itemCount`は、`list`では一覧の件数、`diff`では投稿した差分の行数（投稿しなかった日は0）である。
 
 PR作成・更新時は、唯一のprimary closing Taskにあるversion付き予定reviewer、変更fileに最後に一致するCODEOWNERS、active Rulesetの必要承認数をGitHubから再取得する。
 GitHubへ正式なuser/team review requestを設定した後、検証済みaccount mappingを持つ利用者だけSlackでmentionする。
