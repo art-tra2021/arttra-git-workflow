@@ -1,4 +1,5 @@
 import type { WebClient } from "@slack/web-api";
+import { unreachableRecipientLines } from "./notification-mode.ts";
 import type { NotificationIntentMetadata } from "./notification-outbox.ts";
 import { workItemBlocks } from "./presentation.ts";
 import { slackDivider, slackHeader, slackPlain } from "./slack-message-style.ts";
@@ -42,6 +43,17 @@ export class SlackWorkNotifier implements WorkNotifier {
               {
                 type: "section" as const,
                 text: { type: "mrkdwn" as const, text: mention.trim() },
+              },
+            ]
+          : []),
+        ...(context.unreachableRecipients?.length
+          ? [
+              {
+                type: "section" as const,
+                text: {
+                  type: "mrkdwn" as const,
+                  text: unreachableRecipientLines(context.unreachableRecipients).join("\n"),
+                },
               },
             ]
           : []),

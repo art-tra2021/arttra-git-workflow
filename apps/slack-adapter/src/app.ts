@@ -677,18 +677,18 @@ export function createSlackApp(
   app.action("ar.self-merge.stop", async ({ ack, action, body, client }) => {
     await ack();
     if (action.type !== "button" || !action.value || !("trigger_id" in body)) return;
-    const target = parseSelfMergeTarget(action.value);
+    const target = selfMergeStopTarget(
+      action.value,
+      "message" in body ? body.message : undefined,
+      "channel" in body ? body.channel : undefined,
+    );
     if (!target) return;
-    const message = "message" in body ? body.message : undefined;
-    const channel = "channel" in body ? body.channel : undefined;
-    const channelId = channel && "id" in channel ? channel.id : "";
-    const rootTs = message && "ts" in message ? (message.thread_ts ?? message.ts) : "";
     await client.views.open({
       trigger_id: body.trigger_id,
       view: {
         type: "modal",
         callback_id: "ar.self-merge.stop.submit",
-        private_metadata: JSON.stringify({ ...target, channelId, rootTs }),
+        private_metadata: JSON.stringify(target),
         title: { type: "plain_text", text: "セルフマージ停止" },
         submit: { type: "plain_text", text: "停止する" },
         close: { type: "plain_text", text: "キャンセル" },
@@ -746,11 +746,11 @@ export function createSlackApp(
         reason,
         issueUrl: issue.url,
       });
-      if (target.channelId) {
+      const destination = selfMergeStoppedDestination(target);
+      if (destination) {
         try {
           await client.chat.postMessage({
-            channel: target.channelId,
-            ...(target.rootTs ? { thread_ts: target.rootTs, reply_broadcast: false } : {}),
+            ...destination,
             text: slackPlain("warning", message.text),
             unfurl_links: false,
             unfurl_media: false,
@@ -855,14 +855,46 @@ function projectProjectionErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Project投影を同期できませんでした。";
 }
 
-interface SelfMergeTarget {
+export interface SelfMergeTarget {
   repository: string;
   issueNumber: number;
   channelId?: string;
   rootTs?: string;
 }
 
-function parseSelfMergeTarget(value: string): SelfMergeTarget | null {
+/**
+ * 停止ボタンの値と押されたmessageから、停止結果を返す先を決める。
+ * thread内の警告ならそのthreadのroot、channel単独投稿の警告ならその投稿自身をrootにする。
+ */
+export function selfMergeStopTarget(
+  actionValue: string,
+  message: { ts?: string; thread_ts?: string } | undefined,
+  channel: { id?: string } | undefined,
+): SelfMergeTarget | null {
+  const target = parseSelfMergeTarget(actionValue);
+  if (!target) return null;
+  const channelId = channel?.id ?? "";
+  const rootTs = message?.thread_ts ?? message?.ts ?? "";
+  return {
+    repository: target.repository,
+    issueNumber: target.issueNumber,
+    ...(channelId ? { channelId } : {}),
+    ...(rootTs ? { rootTs } : {}),
+  };
+}
+
+/** 停止結果は警告と同じ場所（警告への返信）へ置き、channelへ展開しない。 */
+export function selfMergeStoppedDestination(
+  target: SelfMergeTarget,
+): { channel: string; thread_ts?: string; reply_broadcast?: false } | null {
+  if (!target.channelId) return null;
+  return {
+    channel: target.channelId,
+    ...(target.rootTs ? { thread_ts: target.rootTs, reply_broadcast: false as const } : {}),
+  };
+}
+
+export function parseSelfMergeTarget(value: string): SelfMergeTarget | null {
   try {
     const parsed = JSON.parse(value) as Partial<SelfMergeTarget>;
     if (

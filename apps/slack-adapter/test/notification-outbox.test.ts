@@ -599,6 +599,43 @@ describe("SlackNotificationReconciler", () => {
     expect(historyCalls).toBe(1);
     expect(replyCalls).toBe(0);
   });
+
+  test("directモードの単独投稿は同じIssueの旧threadではなくchannel履歴を照合する", async () => {
+    const store = await localStore("reconcile-standalone");
+    const value = intent("reconcile-standalone");
+    if (value.payload.kind !== "lifecycle") throw new Error("lifecycle intentではありません。");
+    value.payload.notification = { ...value.payload.notification, standalone: true };
+    value.payload.threadTs = null;
+    await store.set("work-thread", value.payload.notification.resource.url, {
+      schemaVersion: 1,
+      issueUrl: value.payload.notification.resource.url,
+      rootTs: "500.1",
+      createdAt: "2026-08-03T00:00:00.000Z",
+    });
+    let historyCalls = 0;
+    let replyCalls = 0;
+    const client: SlackConversationClient = {
+      conversations: {
+        open: async () => ({ channel: { id: "DUNUSED" } }),
+        history: async () => {
+          historyCalls += 1;
+          return { messages: [] };
+        },
+        replies: async () => {
+          replyCalls += 1;
+          return { messages: [] };
+        },
+      },
+    };
+
+    await expect(
+      new SlackNotificationReconciler(client, store).reconcile(
+        sendingState(value, "2026-08-03T00:00:00.000Z"),
+      ),
+    ).resolves.toMatchObject({ outcome: "message_not_found", complete: true, channelId: "CWORK" });
+    expect(historyCalls).toBe(1);
+    expect(replyCalls).toBe(0);
+  });
 });
 
 async function localStore(name: string): Promise<LocalStateStore> {

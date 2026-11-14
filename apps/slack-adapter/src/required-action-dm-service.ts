@@ -39,6 +39,11 @@ const ACTOR_INCLUDED_KINDS = new Set<NotificationRequiredActionKind>([
   "approval-wait",
 ]);
 
+/** 実行者本人も対処者として宛先に残す種別か。 */
+export function requiredActionIncludesActor(kind: NotificationRequiredActionKind): boolean {
+  return ACTOR_INCLUDED_KINDS.has(kind);
+}
+
 export interface RequiredActionDirectNotifiers {
   lifecycle: LifecycleNotifier;
   work: WorkNotifier;
@@ -172,6 +177,15 @@ export class WorkNotifierWithRequiredActionDm implements WorkNotifier {
     const result = await this.primary.notify(item, context, metadata);
     await this.direct.notifyWork(item, context, metadata);
     return result;
+  }
+
+  /** channel/threadへ投稿せず、metadata.requiredActionの対応必須DMだけを送る。 */
+  async notifyRequiredActionOnly(
+    item: HumanWorkItem,
+    context: WorkNotificationContext,
+    metadata: NotificationIntentMetadata,
+  ): Promise<number> {
+    return this.direct.notifyWork(item, context, metadata);
   }
 
   async digest(items: HumanWorkItem[], metadata?: NotificationIntentMetadata): Promise<void> {
