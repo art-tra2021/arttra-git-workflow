@@ -274,7 +274,7 @@ GitHubの出来事の記録はGitHubに残るため、`direct`ではSlackへ続�
 | --- | --- |
 | セルフマージ予定の警告 | 停止ボタン付きの単独投稿。CI通過後の通知は出さない |
 | 急ぎで未割当の仕事 | Projectsで未着手・緊急かつ担当者なしの項目。Taskも含めて単独投稿にする |
-| 日次digest | `thread`と同じ一覧投稿 |
+| 日次digest | `thread`と同じ投稿。`AR_DIGEST_MODE`で一覧と前日からの差分を切り替える（後述） |
 | DMを送れない宛先への知らせ | 下記の対応必須の出来事で、DMを送れない宛先がいる場合だけの単独投稿 |
 | 拾う人のいない止まり | 担当者のいないblockerと期限超過、PR作成者が分からないconflict。DMの宛先がなく誰にも届かないため、単独投稿にする |
 
@@ -393,9 +393,78 @@ Slackの通常操作はこのcacheだけを読み、GitHubの一時的な遅延�
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
 接続済み利用者ごとに本人担当項目だけを再取得し、手動の`/ar calendar sync`と同じserviceで投影する。
 
-日次作業一覧は、固定JSON `{"schemaVersion":1,"kind":"work.digest"}` を`/internal/work-digest`へ送る。
+日次digestは、固定JSON `{"schemaVersion":1,"kind":"work.digest"}` を`/internal/work-digest`へ送る。
 本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から一日一回実行する。
-優先度、期限、次の行動で整列した未完了作業を一投稿へまとめ、生のGitHub eventを連続投稿しない。
+生のGitHub eventを連続投稿せず、一日分を一投稿へまとめる。
+投稿の中身は環境変数`AR_DIGEST_MODE`で切り替える。
+
+| 値 | 方式 |
+| --- | --- |
+| `list`（未設定時の既定） | 優先度、期限、次の行動で整列した未完了作業を、最大20行の一覧として投稿する |
+| `diff` | ART-TRA Work（Project #8）の前回からの変化だけを、Work・Businessごとにまとめて投稿する |
+
+既存の挙動を守るため既定は`list`とする。
+`list`と`diff`以外の値では、adapterは起動を拒否する。
+`diff`はGitHub Project経由の取得（closeしたIssueと種別を含む）を前提にするため、`AR_GITHUB_PROJECT_OWNER`と`AR_GITHUB_PROJECT_NUMBER`が無ければ起動を拒否する。
+Projectを使わない取得経路では、close済みのIssueが「Projectから外れた」になり、種別がすべてWorkになるためである。
+`list`へ戻せば従来の一覧投稿に戻り、`diff`用に保存したstateは使われずに残る。
+
+`diff`では、実行のたびにProject #8の項目を次の欄へ正規化して比べる。比較の基準を進める時（後述）に、JSTの日付をkeyにしたスナップショットとしてFirestoreの`work-digest-snapshot`へ保存する。
+
+- URL、種別（Intake、Work、Business、Task）、親IssueのURL、タイトル
+- 状態、担当者（GitHub login）の一覧、目標日、通知理由（`reasonCode`）
+
+スナップショットには完了済み（Done、close）の項目を残さない。
+比較の基準のスナップショット（後述。ふつうは前日のもの）と比べ、次の変化を投稿する。
+
+| 並び | 変化 | 判定 |
+| --- | --- | --- |
+| 1 | 止まり・期限超過 | 通知理由が`BLOCKED`へ変わった。または目標日を過ぎた状態に新しくなった |
+| 2 | 完了 | 前回は未完了で、今回はStatusがDone、またはIssueがclose済み |
+| 3 | 新規 | 前回のスナップショットに無い未完了の項目。closeから開き直したIssueもここに入る |
+| 4 | 状態・担当・期限の変更 | Status、担当者の一覧、目標日のいずれかが変わった。止まりの解消もここに書く |
+| 5 | Projectから外れた | 前回はあったが、今回はProject #8に無い。完了とは分ける |
+
+1つの項目に複数の変化があれば1行にまとめ、最も上の並びに置く。
+Work・Businessごとに1ブロックとし、TaskはparentUrlの親のブロックへ入れる。
+親がProject #8に無いTaskも、親IssueのURLが分かれば「親: #番号」のブロックへまとめる。親の種別は分からないため、WorkやBusinessとは書かない。
+親が分からないTaskとIntakeは、最後の「その他」ブロックへ入れる。
+変化のないWork・Businessは出さない。
+止まり・期限超過を含むブロックから順に出し、Work・Businessは最大10ブロック、各ブロックは最大5行とする。
+超えた分は「ほか n 件」と書く。
+各行にはIssueへのリンクを付け、タイトルは80字で切る。
+Slackのsection textの3000字とblockの50個を超えないよう、超えそうなら末尾の行を「ほか n 件」へ回す。
+blockの上限で載せられなかったブロックも、末尾の「ほか n 件のWork・Business」の件数に含める。
+担当者はGitHub loginをそのまま書き、Slackのmentionにしない。日次のまとめで通知を鳴らさないためである。
+タイトル中の`<`、`>`、`&`はSlackの記法として働かないよう置き換える。
+
+比較の基準は、`work-digest-snapshot-pointer`が指す日付のスナップショットである。
+基準は、次のどれかの時にだけその日のスナップショットへ進める。
+
+- 初回（基準が無いとき）。投稿せず、その日のスナップショットを基準として保存する
+- 変化のない日。投稿せず、その日のスナップショットを基準にする
+- 投稿した日。通知outboxでその投稿が`sent`になった後に、その日のスナップショットを基準にする
+
+投稿する差分は、送る前に`work-diff-digest`へ`日付#試行番号`（例: `2026-11-14#1`）のkeyで記録し、基準にする予定のスナップショットも持たせる。
+通知outboxのintent IDは、その日の最初の投稿では種別`work-diff-digest`とJSTの日付だけで決める。既存の`work-digest`とは別の種別にし、既存intentの中身を変えない。
+同じ日に作り直した2回目以降の投稿は、試行番号を足した別のintentにする。
+
+送信に失敗した場合は基準を進めない。次の実行（同じ日でも翌日でも）は、まず残った記録の通知outboxの状態を確かめる。
+
+| outboxの状態 | 次の実行の扱い |
+| --- | --- |
+| `sent`（Slackへの投稿後に記録の更新だけが失敗した） | 送り直さず、その記録のスナップショットを基準にする。同じ日なら何もしない |
+| 未作成・`intent`で、同じ日 | 記録した同じ中身を同じintentで送り直す |
+| `failed`（Slackが確実に受け付けなかった）、または前日以前の未作成・`intent` | 送り直さず、記録を`superseded`にする。最後に成功した基準から差分を作り直し、失敗した日の分を含めて今回の日付で一度だけ投稿する |
+| `sending`・`needs_review`（送れたか分からない） | 二重に投稿しないよう、投稿も基準の更新もせずに失敗する。通知outboxを監査し、Slackと照合して`sent`にすれば、次の実行がその投稿を基準にする |
+
+基準を進めた日の再実行は何もしない。その後に起きた変化は翌日の差分に入る。
+
+取得結果が一時的に欠けた日（権限の変更やProjectの一時的な欠落で項目が大量に消えた日）は、投稿も基準の更新もしない。
+前回の基準の項目数が10件以上で、今回「Projectから外れた」が前回の30%以上、または今回の未完了の項目数が前回の半分未満の時がこれに当たる。
+理由をログ（`console.warn`）に残し、`sendDiffDigest`の返り値の`outcome`を`source-incomplete`にする。
+取得が戻った日は、欠ける前の基準と比べる。閾値は`src/work-diff-digest.ts`の`DIGEST_SOURCE_GUARD`にまとめてある。
+`/internal/work-digest`の応答の`itemCount`は、`list`では一覧の件数、`diff`では投稿した差分の行数（投稿しなかった日は0）である。
 
 PR作成・更新時は、唯一のprimary closing Taskにあるversion付き予定reviewer、変更fileに最後に一致するCODEOWNERS、active Rulesetの必要承認数をGitHubから再取得する。
 GitHubへ正式なuser/team review requestを設定した後、検証済みaccount mappingを持つ利用者だけSlackでmentionする。

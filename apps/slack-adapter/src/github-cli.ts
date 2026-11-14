@@ -16,6 +16,7 @@ import {
   organizationProjectIssuePage,
   PROJECT_ISSUES_QUERY,
   type ProjectIssuesResponse,
+  projectDigestWorkItem,
   projectIssueNodes,
   projectIssueSnapshot,
 } from "./project-read-model.ts";
@@ -185,6 +186,21 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
     );
   }
 
+  /**
+   * 差分digest用。closeしたIssueも含め、種別と親IssueのURLを持つ項目を返す。
+   * Projectが未設定の取得経路はclose済みと種別を読めないため、差分を作らず拒否する。
+   */
+  async loadProjectDigestItems(): Promise<HumanWorkItem[]> {
+    if (!this.project) {
+      throw new Error(
+        "差分digestにはGitHub Project（AR_GITHUB_PROJECT_OWNER/NUMBER）の設定が必要です。",
+      );
+    }
+    return (await this.workIssues(100, null, { includeClosed: true })).map((issue) =>
+      projectDigestWorkItem(issue, this.githubLogin),
+    );
+  }
+
   async claimIssue(
     repository: string,
     issueNumber: number,
@@ -338,7 +354,11 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
     );
   }
 
-  private async workIssues(limit: number, assignee: string | null = null) {
+  private async workIssues(
+    limit: number,
+    assignee: string | null = null,
+    options: { includeClosed?: boolean } = {},
+  ) {
     if (!this.project) {
       return this.projectIssues(limit, assignee);
     }
@@ -361,6 +381,8 @@ export class GitHubCliDependencies implements SlackAdapterDependencies {
         ]),
         this.project.number,
         assignee,
+        undefined,
+        options,
       );
       issues.push(...page.issues);
       if (page.hasNextPage && !page.endCursor) {
