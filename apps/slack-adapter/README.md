@@ -259,7 +259,7 @@ Project項目、Issue、PR、reviewの変更を処理したworkerはGitHub Proje
 通知済み状態はIssue URLと判定内容のfingerprintで重複排除し、通常の進行中作業は即時投稿しない。
 Intakeの受付投稿とWorkまたはBusiness単位の親投稿tsを共通state storeへ保存する。
 Task作成、期限、blocker、CI失敗、conflictなどの続報は親WorkまたはBusinessのthreadへ返信し、Task単位の親投稿をchannelへ増やさない。
-対応必須DMは、次に動く人へ一度だけ送る。対象と宛先は次の12区分である。
+対応必須DMは、次に動く人へ一度だけ送る。対象と宛先は次の13区分である。
 
 | 出来事 | DM宛先 | 実行者本人 |
 | --- | --- | --- |
@@ -269,7 +269,8 @@ Task作成、期限、blocker、CI失敗、conflictなどの続報は親Workま�
 | 差し戻し | PR作成者 | 除外 |
 | 差し戻し後の修正push | 差し戻したreviewer | 除外 |
 | Approve | PR作成者 | 除外 |
-| Issue/PRコメントの本文mention | 本文で明示された`@login`だけ | 除外 |
+| Issue/PRコメント、コードコメント、COMMENTEDレビューの本文mention | 本文で明示された`@login`だけ | 除外 |
+| Issue作成時の担当指定 | Issue作成者と検証済み依頼者を除いた作成時の担当者 | 除外 |
 | 担当変更 | 新しく追加された担当者 | 除外 |
 | conflict | PR作成者 | 除外 |
 | `BLOCKED` | 全担当者 | 除外 |
@@ -280,6 +281,8 @@ check_runのsenderはpushした本人で、通常はPR作成者と同じため�
 レビュー依頼は個人reviewerだけへ送り、Issue担当者とGitHub team reviewerはDM対象にしない。
 コメントは本文で明示mentionされた人だけをDM対象にし、threadで参考mentionする担当者やPR作成者、botのコメントはDMしない。
 差し戻し本文のmentionはthreadにだけ残し、DMはPR作成者へ送る。
+Issue作成時の担当者は、初期`assigned`の返信をthreadへ出さず、Issue概要の通知intentから担当DMを派生させるため、`opened`と`assigned`の両方や再配信が来ても一人一件になる。
+一度の操作で担当者を複数追加すると、担当変更の通知が一件にまとまるため、2人目以降の担当DMが欠けることがある。
 期限接近、情報通知、成功通知はDM対象にしない。
 DM宛先はchannel通知intentの`metadata.requiredAction`に置き、payload hashの対象外なので既存のchannelまたはthread intentを変えない。
 全担当者とPR作成者はGitHub Projectsの読み取りモデルから宛先計算だけに使い、通知outboxのpayloadへは入れない。

@@ -716,6 +716,7 @@ describe("LifecycleNotificationService", () => {
       await harness.service.process({ ...assigned, deliveryId: "delivery-assign-redelivery" }),
     ).toBe(0);
     expect(harness.dms).toEqual([
+      { slackUserId: "UOWNER", kind: "assigned", notificationKind: "issue-opened" },
       { slackUserId: "UREVIEWER", kind: "assigned", notificationKind: "issue-assignment-changed" },
     ]);
 
@@ -736,7 +737,91 @@ describe("LifecycleNotificationService", () => {
       "issue-assignment-changed",
       "issue-assignment-changed",
     ]);
-    expect(harness.dms).toHaveLength(1);
+    expect(harness.dms).toHaveLength(2);
+  });
+
+  test("Issue作成時の担当者へ一度だけDMし、初期assignment返信はthreadへ出さない", async () => {
+    const initialAssigned = issueAssignedJob("requester", 44, "delivery-initial-assign");
+    initialAssigned.payload.assignee = { login: "owner" };
+    for (const order of ["opened-first", "assigned-first"] as const) {
+      const harness = await createHarness();
+      const jobs =
+        order === "opened-first"
+          ? [issueOpenedJob(), initialAssigned]
+          : [initialAssigned, issueOpenedJob()];
+      for (const job of jobs) await harness.service.process(job);
+      // webhookの再配信は別delivery IDで同じ出来事を運ぶ。
+      await harness.service.process(issueOpenedJob(44, "delivery-open-redelivery"));
+      await harness.service.process({ ...initialAssigned, deliveryId: "delivery-assign-redo" });
+
+      // 親Workのrootと、Task概要の返信だけ。担当変更の返信は増えない。
+      expect(harness.sent.map((value) => value.notification.kind)).toEqual([
+        "issue-opened",
+        "issue-opened",
+      ]);
+      expect(harness.dms).toEqual([
+        { slackUserId: "UOWNER", kind: "assigned", notificationKind: "issue-opened" },
+      ]);
+    }
+
+    for (const issueType of ["work", "business"] as const) {
+      const harness = await createHarness();
+      harness.github.issue = {
+        ...harness.github.issue,
+        number: 86,
+        url: "https://github.example/example/repo/issues/86",
+        labels: [`type/${issueType}`],
+      };
+      expect(await harness.service.process(issueOpenedJob(86, `delivery-${issueType}`))).toBe(1);
+      expect(await harness.service.process(issueAssignedJob("owner", 86))).toBe(0);
+      expect(harness.sent).toHaveLength(1);
+      expect(harness.dms).toEqual([
+        { slackUserId: "UOWNER", kind: "assigned", notificationKind: "issue-opened" },
+      ]);
+    }
+  });
+
+  test("作成者本人だけが担当のIssueは作成時の担当DMを送らない", async () => {
+    const harness = await createHarness();
+    harness.github.issue = { ...harness.github.issue, assigneeLogins: ["requester"] };
+
+    expect(await harness.service.process(issueOpenedJob())).toBe(1);
+    expect(await harness.service.process(issueAssignedJob("requester"))).toBe(0);
+
+    expect(harness.sent).toHaveLength(2);
+    expect(harness.dms).toEqual([]);
+  });
+
+  test("PRコードコメントの本文mentionはその人だけへDMし、PR作成者へはDMしない", async () => {
+    const harness = await createHarness();
+    const job = reviewCommentJob();
+    job.payload.comment.body = "@mentioned この条件を確認してください";
+
+    expect(await harness.service.process(job)).toBe(1);
+    expect(await harness.service.process({ ...job, deliveryId: "delivery-code-redo" })).toBe(0);
+
+    expect(harness.sent[2]?.notification.kind).toBe("review-commented");
+    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UAUTHOR", "UMENTIONED"]);
+    expect(harness.dms).toEqual([
+      { slackUserId: "UMENTIONED", kind: "mentioned", notificationKind: "review-commented" },
+    ]);
+  });
+
+  test("COMMENTEDレビュー本文のmentionはその人だけへDMし、PR作成者へはDMしない", async () => {
+    const harness = await createHarness();
+    const job = approvedJob("reviewer", 204);
+    job.payload.review.state = "commented";
+    job.payload.review.body = "@mentioned 設計の意図を教えてください";
+
+    expect(await harness.service.process(job)).toBe(1);
+    expect(await harness.service.process({ ...job, deliveryId: "delivery-review-redo" })).toBe(0);
+
+    expect(harness.sent).toHaveLength(3);
+    expect(harness.sent[2]?.notification.kind).toBe("review-commented");
+    expect(harness.sent[2]?.notification.slackUserIds).toEqual(["UAUTHOR", "UMENTIONED"]);
+    expect(harness.dms).toEqual([
+      { slackUserId: "UMENTIONED", kind: "mentioned", notificationKind: "review-commented" },
+    ]);
   });
 });
 

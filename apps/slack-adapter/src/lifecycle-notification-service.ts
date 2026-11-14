@@ -126,6 +126,11 @@ interface IssueCreationSetupState {
   revision: number;
   issueUrl: string;
   pendingAssigneeLogins: string[];
+  /**
+   * 概要へ吸収済みの初期担当者。assigned webhookが別delivery IDで再配信されても、
+   * 担当変更の返信と担当DMを重ねないために残す。旧stateでは欠落し得る。
+   */
+  consumedAssigneeLogins?: string[];
 }
 
 export class LifecycleNotificationService {
@@ -194,7 +199,7 @@ export class LifecycleNotificationService {
     const actor = nestedString(payload, "sender", "login");
     const issue = await this.github.loadIssueContext(repository, issueNumber);
     if (action === "opened") {
-      const opened = await this.ensureIssueOpened(issue, job.deliveryId);
+      const opened = await this.ensureIssueOpened(issue, job.deliveryId, true);
       return (
         opened +
         (await this.notifySelfMergeScheduled(issue, repository, issueRootActorLogin(issue), job))
@@ -221,7 +226,7 @@ export class LifecycleNotificationService {
     }
     if (action === "assigned" || action === "unassigned") {
       const assignee = nestedString(payload, "assignee", "login");
-      const opened = await this.ensureIssueOpened(issue, job.deliveryId);
+      const opened = await this.ensureIssueOpened(issue, job.deliveryId, true);
       if (action === "assigned" && (await this.consumeInitialAssignee(issue.url, assignee))) {
         return opened;
       }
@@ -726,11 +731,19 @@ export class LifecycleNotificationService {
     return 1;
   }
 
+  /**
+   * notifyInitialAssigneesは、Issue作成のwebhook（opened、作成直後のassigned/unassigned）から
+   * 呼ぶときだけtrueにする。コメントやPR等から後追いで概要を作るときは、担当DMを送らない。
+   * 初期担当者のassignment返信は概要へ吸収するため、担当DMはissue-opened intentから派生させる。
+   * DM intentはissue-opened intentと宛先から決まるので、opened/assignedの両方や再配信でも1件になる。
+   */
   private async ensureIssueOpened(
     issue: GitHubIssueContext,
     sourceDeliveryId: string,
+    notifyInitialAssignees = false,
   ): Promise<number> {
     const copy = issueOpenedCopy(issue);
+    const initialAssignees = notifyInitialAssignees ? initialAssigneeDmLogins(issue) : [];
     const opened = await this.send(
       issue,
       null,
@@ -743,6 +756,9 @@ export class LifecycleNotificationService {
       issue.url,
       issueOpenedEventFingerprint(issue),
       sourceDeliveryId,
+      null,
+      null,
+      initialAssignees.length > 0 ? { kind: "assigned", recipientLogins: initialAssignees } : null,
     );
     if (opened > 0) {
       await this.store.create<IssueCreationSetupState>(ISSUE_CREATION_SETUP_NAMESPACE, issue.url, {
@@ -750,6 +766,7 @@ export class LifecycleNotificationService {
         revision: 1,
         issueUrl: issue.url,
         pendingAssigneeLogins: uniqueNormalizedLogins(issue.assigneeLogins),
+        consumedAssigneeLogins: [],
       });
     }
     return opened;
@@ -774,13 +791,24 @@ export class LifecycleNotificationService {
         ISSUE_CREATION_SETUP_NAMESPACE,
         issueUrl,
       );
-      if (!current?.pendingAssigneeLogins.includes(normalizedAssignee)) return false;
+      if (!current) return false;
+      const consumed = current.consumedAssigneeLogins ?? [];
+      const pending = current.pendingAssigneeLogins.includes(normalizedAssignee);
+      if (!pending) {
+        if (!consumed.includes(normalizedAssignee)) return false;
+        // 吸収済みの初期担当者のassigned再配信は、もう一度吸収する。
+        if (reportConsumption) return true;
+      }
       const next: IssueCreationSetupState = {
         ...current,
         revision: current.revision + 1,
         pendingAssigneeLogins: current.pendingAssigneeLogins.filter(
           (login) => login !== normalizedAssignee,
         ),
+        // 解除されたら初期担当者として扱わない。再度のassignは通常の担当変更として通知する。
+        consumedAssigneeLogins: reportConsumption
+          ? uniqueNormalizedLogins([...consumed, normalizedAssignee])
+          : consumed.filter((login) => login !== normalizedAssignee),
       };
       if (
         await this.store.compareAndSet(
@@ -897,6 +925,14 @@ export function issueRootNotification(
 
 export function issueRootMentionLogins(issue: GitHubIssueContext): string[] {
   return withoutLogin([issue.authorLogin, ...issue.assigneeLogins], issueRootActorLogin(issue));
+}
+
+/** 作成者本人（Issue作成者と検証済み依頼者）が自分を担当にしても、担当DMは送らない。 */
+function initialAssigneeDmLogins(issue: GitHubIssueContext): string[] {
+  return withoutLogin(
+    withoutLogin(issue.assigneeLogins, issue.authorLogin),
+    issueRootActorLogin(issue),
+  );
 }
 
 export function issueOpenedEventFingerprint(issue: GitHubIssueContext): string {
