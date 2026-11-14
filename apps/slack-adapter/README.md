@@ -208,7 +208,13 @@ Cloud Runのinstanceが切り替わっても同じcacheを利用し、操作の�
 
 ## Cloud Run runtime
 
-本番のCloud Runでは`AR_SLACK_TRANSPORT=http`を指定し、GitHub webhook、定期job、OAuth callbackを受信する。
+本番のCloud Runでは`AR_SLACK_TRANSPORT=http`を指定し、GitHub webhookとOAuth callbackを受信する。
+定期処理（日次まとめ、期限通知、各種の定期同期、レビュー再通知）は、環境変数`AR_SCHEDULER=inprocess`を指定した常駐VMのprocessが、process内のtimerで実行する。
+`AR_SCHEDULER`は`off`（既定）か`inprocess`だけを受け付け、Cloud Runには設定しない。
+ジョブ名と時間枠ごとにFirestoreで実行権を取るため、再起動や二重起動でも同じ枠は一度しか実行しない。
+`/internal/*`の各endpointは、手動実行や切り戻し用に従来どおり残す。
+Cloud Runは要求を処理している間だけCPUを割り当てる設定（`--cpu-throttling`）で動かせる。
+間隔、実行記録、移行と切り戻しは[Socket Mode常駐VM runbookの定期処理](../../docs/slack-socket-vm-runbook.md#定期処理)に従う。
 Slack AppのSocket Modeを有効にした場合、Slash Commandとinteractionは同じimageを`AR_SLACK_TRANSPORT=socket`で動かす常駐VMが受ける。
 Cloud Runは停止状態からの起動がSlackの3秒応答に間に合わないためである。配備と切り戻しは[Socket Mode常駐VM runbook](../../docs/slack-socket-vm-runbook.md)に従う。
 Socket Modeを無効にしている間は、Cloud Runが`/slack/events`でSlash Commandとinteractionを受信する。
@@ -370,39 +376,40 @@ Header Block、区切り線、詳細、次の操作の順で構成し、fallback
 担当者、未完了、Target dateの3条件を満たす仕事には期限通知を行う。
 `AR_DEADLINE_REMINDER_DAYS`日前、期限当日、期限超過の各段階で一度だけ、検証済みaccount mappingのSlack利用者をnative mentionする。
 Target dateが変わった場合は新しい期限として再判定する。
-定期実行は固定JSON `{"schemaVersion":1,"kind":"work.deadline-remind"}` を`/internal/deadline-reminders`へ送る。
-本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から一日一回実行する。
+定期実行（`deadline-reminders`）は毎日9:05（JST）に一度行う。
+HTTPで実行するときは固定JSON `{"schemaVersion":1,"kind":"work.deadline-remind"}` を`/internal/deadline-reminders`へ送り、本文に対する`X-Ar-Job-Signature`を設定する。
 
-Webhookの取りこぼしを修復する定期同期は、固定JSON `{"schemaVersion":1,"kind":"project-list.sync"}` を`/internal/project-list-sync`へ送る。
-本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
+Webhookの取りこぼしを修復する定期同期（`project-list-sync`）は1時間ごとに行う。
+HTTPで実行するときは固定JSON `{"schemaVersion":1,"kind":"project-list.sync"}` を`/internal/project-list-sync`へ送り、本文に対する`X-Ar-Job-Signature`を設定する。
 定期同期と`/ar project sync`は同じ同期serviceと決定的なrow変換を使用する。
 
-本人が`/ar canvas`で作成済みの個人Canvasは、固定JSON `{"schemaVersion":1,"kind":"project-canvas.sync"}` を`/internal/project-canvas-sync`へ15分ごとに送って同期する。
-このendpointは保存済みの`user` target bindingだけをstate key順に列挙し、`/ar canvas`と同じGitHub identity・repository access再検証経路へ流す。
+本人が`/ar canvas`で作成済みの個人Canvasは、1時間ごとの定期同期（`project-canvas-sync`）で更新する。
+HTTPで実行するときは固定JSON `{"schemaVersion":1,"kind":"project-canvas.sync"}` を`/internal/project-canvas-sync`へ送る。
+この同期は保存済みの`user` target bindingだけをstate key順に列挙し、`/ar canvas`と同じGitHub identity・repository access再検証経路へ流す。
 定期処理はCanvasを新規作成せず、channel Canvas、ACL拡張、Notion本文の複製を行わない。
 access喪失時は既存の個人投影失効処理を適用し、内容hashとACLが同じ場合は`canvases.edit`と`canvases.access.set`を呼ばない。
 応答はbindingごとの`success`、`unchanged`、`skipped`、`error`をstate key順のversion付きJSONで返す。
 署名、再試行、deploy後のread-back手順は[個人Canvas定期同期runbook](../../docs/project-canvas-sync-runbook.md)に記載する。
 
-Issue作成metadataの定期同期は、固定JSON `{"schemaVersion":1,"kind":"issue-metadata.sync"}` を`/internal/issue-metadata-sync`へ送る。
-本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
+Issue作成metadataの定期同期（`issue-metadata-sync`）は1時間ごとに行う。
+HTTPで実行するときは固定JSON `{"schemaVersion":1,"kind":"issue-metadata.sync"}` を`/internal/issue-metadata-sync`へ送り、本文に対する`X-Ar-Job-Signature`を設定する。
 同期はrepository一覧、既定repository、一度利用されたrepositoryのIssue templateをGitHubから再取得し、Firestore cacheを更新する。
 Slackの通常操作はこのcacheだけを読み、GitHubの一時的な遅延やCloud Runのcold startから分離する。
 
-個人Calendarの定期同期は、固定JSON `{"schemaVersion":1,"kind":"calendar.sync"}` を`/internal/calendar-sync`へ送る。
-本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から定期実行する。
+個人Calendarの定期同期（`calendar-sync`）は1時間ごとに行う。
+HTTPで実行するときは固定JSON `{"schemaVersion":1,"kind":"calendar.sync"}` を`/internal/calendar-sync`へ送り、本文に対する`X-Ar-Job-Signature`を設定する。
 接続済み利用者ごとに本人担当項目だけを再取得し、手動の`/ar calendar sync`と同じserviceで投影する。
 
-日次作業一覧は、固定JSON `{"schemaVersion":1,"kind":"work.digest"}` を`/internal/work-digest`へ送る。
-本文に対する`X-Ar-Job-Signature`を設定し、Cloud Scheduler等から一日一回実行する。
+日次作業一覧（`work-digest`）は毎日9:00（JST）に一度送る。
+HTTPで実行するときは固定JSON `{"schemaVersion":1,"kind":"work.digest"}` を`/internal/work-digest`へ送り、本文に対する`X-Ar-Job-Signature`を設定する。
 優先度、期限、次の行動で整列した未完了作業を一投稿へまとめ、生のGitHub eventを連続投稿しない。
 
 PR作成・更新時は、唯一のprimary closing Taskにあるversion付き予定reviewer、変更fileに最後に一致するCODEOWNERS、active Rulesetの必要承認数をGitHubから再取得する。
 GitHubへ正式なuser/team review requestを設定した後、検証済みaccount mappingを持つ利用者だけSlackでmentionする。
 通知にはPR、選定理由、目標日、必要承認数、次の操作を表示し、primary closing Taskの親WorkまたはBusinessのthreadへ集約する。
 同じreviewer・理由・期限では既定24時間再通知せず、未対応が続く場合だけ再通知する。
-Cloud Schedulerは固定JSON `{"schemaVersion":1,"kind":"review.remind"}` を`/internal/review-reminders`へ定期送信する。
-本文に対する`X-Ar-Job-Signature`を設定し、workerは保存済みread modelのPRだけをGitHubから再取得して未対応を判定する。
+再通知の判定（`review-reminders`）は1時間ごとに行い、保存済みread modelのPRだけをGitHubから再取得して未対応を判定する。
+HTTPで実行するときは固定JSON `{"schemaVersion":1,"kind":"review.remind"}` を`/internal/review-reminders`へ送り、本文に対する`X-Ar-Job-Signature`を設定する。
 
 AIはSlackと同じread modelを次で取得できる。
 
