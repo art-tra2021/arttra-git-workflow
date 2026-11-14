@@ -7,13 +7,19 @@ export interface StateStore {
   get<T>(namespace: string, key: string): Promise<T | null>;
   list<T>(namespace: string): Promise<T[]>;
   listEntries<T>(namespace: string): Promise<Array<StateEntry<T>>>;
-  set<T>(namespace: string, key: string, value: T): Promise<void>;
-  create<T>(namespace: string, key: string, value: T): Promise<boolean>;
+  set<T>(namespace: string, key: string, value: T, options?: StateWriteOptions): Promise<void>;
+  create<T>(
+    namespace: string,
+    key: string,
+    value: T,
+    options?: StateWriteOptions,
+  ): Promise<boolean>;
   compareAndSet<T extends RevisionedState>(
     namespace: string,
     key: string,
     expectedRevision: number,
     value: T,
+    options?: StateWriteOptions,
   ): Promise<boolean>;
   remove(namespace: string, key: string): Promise<void>;
   append<T>(namespace: string, value: T): Promise<string>;
@@ -28,9 +34,19 @@ export interface RevisionedState {
   revision: number;
 }
 
+export interface StateWriteOptions {
+  /**
+   * 記録を消してよい時刻。documentの最上位に`expireAt`として置く。
+   * FirestoreのTTL policyはDate型の最上位fieldを見て消すため、valueの中ではなく外側に置く。
+   * localでは消さず、記録に残すだけである。
+   */
+  expireAt?: Date;
+}
+
 interface StoredValue<T> {
   schemaVersion: 1;
   updatedAt: string;
+  expireAt?: Date;
   value: T;
 }
 
@@ -56,8 +72,13 @@ export class LocalStateStore implements StateStore {
     }
   }
 
-  async set<T>(namespace: string, key: string, value: T): Promise<void> {
-    await writeAtomic(this.path(namespace, key), serialize(value));
+  async set<T>(
+    namespace: string,
+    key: string,
+    value: T,
+    options?: StateWriteOptions,
+  ): Promise<void> {
+    await writeAtomic(this.path(namespace, key), serialize(value, options));
   }
 
   async list<T>(namespace: string): Promise<T[]> {
@@ -90,11 +111,20 @@ export class LocalStateStore implements StateStore {
     );
   }
 
-  async create<T>(namespace: string, key: string, value: T): Promise<boolean> {
+  async create<T>(
+    namespace: string,
+    key: string,
+    value: T,
+    options?: StateWriteOptions,
+  ): Promise<boolean> {
     const path = this.path(namespace, key);
     await mkdir(dirname(path), { recursive: true });
     try {
-      await writeFile(path, serialize(value), { encoding: "utf8", flag: "wx", mode: 0o600 });
+      await writeFile(path, serialize(value, options), {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
@@ -109,6 +139,7 @@ export class LocalStateStore implements StateStore {
     key: string,
     expectedRevision: number,
     value: T,
+    options?: StateWriteOptions,
   ): Promise<boolean> {
     const path = this.path(namespace, key);
     return this.withLock(path, async () => {
@@ -116,7 +147,7 @@ export class LocalStateStore implements StateStore {
       if (!current || current.revision !== expectedRevision) {
         return false;
       }
-      await writeAtomic(path, serialize(value));
+      await writeAtomic(path, serialize(value, options));
       return true;
     });
   }
@@ -181,8 +212,13 @@ export class FirestoreStateStore implements StateStore {
     return (snapshot.data() as StoredValue<T>).value;
   }
 
-  async set<T>(namespace: string, key: string, value: T): Promise<void> {
-    await this.document(namespace, key).set(envelope(value));
+  async set<T>(
+    namespace: string,
+    key: string,
+    value: T,
+    options?: StateWriteOptions,
+  ): Promise<void> {
+    await this.document(namespace, key).set(envelope(value, options));
   }
 
   async list<T>(namespace: string): Promise<T[]> {
@@ -198,9 +234,14 @@ export class FirestoreStateStore implements StateStore {
     }));
   }
 
-  async create<T>(namespace: string, key: string, value: T): Promise<boolean> {
+  async create<T>(
+    namespace: string,
+    key: string,
+    value: T,
+    options?: StateWriteOptions,
+  ): Promise<boolean> {
     try {
-      await this.document(namespace, key).create(envelope(value));
+      await this.document(namespace, key).create(envelope(value, options));
       return true;
     } catch (error) {
       const code = firestoreErrorCode(error);
@@ -216,6 +257,7 @@ export class FirestoreStateStore implements StateStore {
     key: string,
     expectedRevision: number,
     value: T,
+    options?: StateWriteOptions,
   ): Promise<boolean> {
     return this.firestore.runTransaction(async (transaction) => {
       const reference = this.document(namespace, key);
@@ -227,7 +269,7 @@ export class FirestoreStateStore implements StateStore {
       if (current.revision !== expectedRevision) {
         return false;
       }
-      transaction.set(reference, envelope(value));
+      transaction.set(reference, envelope(value, options));
       return true;
     });
   }
@@ -251,12 +293,14 @@ export class FirestoreStateStore implements StateStore {
   }
 }
 
-function serialize<T>(value: T): string {
-  return `${JSON.stringify(envelope(value), null, 2)}\n`;
+function serialize<T>(value: T, options?: StateWriteOptions): string {
+  return `${JSON.stringify(envelope(value, options), null, 2)}\n`;
 }
 
-function envelope<T>(value: T): StoredValue<T> {
-  return { schemaVersion: 1, updatedAt: new Date().toISOString(), value };
+function envelope<T>(value: T, options?: StateWriteOptions): StoredValue<T> {
+  const stored: StoredValue<T> = { schemaVersion: 1, updatedAt: new Date().toISOString(), value };
+  if (options?.expireAt) stored.expireAt = options.expireAt;
+  return stored;
 }
 
 function safeNamespace(value: string): string {
