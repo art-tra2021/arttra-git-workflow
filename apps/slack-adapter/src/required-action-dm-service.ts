@@ -143,6 +143,14 @@ export class LifecycleNotifierWithRequiredActionDm implements LifecycleNotifier 
     await this.direct.notifyLifecycle(notification, metadata);
     return result;
   }
+
+  /** 担当付与のように、channel/threadの投稿と独立して決まるDMだけを送る。 */
+  async notifyRequiredActionOnly(
+    notification: LifecycleNotification,
+    metadata: NotificationIntentMetadata,
+  ): Promise<number> {
+    return this.direct.notifyLifecycle(notification, metadata);
+  }
 }
 
 export class WorkNotifierWithRequiredActionDm implements WorkNotifier {

@@ -281,13 +281,15 @@ check_runのsenderはpushした本人で、通常はPR作成者と同じため�
 レビュー依頼は個人reviewerだけへ送り、Issue担当者とGitHub team reviewerはDM対象にしない。
 コメントは本文で明示mentionされた人だけをDM対象にし、threadで参考mentionする担当者やPR作成者、botのコメントはDMしない。
 差し戻し本文のmentionはthreadにだけ残し、DMはPR作成者へ送る。
-Issue作成時の担当者は、初期`assigned`の返信をthreadへ出さず、Issue概要の通知intentから担当DMを派生させるため、`opened`と`assigned`の両方や再配信が来ても一人一件になる。
-一度の操作で担当者を複数追加すると、担当変更の通知が一件にまとまるため、2人目以降の担当DMが欠けることがある。
+Issue作成時の担当者は、初期`assigned`の返信をthreadへ出さず、Issue概要とは別に担当DMを送る。
+担当DMはIssueと担当者の組ごとの永続stateで担当付与を一件と数え、channelやthreadの重複排除に依存しない。
+このため、`opened`と`assigned`の両方、まとめての担当追加、再配信のどれでも一人一件になり、親投稿が別経路で先に作られていても作成時の担当者へ届く。
+担当を外して付け直した場合は、新しい付与として一件送る。
 期限接近、情報通知、成功通知はDM対象にしない。
-DM宛先はchannel通知intentの`metadata.requiredAction`に置き、payload hashの対象外なので既存のchannelまたはthread intentを変えない。
+担当DM以外のDM宛先はchannel通知intentの`metadata.requiredAction`に置き、payload hashの対象外なので既存のchannelまたはthread intentを変えない。
 全担当者とPR作成者はGitHub Projectsの読み取りモデルから宛先計算だけに使い、通知outboxのpayloadへは入れない。
 GitHub loginからSlack user IDへの変換は検証済みmappingだけを使い、表示名やメールから推測しない。
-channel通知intentとSlack user IDの組を独立したoutbox intentにするため、Webhook再送でもDMは増えない。
+channel通知intent（担当DMはIssue、担当者、付与の世代）とSlack user IDの組を独立したoutbox intentにするため、Webhook再送でもDMは増えない。
 DMはHeader Blockを使わず、1行目に依頼内容と依頼元、2行目にIssueまたはPRの番号とタイトルのリンク、3行目に次の操作を置き、「GitHubで開く」ボタンを付ける。
 依頼元は操作したGitHub loginとし、CI失敗と承認待ちはpushした本人ではなくGitHub Checks、work通知はGitHub Projectsの状態または目標日とする。
 fallback textにも1行目と同じ依頼文を入れる。

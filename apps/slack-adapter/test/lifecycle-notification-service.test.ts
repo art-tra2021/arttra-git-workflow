@@ -781,6 +781,140 @@ describe("LifecycleNotificationService", () => {
     }
   });
 
+  test("担当者を一度に複数追加しても、新しい担当者それぞれへ一度だけDMする", async () => {
+    const harness = await createHarness();
+    expect(await harness.service.process(issueOpenedJob())).toBe(1);
+    // gh issue edit --add-assignee reviewer,mentioned は、担当一覧がそろった状態のassignedを2通運ぶ。
+    harness.github.issue = {
+      ...harness.github.issue,
+      assigneeLogins: ["owner", "reviewer", "mentioned"],
+    };
+    const first = issueAssignedJob("merger", 44, "delivery-assign-reviewer");
+    first.payload.assignee = { login: "reviewer" };
+    const second = issueAssignedJob("merger", 44, "delivery-assign-mentioned");
+    second.payload.assignee = { login: "mentioned" };
+
+    expect(await harness.service.process(first)).toBe(1);
+    expect(await harness.service.process(second)).toBe(0);
+    // 同じdeliveryの再処理と、別delivery IDでの再配信。
+    await harness.service.process(first);
+    await harness.service.process(second);
+    await harness.service.process({ ...first, deliveryId: "delivery-assign-reviewer-redo" });
+    await harness.service.process({ ...second, deliveryId: "delivery-assign-mentioned-redo" });
+
+    // 担当変更の返信は従来どおり担当一覧ごとに1件。
+    expect(harness.sent.map((value) => value.notification.kind)).toEqual([
+      "issue-opened",
+      "issue-opened",
+      "issue-assignment-changed",
+    ]);
+    expect(harness.dms).toEqual([
+      { slackUserId: "UOWNER", kind: "assigned", notificationKind: "issue-opened" },
+      { slackUserId: "UREVIEWER", kind: "assigned", notificationKind: "issue-assignment-changed" },
+      { slackUserId: "UMENTIONED", kind: "assigned", notificationKind: "issue-assignment-changed" },
+    ]);
+
+    // 1人ずつ追加した場合も同じ件数になる。
+    const oneByOne = await createHarness();
+    expect(await oneByOne.service.process(issueOpenedJob())).toBe(1);
+    oneByOne.github.issue = { ...oneByOne.github.issue, assigneeLogins: ["owner", "reviewer"] };
+    expect(await oneByOne.service.process(first)).toBe(1);
+    oneByOne.github.issue = {
+      ...oneByOne.github.issue,
+      assigneeLogins: ["owner", "reviewer", "mentioned"],
+    };
+    expect(await oneByOne.service.process(second)).toBe(1);
+    expect(oneByOne.dms).toEqual(harness.dms);
+  });
+
+  test("担当を外して付け直すと新しい付与として一度だけDMし、再配信では増やさない", async () => {
+    const harness = await createHarness();
+    expect(await harness.service.process(issueOpenedJob())).toBe(1);
+    const assigned = issueAssignedJob("merger", 44, "delivery-assign-reviewer");
+    assigned.payload.assignee = { login: "reviewer" };
+    const unassigned = issueAssignedJob("merger", 44, "delivery-unassign-reviewer");
+    unassigned.payload.action = "unassigned";
+    unassigned.payload.assignee = { login: "reviewer" };
+    const reassigned = { ...assigned, deliveryId: "delivery-reassign-reviewer" };
+
+    harness.github.issue = { ...harness.github.issue, assigneeLogins: ["owner", "reviewer"] };
+    await harness.service.process(assigned);
+    harness.github.issue = { ...harness.github.issue, assigneeLogins: ["owner"] };
+    await harness.service.process(unassigned);
+    // 解除後に古いassignedが再配信されても、現在の担当でないので送らない。
+    await harness.service.process({ ...assigned, deliveryId: "delivery-assign-late-redo" });
+    harness.github.issue = { ...harness.github.issue, assigneeLogins: ["owner", "reviewer"] };
+    await harness.service.process(reassigned);
+    await harness.service.process({ ...reassigned, deliveryId: "delivery-reassign-redo" });
+    // 付け直した後に古いunassignedが再配信されても、現在の付与は終わらない。
+    await harness.service.process({ ...unassigned, deliveryId: "delivery-unassign-late-redo" });
+    await harness.service.process({ ...reassigned, deliveryId: "delivery-reassign-redo-2" });
+
+    const reviewerDms = harness.dmDetails.filter((_, index) => {
+      return harness.dms[index]?.slackUserId === "UREVIEWER";
+    });
+    expect(reviewerDms).toHaveLength(2);
+    // 付与ごとに別のDM intentになる。
+    expect(new Set(reviewerDms.map((value) => value.intentId)).size).toBe(2);
+  });
+
+  test("作成時の担当者へ後からassignedが届いてもDMは一件のまま", async () => {
+    const harness = await createHarness();
+    harness.github.issue = { ...harness.github.issue, assigneeLogins: ["owner", "reviewer"] };
+    const ownerAssigned = issueAssignedJob("requester", 44, "delivery-initial-owner");
+    ownerAssigned.payload.assignee = { login: "owner" };
+    const reviewerAssigned = issueAssignedJob("requester", 44, "delivery-initial-reviewer");
+    reviewerAssigned.payload.assignee = { login: "reviewer" };
+
+    await harness.service.process(issueOpenedJob());
+    await harness.service.process(ownerAssigned);
+    await harness.service.process(reviewerAssigned);
+    await harness.service.process({ ...reviewerAssigned, deliveryId: "delivery-initial-redo" });
+
+    expect(harness.sent.map((value) => value.notification.kind)).toEqual([
+      "issue-opened",
+      "issue-opened",
+    ]);
+    expect(harness.dms).toEqual([
+      { slackUserId: "UOWNER", kind: "assigned", notificationKind: "issue-opened" },
+      { slackUserId: "UREVIEWER", kind: "assigned", notificationKind: "issue-opened" },
+    ]);
+  });
+
+  test("操作者本人が自分を担当にした場合は、一度に複数追加しても本人へDMしない", async () => {
+    const harness = await createHarness();
+    expect(await harness.service.process(issueOpenedJob())).toBe(1);
+    harness.github.issue = { ...harness.github.issue, assigneeLogins: ["owner", "reviewer"] };
+    const selfAssigned = issueAssignedJob("reviewer", 44, "delivery-self-assign");
+
+    expect(await harness.service.process(selfAssigned)).toBe(1);
+    await harness.service.process({ ...selfAssigned, deliveryId: "delivery-self-assign-redo" });
+
+    expect(harness.dms.filter((value) => value.slackUserId === "UREVIEWER")).toEqual([]);
+  });
+
+  test("Work親投稿が先に別経路で作られていても、Work作成時の担当者へDMする", async () => {
+    const harness = await createHarness();
+    harness.github.parentIssue = { ...harness.github.parentIssue, assigneeLogins: ["reviewer"] };
+
+    // Taskの概要が先に処理され、親Workのrootを作る。
+    expect(await harness.service.process(issueOpenedJob())).toBe(1);
+    const sentBeforeWork = harness.sent.length;
+    expect(await harness.service.process(issueOpenedJob(86, "delivery-work-open"))).toBe(1);
+    await harness.service.process(issueOpenedJob(86, "delivery-work-open-redo"));
+
+    // Workの概要はroot作成済みなので投稿されないが、担当DMは届く。
+    expect(harness.sent).toHaveLength(sentBeforeWork);
+    expect(harness.dms).toEqual([
+      { slackUserId: "UOWNER", kind: "assigned", notificationKind: "issue-opened" },
+      { slackUserId: "UREVIEWER", kind: "assigned", notificationKind: "issue-opened" },
+    ]);
+    expect(harness.dmDetails.map((value) => value.resourceUrl)).toEqual([
+      "https://github.example/example/repo/issues/44",
+      "https://github.example/example/repo/issues/86",
+    ]);
+  });
+
   test("作成者本人だけが担当のIssueは作成時の担当DMを送らない", async () => {
     const harness = await createHarness();
     harness.github.issue = { ...harness.github.issue, assigneeLogins: ["requester"] };
@@ -848,6 +982,7 @@ async function createHarness(
     kind: string | undefined;
     notificationKind: LifecycleNotification["kind"];
   }> = [];
+  const dmDetails: Array<{ resourceUrl: string; intentId: string | undefined }> = [];
   // channel/thread通知の記録はDM wrapperの有無で変わらない。DMは別配列へ記録する。
   const notifier = new LifecycleNotifierWithRequiredActionDm(
     {
@@ -864,6 +999,7 @@ async function createHarness(
             kind: metadata?.requiredAction?.kind,
             notificationKind: notification.kind,
           });
+          dmDetails.push({ resourceUrl: notification.resource.url, intentId: metadata?.intentId });
           return { messageTs: "990.1" };
         },
       },
@@ -883,7 +1019,7 @@ async function createHarness(
     allowedRepositories,
     githubCapabilities,
   );
-  return { service, github, sent, dms };
+  return { service, github, sent, dms, dmDetails };
 }
 
 class FakeLifecycleClient implements GitHubLifecycleClient {

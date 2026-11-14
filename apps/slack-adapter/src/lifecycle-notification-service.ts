@@ -20,6 +20,7 @@ import type { StateStore } from "./state-store.ts";
 
 const NOTIFICATION_NAMESPACE = "lifecycle-notification";
 const ISSUE_CREATION_SETUP_NAMESPACE = "issue-creation-setup";
+const ASSIGNMENT_DM_NAMESPACE = "assignment-dm";
 const LIFECYCLE_EVENTS = new Set([
   "issues",
   "issue_comment",
@@ -100,6 +101,15 @@ export interface LifecycleNotifier {
     threadTs: string | null,
     metadata?: NotificationIntentMetadata,
   ): Promise<ThreadMessageResult>;
+  /**
+   * channel/threadへ投稿せず、metadata.requiredActionの対応必須DMだけを送る。
+   * metadata.intentIdはDM intentを決める鍵であり、channel/thread intentとは共有しない。
+   * DM経路を持たないnotifierは実装しない。
+   */
+  notifyRequiredActionOnly?(
+    notification: LifecycleNotification,
+    metadata: NotificationIntentMetadata,
+  ): Promise<number>;
 }
 
 export type ResolveLifecycleSlackUserId = (githubLogin: string) => Promise<string | null>;
@@ -131,6 +141,19 @@ interface IssueCreationSetupState {
    * 担当変更の返信と担当DMを重ねないために残す。旧stateでは欠落し得る。
    */
   consumedAssigneeLogins?: string[];
+}
+
+/**
+ * Issueと担当者の組ごとの担当DM状態。activeの間は同じ担当付与とみなしてDMを重ねない。
+ * 解除でactiveを外し、次の付与ではgenerationを進めて別のDM intentにする。
+ */
+interface AssignmentDmState {
+  schemaVersion: 1;
+  revision: number;
+  issueUrl: string;
+  assigneeLogin: string;
+  active: boolean;
+  generation: number;
 }
 
 export class LifecycleNotificationService {
@@ -232,26 +255,32 @@ export class LifecycleNotificationService {
       }
       if (action === "unassigned") {
         await this.discardInitialAssignee(issue.url, assignee);
+        await this.endAssignmentDm(issue, assignee);
       }
-      return (
-        opened +
-        (await this.send(
-          issue,
-          null,
-          "issue-assignment-changed",
-          actor,
-          [...issue.assigneeLogins, issue.authorLogin],
-          "Issueの担当者が変更されました。",
-          `現在の担当: ${issue.assigneeLogins.map((login) => `@${login}`).join("、") || "未設定"}`,
-          "担当と次の操作を確認する",
-          issue.url,
-          fingerprint({ action, assignees: issue.assigneeLogins }),
-          job.deliveryId,
-          null,
-          null,
-          action === "assigned" ? { kind: "assigned", recipientLogins: [assignee] } : null,
-        ))
+      // 担当変更の返信は担当一覧でまとめる。担当DMは付与された人ごとに別経路で送る。
+      const changed = await this.send(
+        issue,
+        null,
+        "issue-assignment-changed",
+        actor,
+        [...issue.assigneeLogins, issue.authorLogin],
+        "Issueの担当者が変更されました。",
+        assignmentChangedDetail(issue),
+        ASSIGNMENT_CHANGED_NEXT_ACTION,
+        issue.url,
+        fingerprint({ action, assignees: issue.assigneeLogins }),
+        job.deliveryId,
       );
+      if (action === "assigned") {
+        await this.notifyAssignmentDm(
+          issue,
+          assignee,
+          actor,
+          "issue-assignment-changed",
+          job.deliveryId,
+        );
+      }
+      return opened + changed;
     }
     if (action === "labeled" && nestedString(payload, "label", "name") === "merge/self") {
       return this.notifySelfMergeScheduled(issue, repository, actor, job);
@@ -734,8 +763,9 @@ export class LifecycleNotificationService {
   /**
    * notifyInitialAssigneesは、Issue作成のwebhook（opened、作成直後のassigned/unassigned）から
    * 呼ぶときだけtrueにする。コメントやPR等から後追いで概要を作るときは、担当DMを送らない。
-   * 初期担当者のassignment返信は概要へ吸収するため、担当DMはissue-opened intentから派生させる。
-   * DM intentはissue-opened intentと宛先から決まるので、opened/assignedの両方や再配信でも1件になる。
+   * 初期担当者のassignment返信は概要へ吸収し、担当DMは担当付与ごとのstateで送る。
+   * 親投稿が別経路で先に作られ、概要の投稿が省かれた場合も担当DMは送られる。
+   * 初期担当者の付与はここでactiveになるので、後から届くassignedや再配信でも1人1件になる。
    */
   private async ensureIssueOpened(
     issue: GitHubIssueContext,
@@ -756,9 +786,6 @@ export class LifecycleNotificationService {
       issue.url,
       issueOpenedEventFingerprint(issue),
       sourceDeliveryId,
-      null,
-      null,
-      initialAssignees.length > 0 ? { kind: "assigned", recipientLogins: initialAssignees } : null,
     );
     if (opened > 0) {
       await this.store.create<IssueCreationSetupState>(ISSUE_CREATION_SETUP_NAMESPACE, issue.url, {
@@ -768,8 +795,101 @@ export class LifecycleNotificationService {
         pendingAssigneeLogins: uniqueNormalizedLogins(issue.assigneeLogins),
         consumedAssigneeLogins: [],
       });
+      for (const login of initialAssignees) {
+        await this.notifyAssignmentDm(
+          issue,
+          login,
+          issueRootActorLogin(issue),
+          "issue-opened",
+          sourceDeliveryId,
+        );
+      }
     }
     return opened;
+  }
+
+  /**
+   * 担当付与ごとに、channel/threadの重複排除とは別の永続stateで担当DMを1件だけ送る。
+   * 担当変更の返信は担当一覧のfingerprintでまとまるため、一度に複数人を追加すると
+   * 2通目以降のassignedは返信を作らない。DMは付与された人ごとに判定するので、
+   * まとめて追加しても1人ずつ追加しても1人1件になる。
+   * DM intentはIssue、担当者、付与の世代から決まるため、再配信や並行処理でも同じintentになる。
+   */
+  private async notifyAssignmentDm(
+    issue: GitHubIssueContext,
+    assigneeLogin: string,
+    actorLogin: string,
+    kind: "issue-opened" | "issue-assignment-changed",
+    sourceDeliveryId: string,
+  ): Promise<void> {
+    if (!this.notifier.notifyRequiredActionOnly) return;
+    const assignee = assigneeLogin.toLowerCase();
+    if (assignee === actorLogin.toLowerCase()) return;
+    // 解除後に古いassignedが再配信されても、現在の担当でなければ送らない。
+    if (!issue.assigneeLogins.some((login) => login.toLowerCase() === assignee)) return;
+    const key = assignmentDmKey(issue.url, assignee);
+    const [assigneeSlackUserId, actorSlackUserId] = await Promise.all([
+      this.resolveSlackUserId(assigneeLogin),
+      this.resolveSlackUserId(actorLogin),
+    ]);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await this.store.get<AssignmentDmState>(ASSIGNMENT_DM_NAMESPACE, key);
+      if (current?.active) return;
+      const generation = (current?.generation ?? 0) + 1;
+      if (assigneeSlackUserId) {
+        // stateより先に送る。保存前に落ちても、再処理は同じ世代の同じintentへまとまる。
+        await this.notifier.notifyRequiredActionOnly(
+          assignmentDmNotification(issue, kind, actorLogin),
+          {
+            intentId: notificationIntentId({
+              kind: "assignment-dm",
+              resourceUrl: issue.url,
+              assigneeLogin: assignee,
+              generation,
+              schemaVersion: 1,
+            }),
+            sourceDeliveryId,
+            requiredAction: {
+              kind: "assigned",
+              recipientSlackUserIds: [assigneeSlackUserId],
+              actorSlackUserId,
+            },
+          },
+        );
+      }
+      const next: AssignmentDmState = {
+        schemaVersion: 1,
+        revision: (current?.revision ?? 0) + 1,
+        issueUrl: issue.url,
+        assigneeLogin: assignee,
+        active: true,
+        generation,
+      };
+      const saved = current
+        ? await this.store.compareAndSet(ASSIGNMENT_DM_NAMESPACE, key, current.revision, next)
+        : await this.store.create(ASSIGNMENT_DM_NAMESPACE, key, next);
+      if (saved) return;
+    }
+    throw new Error("担当DMの状態が競合しました。");
+  }
+
+  /**
+   * 担当解除で付与を終わらせ、次のassignedを新しい付与として扱う。
+   * 付け直した後に古いunassignedが届いた場合は、現在の担当なので終わらせない。
+   */
+  private async endAssignmentDm(issue: GitHubIssueContext, assigneeLogin: string): Promise<void> {
+    const assignee = assigneeLogin.toLowerCase();
+    if (issue.assigneeLogins.some((login) => login.toLowerCase() === assignee)) return;
+    const key = assignmentDmKey(issue.url, assignee);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await this.store.get<AssignmentDmState>(ASSIGNMENT_DM_NAMESPACE, key);
+      if (!current?.active) return;
+      const next: AssignmentDmState = { ...current, revision: current.revision + 1, active: false };
+      if (await this.store.compareAndSet(ASSIGNMENT_DM_NAMESPACE, key, current.revision, next)) {
+        return;
+      }
+    }
+    throw new Error("担当DMの状態が競合しました。");
   }
 
   private async consumeInitialAssignee(issueUrl: string, assigneeLogin: string): Promise<boolean> {
@@ -925,6 +1045,40 @@ export function issueRootNotification(
 
 export function issueRootMentionLogins(issue: GitHubIssueContext): string[] {
   return withoutLogin([issue.authorLogin, ...issue.assigneeLogins], issueRootActorLogin(issue));
+}
+
+const ASSIGNMENT_CHANGED_NEXT_ACTION = "担当と次の操作を確認する";
+
+function assignmentChangedDetail(issue: GitHubIssueContext): string {
+  return `現在の担当: ${issue.assigneeLogins.map((login) => `@${login}`).join("、") || "未設定"}`;
+}
+
+function assignmentDmKey(issueUrl: string, assigneeLogin: string): string {
+  return `${issueUrl}:${assigneeLogin}`;
+}
+
+/** 担当DMの本文。作成時の担当はIssue概要、後からの担当は担当変更と同じ内容にする。 */
+function assignmentDmNotification(
+  issue: GitHubIssueContext,
+  kind: "issue-opened" | "issue-assignment-changed",
+  actorLogin: string,
+): LifecycleNotification {
+  if (kind === "issue-opened") return issueRootNotification(issue, [], null);
+  return {
+    schemaVersion: 1,
+    kind,
+    resource: issueResource(issue),
+    pullRequest: null,
+    actorLogin,
+    actorSlackUserId: null,
+    slackUserIds: [],
+    issueType: issueNotificationType(issue),
+    summary: "Issueの担当者が変更されました。",
+    detail: assignmentChangedDetail(issue),
+    nextAction: ASSIGNMENT_CHANGED_NEXT_ACTION,
+    actionUrl: issue.url,
+    selfMergeControl: null,
+  };
 }
 
 /** 作成者本人（Issue作成者と検証済み依頼者）が自分を担当にしても、担当DMは送らない。 */

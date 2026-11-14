@@ -63,6 +63,45 @@ describe("RequiredActionDmService", () => {
     expect(directRecipients).toEqual(["UREVIEWER"]);
   });
 
+  test("DMだけの送信はchannel/threadへ投稿せず、渡された鍵から決まるDM intentを使う", async () => {
+    const order: string[] = [];
+    const intentIds: string[] = [];
+    const primary = lifecycleNotifier(async () => {
+      order.push("channel");
+      return { messageTs: "100.1" };
+    });
+    const direct = new RequiredActionDmService((slackUserId) => ({
+      lifecycle: lifecycleNotifier(async (_value, threadTs, metadata) => {
+        order.push(`dm:${slackUserId}`);
+        expect(threadTs).toBeNull();
+        intentIds.push(metadata?.intentId ?? "");
+        return { messageTs: "200.1" };
+      }),
+      work: workNotifier(),
+    }));
+    const notifier = new LifecycleNotifierWithRequiredActionDm(primary, direct);
+    const metadata = {
+      intentId: "notification-assignment-grant",
+      sourceDeliveryId: "delivery-1",
+      requiredAction: {
+        kind: "assigned" as const,
+        recipientSlackUserIds: ["UACTOR", "UOWNER"],
+        actorSlackUserId: "UACTOR",
+      },
+    };
+
+    expect(
+      await notifier.notifyRequiredActionOnly(
+        notification("issue-assignment-changed", []),
+        metadata,
+      ),
+    ).toBe(1);
+    await notifier.notifyRequiredActionOnly(notification("issue-assignment-changed", []), metadata);
+
+    expect(order).toEqual(["dm:UOWNER", "dm:UOWNER"]);
+    expect(new Set(intentIds).size).toBe(1);
+  });
+
   test.each(["review-requested", "approval-wait", "ci-failed"] as const)(
     "%sをDM対象にする",
     async (kind) => {
