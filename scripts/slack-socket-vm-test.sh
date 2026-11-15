@@ -31,6 +31,7 @@ if [[ "$1 $2 $3" == "run services describe" ]]; then
       env: [
         {name: "AR_SLACK_TRANSPORT", value: "http"},
         {name: "AR_STATE_BACKEND", value: "firestore"},
+        {name: "AR_SCHEDULER", value: "off"},
         {name: "PORT", value: "8080"},
         {name: "AR_GITHUB_CAPABILITY_GRANTS_JSON", value: "{\"octocat\":[\"x\"]}"},
         {name: "SLACK_BOT_TOKEN", valueFrom: {secretKeyRef: {name: "bot-token", key: "latest"}}},
@@ -94,6 +95,8 @@ jq -e \
     and .target.secrets.SLACK_APP_TOKEN == "arttra-work-slack-app-token"
     and (.target.secrets | has("SLACK_SIGNING_SECRET")) == false
     and .appToken.ready == false
+    and .target.vmEnv == {AR_SCHEDULER: "inprocess"}
+    and ([.target.envNames[] | select(. == "AR_SCHEDULER")] | length) == 1
     and has("config") == false' \
 	<<<"${ar_preview}" >/dev/null
 if grep -Eq 'secrets versions access' "${FAKE_GCLOUD_LOG}"; then
@@ -144,6 +147,34 @@ if grep -q 'SLACK_SIGNING_SECRET' "${FAKE_METADATA_DIR}/arttra-slack-secrets"; t
 	exit 1
 fi
 cmp -s apps/slack-adapter/deploy/socket-vm/cloud-init.yaml "${FAKE_METADATA_DIR}/user-data"
+# VM専用の上書き（vm-overrides.conf）は、Cloud Runから引き継いだ同名の値を置き換える。
+[[ "$(grep -c '^AR_SCHEDULER=' "${FAKE_METADATA_DIR}/arttra-slack-env")" -eq 1 ]]
+grep -Fqx 'AR_SCHEDULER=inprocess' "${FAKE_METADATA_DIR}/arttra-slack-env"
+
+# --envはその配備だけファイルの値を上書きする。
+bash scripts/slack-socket-vm.sh deploy --env AR_SCHEDULER=off --env AR_EXTRA_FLAG=a=b --yes >/dev/null
+[[ "$(grep -c '^AR_SCHEDULER=' "${FAKE_METADATA_DIR}/arttra-slack-env")" -eq 1 ]]
+grep -Fqx 'AR_SCHEDULER=off' "${FAKE_METADATA_DIR}/arttra-slack-env"
+grep -Fqx 'AR_EXTRA_FLAG=a=b' "${FAKE_METADATA_DIR}/arttra-slack-env"
+grep -Fqx 'AR_SLACK_TRANSPORT=socket' "${FAKE_METADATA_DIR}/arttra-slack-env"
+
+# 上書きファイルが無ければ、Cloud Runの値をそのまま引き継ぐ。
+AR_SOCKET_VM_OVERRIDES_FILE="${ar_test_root}/missing.conf" \
+	bash scripts/slack-socket-vm.sh deploy --yes >/dev/null
+grep -Fqx 'AR_SCHEDULER=off' "${FAKE_METADATA_DIR}/arttra-slack-env"
+
+# transport、PORT、secret、不正な名前は上書きできない。
+for ar_bad_env in AR_SLACK_TRANSPORT=http PORT=1 SLACK_APP_TOKEN=x SLACK_BOT_TOKEN=x lower=x 'AR_SCHEDULER'; do
+	: >"${FAKE_GCLOUD_LOG}"
+	if bash scripts/slack-socket-vm.sh deploy --env "${ar_bad_env}" --yes >/dev/null 2>&1; then
+		printf 'VM env override must be rejected: %s\n' "${ar_bad_env}" >&2
+		exit 1
+	fi
+	if grep -Eq '^compute instances (create|add-metadata|reset|start)' "${FAKE_GCLOUD_LOG}"; then
+		printf 'rejected VM env override must not mutate: %s\n' "${ar_bad_env}" >&2
+		exit 1
+	fi
+done
 
 # 既存VMはmetadataを更新してresetし、--imageで戻し先を指定できる。
 export FAKE_VM_STATUS=RUNNING
@@ -197,5 +228,30 @@ if bash scripts/slack-socket-vm.sh stop >/dev/null 2>&1; then
 	printf 'stop without --yes must fail\n' >&2
 	exit 1
 fi
+
+# vm-overrides.confが壊れていても、statusとstopは動く。previewとdeployは拒否する。
+ar_broken_overrides="${ar_test_root}/broken.conf"
+printf 'not a valid line\n' >"${ar_broken_overrides}"
+export AR_SOCKET_VM_OVERRIDES_FILE="${ar_broken_overrides}"
+ar_status="$(bash scripts/slack-socket-vm.sh status)"
+jq -e '.action == "status" and .healthy == true' <<<"${ar_status}" >/dev/null
+: >"${FAKE_GCLOUD_LOG}"
+ar_stop="$(bash scripts/slack-socket-vm.sh stop --yes)"
+jq -e '.action == "stop" and .vm == "arttra-work-slack-socket"' <<<"${ar_stop}" >/dev/null
+grep -Eq '^compute instances stop arttra-work-slack-socket ' "${FAKE_GCLOUD_LOG}"
+if bash scripts/slack-socket-vm.sh preview >/dev/null 2>&1; then
+	printf 'preview must reject a broken vm-overrides.conf\n' >&2
+	exit 1
+fi
+: >"${FAKE_GCLOUD_LOG}"
+if bash scripts/slack-socket-vm.sh deploy --yes >/dev/null 2>&1; then
+	printf 'deploy must reject a broken vm-overrides.conf\n' >&2
+	exit 1
+fi
+if grep -Eq '^compute instances (create|add-metadata|reset|start)' "${FAKE_GCLOUD_LOG}"; then
+	printf 'deploy with a broken vm-overrides.conf must not mutate\n' >&2
+	exit 1
+fi
+unset AR_SOCKET_VM_OVERRIDES_FILE
 
 printf 'slack-socket-vm tests passed\n'
