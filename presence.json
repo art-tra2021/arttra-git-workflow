@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "repository": "art-tra2021/arttra-git-workflow",
+  "actor": "roz",
+  "device": "device-1794667823782-31734",
+  "branch": "feature/192-daily-diff-digest-roz",
+  "head": "609a3857cf9dea9d397ecb08f9f997d3136b58df",
+  "observed_at_unix_ms": 1794715242563,
+  "files": [
+    {
+      "path": "apps/slack-adapter/README.md",
+      "committed": true,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/deploy/socket-vm/vm-overrides.conf",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/github-app.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/github-cli.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/job-scheduler.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/notification-outbox.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/project-read-model.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/required-action-dm-service.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-work-notifier.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/start.ts",
+      "committed": true,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/state-store.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/types.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/work-diff-digest.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/work-notification-service.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/job-scheduler.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/state-store.test.ts",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/work-diff-digest.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "docs/project-canvas-sync-runbook.md",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "docs/slack-pr-notification-runbook.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "docs/slack-socket-vm-runbook.md",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "docs/workflow-v2.md",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/slack-socket-vm-test.sh",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/slack-socket-vm.sh",
+      "committed": false,
+      "staged": true,
+      "unstaged": false,
+      "untracked": false
+    }
+  ]
+}
