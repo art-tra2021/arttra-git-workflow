@@ -348,6 +348,11 @@ export function createSlackApp(
       }
       return;
     }
+    if (!isTaskCommand(normalized)) {
+      // `/ar`単体や打ち間違いを自分の仕事の表示へ流さず、使えるコマンドを示す。
+      await respond({ response_type: "ephemeral", text: arCommandHelp(command.text) });
+      return;
+    }
     const items = await dependencies.loadWorkItems(command.user_id);
     const visible = items.filter((item) => item.delivery !== "silent");
 
@@ -924,6 +929,26 @@ export function parseIssueUrl(value: string): { repository: string; number: numb
     return null;
   }
   return { repository: match[1], number: Number(match[2]) };
+}
+
+/** 自分の仕事を表示するのは`/ar task`だけにする。`/ar`単体や打ち間違いは一覧表示へ回す。 */
+export function isTaskCommand(normalizedText: string): boolean {
+  return normalizedText === "task";
+}
+
+/** `/ar`で使えるコマンドを種別ごとに示す。解釈できない語が付いていればその旨を先に書く。 */
+export function arCommandHelp(text: string): string {
+  const value = text.trim();
+  const lines = [
+    ...(value ? [`\`/ar ${value}\` というコマンドはありません。`, ""] : []),
+    "*`/ar` で使えるコマンド*",
+    "• 仕事を見る: `/ar task`（自分が次にやる仕事）",
+    "• Issueを作る: `/ar new`",
+    "• 一覧を作る・更新する: `/ar project`（自分用のSlack List）、`/ar canvas`（自分用のCanvas）。後ろに `all` か `repo owner/name` を付けると範囲を変えられる",
+    "• アカウントの連携: `/ar connect github`、`/ar disconnect github`",
+    "• 承認の確認: `/ar approval <ID>`",
+  ];
+  return lines.join("\n");
 }
 
 export function parseProjectProjectionCommand(
