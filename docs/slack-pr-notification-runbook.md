@@ -18,7 +18,7 @@ Slackは正本ではなく、GitHub IssuesとGitHub Projectsを人間が追い�
 
 - 停止ボタン付きのセルフマージ予定の警告
 - 急ぎで未割当（Projectsで未着手・緊急かつ担当者なし）の仕事。Taskも含む
-- 日次digest
+- 日次digest（`AR_DIGEST_MODE`で一覧と前日からの差分を切り替える。下記「日次digest」）
 - 対応必須の出来事で、DMを送れない宛先（GitHub未連携の人、GitHub team reviewer）がいる場合の知らせ
 - 担当者のいないblockerと期限超過、PR作成者が分からないconflict（DMの宛先がなく誰にも届かないため）
 
@@ -29,6 +29,45 @@ DMを送れる宛先には、channelへの投稿の有無にかかわらずDMだ
 
 `thread`へ戻す場合は、環境変数を`thread`にしてdeployする。
 処理済みの出来事は通知方式によらず同じ`lifecycle-notification` stateで判定するため、切り替えの前後で同じ出来事を二度送らない。
+
+### 日次digest
+
+日次digestの中身は、環境変数`AR_DIGEST_MODE`で決まる。
+`list`（未設定時の既定）は、その時点の未完了作業を最大20行の一覧として投稿する。
+`diff`は、ART-TRA Work（Project #8）の前回のスナップショットからの変化だけを、Work・Businessごとにまとめて投稿する。
+本番はいま`list`で、`diff`への切り替えは後で行う。
+`list`と`diff`以外の値では、adapterは起動しない。
+判定の規則、並び、件数の上限は`apps/slack-adapter/README.md`の日次digestの節にある。
+
+`diff`はGitHub Project経由の取得を前提にするため、`AR_GITHUB_PROJECT_OWNER`と`AR_GITHUB_PROJECT_NUMBER`が無ければadapterは起動しない。
+
+`diff`で使うFirestoreの状態は次の3つである。
+
+| collection（namespace） | key | 中身 |
+| --- | --- | --- |
+| `work-digest-snapshot` | JSTの日付（例: `2026-11-14`） | 比較の基準にしたスナップショット（正規化した項目の一覧と、その比較元の日付） |
+| `work-digest-snapshot-pointer` | `latest` | 比較の基準の日付、その日に基準を進めた理由、送信結果を確かめていない投稿（`pending`） |
+| `work-diff-digest` | `日付#試行番号`（例: `2026-11-14#1`） | 投稿する差分の中身、intent ID、基準にする予定のスナップショット、`pending`・`sent`・`superseded` |
+
+`diff`へ切り替えた最初の実行は投稿せず、基準のスナップショットだけを保存する。差分の投稿は次の日の実行から始まる。
+変化のない日も投稿しない。
+基準は、投稿が通知outboxで`sent`になった時と、投稿が要らないと判断した時（初回、変化なし）にだけ進む。
+同じ日の再実行は、基準を進めた後なら何もしない。
+
+送信に失敗した日の扱いは次のとおり。
+
+- Slackが確実に受け付けなかった（outboxが`failed`）場合と、前日以前に送れずに残った記録は、送り直さない。次の実行（同じ日でも翌日でも）が、最後に成功した基準から失敗した日の分を含めた差分を作り、今回の日付で一度だけ投稿する。残った記録は`superseded`になる。
+- `superseded`の記録のintentは、通知outboxの監査に`failed`や期限切れの未送信として出ても再送（replay）しない。その中身は次の投稿に含まれている。
+- 送れたか分からない（outboxが`needs_review`、または`sending`のまま）場合は、二重に投稿しないよう、以後の実行は投稿せずに失敗し続ける。ほかの通知と同じく通知outboxを監査し、Slackと照合して復旧する。`sent`になれば、次の実行がその投稿を基準にして続きを出す。
+- Slackへの投稿後に記録の更新だけが失敗した場合は、次の実行がoutboxの`sent`を見て基準を進める。送り直さない。
+
+取得結果が一時的に欠けた日（前回10件以上で、「Projectから外れた」が前回の30%以上、または未完了が前回の半分未満）は、投稿も基準の更新もしない。
+Cloud Runのログに「差分digestを投稿せず、比較の基準（日付）も進めませんでした」が出る。
+GitHub Appの権限とProject #8の項目を確かめ、取得が戻れば次の実行が欠ける前の基準と比べる。
+
+`diff`から`list`へ戻す場合は、環境変数を`list`にしてdeployする。
+`diff`用の状態は消さずに残してよい。再び`diff`にすると、最後に進めた基準との差分から再開する。
+間が何日も空いた場合は、その間の変化がまとめて1回分の差分になる。
 
 以下の「スレッド規則」と「視覚ルール」のうちthreadとmentionに関する記述、2026-08-04と2026-08-05の証跡は、`thread`の動作である。
 
@@ -315,4 +354,5 @@ Issueと障害記録へrollback理由、対象revision、image、health commit�
 別スレッドへ分かれた場合は、PR本文のclosing Task、そのTaskのnative parent、`work-thread` stateのWorkまたはBusiness URLを確認する。
 メンションされない場合は、対象者がSlackからGitHub OAuth連携を完了しているか確認する。
 channelへ出ると想定した投稿が無い場合は、まず`AR_SLACK_NOTIFICATION_MODE`の値を確認する。`direct`では、セルフマージ警告、急ぎの未割当、日次digest、DMを送れない宛先への知らせ以外はchannelへ出ない。
+日次digestが出ない場合は、`AR_DIGEST_MODE`の値を確認する。`diff`では、初回と変化のない日は投稿しない。`/internal/work-digest`の応答の`itemCount`が0なら投稿していない。`work-digest-snapshot-pointer`の`latest`と、その日の`work-diff-digest`を見て、初回か、変化なしか、投稿済みか、送信待ち（`pending`）かを切り分ける。ログに欠落ガードの警告が出ていれば、取得結果が欠けた日として投稿を見送っている。
 DMを送れない宛先への知らせが出るはずなのに無い場合は、宛先のGitHub loginが`[bot]`で終わっていないか、コメントのmentionがcode blockの中にないかを確認する。

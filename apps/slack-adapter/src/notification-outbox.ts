@@ -3,6 +3,7 @@ import type { LifecycleNotification, LifecycleNotifier } from "./lifecycle-notif
 import { RetryableWorkError } from "./retryable-error.ts";
 import type { StateStore } from "./state-store.ts";
 import type { HumanWorkItem } from "./types.ts";
+import type { WorkDiffDigest } from "./work-diff-digest.ts";
 import type {
   WorkNotificationContext,
   WorkNotificationResult,
@@ -78,10 +79,19 @@ interface WorkDigestPayload {
   metadata: NotificationIntentMetadata;
 }
 
+/** 前日からの差分digest。既存のwork-digestとは別の種別にし、既存intentの中身を変えない。 */
+interface WorkDiffDigestPayload {
+  schemaVersion: 1;
+  kind: "work-diff-digest";
+  digest: WorkDiffDigest;
+  metadata: NotificationIntentMetadata;
+}
+
 export type NotificationPayload =
   | LifecycleNotificationPayload
   | WorkNotificationPayload
-  | WorkDigestPayload;
+  | WorkDigestPayload
+  | WorkDiffDigestPayload;
 
 export interface NotificationReconciliation {
   schemaVersion: 1;
@@ -747,7 +757,10 @@ export class DelegatingNotificationPayloadSender implements NotificationPayloadS
   }
 
   async send(payload: NotificationPayload): Promise<NotificationSendResult> {
-    const delivery = payload.kind === "work-digest" ? undefined : payload.delivery;
+    const delivery =
+      payload.kind === "work-digest" || payload.kind === "work-diff-digest"
+        ? undefined
+        : payload.delivery;
     const target = delivery
       ? this.createDirectNotifiers?.(delivery.slackUserId)
       : { lifecycle: this.lifecycle, work: this.work };
@@ -772,6 +785,15 @@ export class DelegatingNotificationPayloadSender implements NotificationPayloadS
       }
       case "work-digest":
         await this.work.digest(payload.items, payload.metadata);
+        return { messageTs: null };
+      case "work-diff-digest":
+        if (!this.work.diffDigest) {
+          throw new NotificationOutboxError(
+            "notification_diff_digest_sender_required",
+            "差分digestの送信先がないため、送信を停止しました。",
+          );
+        }
+        await this.work.diffDigest(payload.digest, payload.metadata);
         return { messageTs: null };
     }
   }
@@ -865,6 +887,25 @@ export class OutboxWorkNotifier implements WorkNotifier {
       metadata,
     };
     await this.outbox.deliver({ metadata, payload });
+  }
+
+  async diffDigest(
+    digest: WorkDiffDigest,
+    metadata: NotificationIntentMetadata = {
+      intentId: notificationIntentId({ kind: "work-diff-digest", date: digest.date }),
+    },
+  ): Promise<void> {
+    const payload: WorkDiffDigestPayload = {
+      schemaVersion: 1,
+      kind: "work-diff-digest",
+      digest,
+      metadata,
+    };
+    await this.outbox.deliver({ metadata, payload });
+  }
+
+  async diffDigestDeliveryStatus(intentId: string): Promise<NotificationOutboxStatus | null> {
+    return (await this.outbox.get(intentId))?.status ?? null;
   }
 }
 
@@ -1052,6 +1093,13 @@ function isNotificationPayload(value: unknown): value is NotificationPayload {
     return (
       Array.isArray(payload.items) &&
       payload.items.every((item) => item.schemaVersion === 1 && typeof item.url === "string")
+    );
+  }
+  if (payload.kind === "work-diff-digest") {
+    return (
+      payload.digest?.schemaVersion === 1 &&
+      typeof payload.digest.date === "string" &&
+      Array.isArray(payload.digest.groups)
     );
   }
   return false;

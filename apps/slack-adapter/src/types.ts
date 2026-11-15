@@ -64,6 +64,12 @@ export interface HumanWorkItem {
    */
   assignees?: string[];
   pullRequestAuthor?: string | null;
+  /**
+   * 差分digestでWork・Businessごとにまとめるための種別と親IssueのURL。
+   * 差分digest用の取得経路だけが埋め、通知outboxのpayloadには含めない。
+   */
+  issueType?: WorkItemSnapshot["issue"]["type"];
+  parentUrl?: string | null;
   targetDate: string | null;
   delivery: Delivery;
   reasonCode:
