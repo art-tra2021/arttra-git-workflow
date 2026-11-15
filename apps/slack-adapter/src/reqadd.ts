@@ -41,8 +41,12 @@ export interface ReqaddRecipient {
   lastSubmittedAt: string | null;
   /** 「〇〇さんが入力しました」をthreadへ出した時刻。最初の1回だけ出す。 */
   doneNotifiedAt: string | null;
+  /** 「入力しました」を送っている最中の印。送れなければ戻し、次の入力で送り直す。 */
+  doneNotifyClaimedAt?: string | null;
   /** 期限前日の再依頼DMを送った時刻。 */
   reminderSentAt: string | null;
+  /** 再依頼DMを送っている最中の印。送れなければ戻し、次の定期処理で送り直す。 */
+  reminderClaimedAt?: string | null;
 }
 
 export interface ReqaddRequest {
@@ -62,8 +66,12 @@ export interface ReqaddRequest {
   recipients: ReqaddRecipient[];
   /** 全員完了の知らせ（依頼者へのmention）を出した時刻。 */
   allDoneNotifiedAt: string | null;
+  /** 全員完了の知らせを送っている最中の印。送れなければ戻し、次の機会に送り直す。 */
+  allDoneNotifyClaimedAt?: string | null;
   /** 期限後の未入力者一覧をthreadへ出した時刻。 */
   overdueNotifiedAt: string | null;
+  /** 期限後の一覧を送っている最中の印。送れなければ戻し、次の定期処理で送り直す。 */
+  overdueClaimedAt?: string | null;
 }
 
 /** Project #8の項目のうち、reqaddが読む部分。 */
@@ -524,17 +532,20 @@ export function reqaddInputModal(input: ReqaddInputModalInput) {
       status: item.status,
       targetDate: item.targetDate,
     });
-    const initialStatus = item.status ?? "Ready";
+    // Statusが未設定の項目は初期値を置かない。置くと、触らずに送っただけでその値へ書き換わる。
     return [
       {
         type: "input" as const,
         block_id: `rs|${key}`,
+        ...(item.status ? {} : { optional: true }),
         label: plain(itemLabel(item), 150),
         hint: plain(`状態（いま: ${item.status ?? "未設定"}）`),
         element: {
           type: "static_select" as const,
           action_id: "status",
-          initial_option: option(initialStatus, initialStatus),
+          ...(item.status
+            ? { initial_option: option(item.status, item.status) }
+            : { placeholder: plain("未設定（選んだ時だけ反映）", 150) }),
           options: statusOptions(item.status),
         },
       },
@@ -608,7 +619,7 @@ export function reqaddInputModal(input: ReqaddInputModalInput) {
       ),
       header("自分の未完了の仕事"),
       context(
-        "状態と目途日を今の値に直してください。変えた項目だけProjectへ反映します。DoneにしてもIssueは閉じません。",
+        "状態と目途日を今の値に直してください。変えた項目だけProjectへ反映します。DoneにしてもIssueは閉じません。目途日を空にしても消えないため、目途日の削除はGitHubで行ってください。",
       ),
       ...(shown.length === 0
         ? [mrkdwnSection("担当していて未完了の仕事はありません。")]
@@ -617,7 +628,7 @@ export function reqaddInputModal(input: ReqaddInputModalInput) {
       { type: "divider" as const },
       header("新しい仕事"),
       context(
-        "仕事名を書いた行だけTaskとして作ります。空の行は無視します。目途日と親は必ず選んでください。",
+        "仕事名を書いた行だけTaskとして作ります。何も入れていない行は無視します。目途日と親は必ず選んでください。",
       ),
       ...rowBlocks,
     ],
@@ -670,9 +681,13 @@ export function validateInputSubmission(
   const newRows: ReqaddNewRow[] = [];
   for (let row = 1; row <= REQADD_NEW_ROWS; row += 1) {
     const title = (values[`new-title:${row}`]?.value?.value ?? "").trim();
-    if (!title) continue;
     const targetDate = values[`new-date:${row}`]?.value?.selected_date ?? "";
     const parent = values[`new-parent:${row}`]?.value?.selected_option?.value ?? "";
+    if (!title) {
+      // 目途日か親だけを入れた行は、黙って捨てずに仕事名を求める。
+      if (targetDate || parent) errors[`new-title:${row}`] = "仕事名を入れてください。";
+      continue;
+    }
     if (!isValidDate(targetDate)) errors[`new-date:${row}`] = "目途日を選んでください。";
     if (!parent) errors[`new-parent:${row}`] = "親を選んでください。";
     if ([...title].length > 200) errors[`new-title:${row}`] = "仕事名は200文字までにしてください。";
@@ -688,6 +703,24 @@ export function resolveParentValue(value: string, fallbackParentUrl: string | nu
   return value;
 }
 
+/** 入力結果の見出し。すべて済んだ時だけ「受け付けました」と書く。 */
+export function inputResultHeading(result: {
+  updated: string[];
+  created: Array<{ title: string; url: string }>;
+  alreadyCreated: string[];
+  failures: string[];
+  uncertain?: string[];
+}): string {
+  const failed = result.failures.length + (result.uncertain?.length ?? 0);
+  const counts = `新規 ${result.created.length} 件・更新 ${result.updated.length} 件`;
+  if (failed === 0) return `✅ 入力を受け付けました（${counts}）。`;
+  const succeeded = result.created.length + result.updated.length + result.alreadyCreated.length;
+  if (succeeded === 0) {
+    return `🚨 入力を反映できませんでした（失敗 ${failed} 件）。直してから、もう一度送ってください。`;
+  }
+  return `⚠️ 一部を受け付けました（失敗 ${failed} 件、${counts}）。まだ入力済みにはしていません。失敗した分を直して、もう一度送ってください。`;
+}
+
 /** 入力結果を本人へ返すDMの本文。 */
 export function inputResultText(result: {
   updated: string[];
@@ -695,15 +728,20 @@ export function inputResultText(result: {
   alreadyCreated: string[];
   warnings: string[];
   failures: string[];
+  uncertain?: string[];
 }): string {
   const lines = [
-    `✅ 入力を受け付けました（新規 ${result.created.length} 件・更新 ${result.updated.length} 件）。`,
+    inputResultHeading(result),
     ...result.created.map((issue) => `・作成: <${issue.url}|${escapeSlack(issue.title)}>`),
     ...result.updated.map((label) => `・更新: ${escapeSlack(label)}`),
     ...result.alreadyCreated.map(
       (title) => `・作成済みのため作りませんでした: ${escapeSlack(title)}`,
     ),
     ...result.warnings.map((warning) => `⚠️ ${escapeSlack(warning)}`),
+    ...(result.uncertain ?? []).map(
+      (title) =>
+        `❓ 作成されたか確認できませんでした。GitHubで確かめてください: ${escapeSlack(title)}（この行は送り直しても作りません）`,
+    ),
     ...result.failures.map((failure) => `🚨 失敗: ${escapeSlack(failure)}`),
   ];
   return truncate(lines.join("\n"), 3500);

@@ -1,5 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { buildCreateIssueCommand, MERGE_MODES } from "./issue-command.ts";
+import { isIssueNotCreated } from "./issue-not-created.ts";
 import type { IssueTemplateSchema } from "./issue-schema.ts";
 import type {
   ProjectFieldInput,
@@ -46,8 +47,12 @@ const RECORD_RETENTION_DAYS = 60;
 /** 期限後の一覧を出す対象にする、期限からの日数の上限。古い依頼を毎日読み直さない。 */
 const OVERDUE_LOOKBACK_DAYS = 14;
 const MAX_UPDATE_ATTEMPTS = 5;
-/** 作成中のまま残ったTask記録を、止まった処理とみなすまでの時間。 */
+/** 作成要求を送る前のまま残ったTask記録を、止まった処理とみなすまでの時間。 */
 const STALE_TASK_CLAIM_MS = 10 * 60 * 1000;
+/** 送信中の印が残った知らせを、止まった処理とみなして送り直すまでの時間。 */
+const STALE_NOTIFY_CLAIM_MS = 10 * 60 * 1000;
+/** 親投稿を描き直す回数の上限。描いている間に記録が進んだ時だけ描き直す。 */
+const MAX_PARENT_REFRESHES = 3;
 
 export interface ReqaddSlackClient {
   chat: {
@@ -118,7 +123,12 @@ export interface ReqaddServiceOptions {
 export interface ReqaddTaskRecord {
   schemaVersion: 1;
   revision: number;
-  status: "creating" | "created";
+  /**
+   * creating: 権利を取ったが、まだGitHubへ作成要求を送っていない。止まったら奪い直してよい。
+   * sending: 作成要求を送った後で、作られたか確かめられていない。再送では作らない。
+   * created: 作成を確かめた。
+   */
+  status: "creating" | "sending" | "created";
   requestId: string;
   slackUserId: string;
   round: number;
@@ -133,6 +143,8 @@ export interface ReqaddSubmitResult {
   updated: string[];
   created: Array<{ title: string; url: string }>;
   alreadyCreated: string[];
+  /** 作成要求を送ったが、作られたか確かめられなかった行の仕事名。 */
+  uncertain: string[];
   warnings: string[];
   failures: string[];
   markedDone: boolean;
@@ -274,11 +286,23 @@ export class ReqaddService {
         `このチャンネルへ投稿できませんでした（${slackErrorCode(error)}）。Appをチャンネルへ追加してから、もう一度実行してください。`,
       );
     }
-    const saved =
-      (await this.mutate(record.requestId, (current) => {
-        current.messageTs = posted.ts ?? null;
-        return true;
-      })) ?? record;
+    // 親投稿のtsを記録できなくても、相手へのDMは送る。DMはtsを使わない。
+    let saved = record;
+    try {
+      saved =
+        (await this.mutate(record.requestId, (current) => {
+          current.messageTs = posted.ts ?? null;
+          return true;
+        })) ?? record;
+    } catch (error) {
+      console.error(
+        `reqaddの親投稿のtsを記録できませんでした（${record.requestId}）: ${errorMessage(error)}`,
+      );
+      await this.notifyRequesterPrivately(
+        record,
+        "⚠️ 進み具合の投稿を記録できませんでした。相手へのDMは送りますが、この投稿の進み具合は更新されず、期限前日の再依頼と期限後の一覧も出ません。",
+      );
+    }
     const failed: string[] = [];
     for (const recipient of saved.recipients) {
       try {
@@ -330,7 +354,7 @@ export class ReqaddService {
           target.status = "pending";
           return true;
         })) ?? request;
-      await this.refreshParentPost(current);
+      await this.refreshParentPost(request.requestId);
     }
     const items = await this.github.listReqaddProjectItems();
     const round =
@@ -362,6 +386,7 @@ export class ReqaddService {
       updated: [],
       created: [],
       alreadyCreated: [],
+      uncertain: [],
       warnings: [],
       failures: [],
       markedDone: false,
@@ -449,51 +474,44 @@ export class ReqaddService {
         result,
       });
     }
-    const succeeded = result.updated.length + result.created.length + result.alreadyCreated.length;
-    const attempted = changes.length + newRows.length;
-    if (attempted > 0 && succeeded === 0) {
-      // すべて失敗したときは「入力済み」にしない。直してからもう一度送ってもらう。
+    const now = new Date(this.now()).toISOString();
+    const complete = result.failures.length === 0 && result.uncertain.length === 0;
+    if (!complete) {
+      // 一部でも失敗したら「入力済み」にしない。済んだ件数だけ記録し、直してもう一度送ってもらう。
+      // roundを進めないため、同じ仕事名の行を送り直してもTaskは作り直さない。
+      if (result.created.length + result.updated.length > 0) {
+        await this.mutate(request.requestId, (draft) => {
+          const target = draft.recipients.find((item) => item.slackUserId === input.slackUserId);
+          if (!target) return false;
+          target.createdCount += result.created.length;
+          target.updatedCount += result.updated.length;
+          target.lastSubmittedAt = now;
+          return true;
+        });
+      }
       return;
     }
-    const claims = { done: false, allDone: false };
-    const now = new Date(this.now()).toISOString();
     const saved = await this.mutate(request.requestId, (draft) => {
       const target = draft.recipients.find((item) => item.slackUserId === input.slackUserId);
       if (!target) return false;
-      claims.done = false;
-      claims.allDone = false;
       target.status = "done";
       target.createdCount += result.created.length;
       target.updatedCount += result.updated.length;
       target.round = Math.max(target.round, input.metadata.round + 1);
       target.firstDoneAt ??= now;
       target.lastSubmittedAt = now;
-      if (target.doneNotifiedAt === null) {
-        target.doneNotifiedAt = now;
-        claims.done = true;
-      }
-      if (
-        draft.allDoneNotifiedAt === null &&
-        draft.recipients.every((item) => item.status === "done")
-      ) {
-        draft.allDoneNotifiedAt = now;
-        claims.allDone = true;
-      }
       return true;
     });
     if (!saved) throw new Error("入力の記録を保存できませんでした。もう一度送ってください。");
     result.markedDone = true;
-    result.doneNotified = claims.done;
-    result.allDoneNotified = claims.allDone;
-    await this.refreshParentPost(saved);
-    const savedRecipient = saved.recipients.find((item) => item.slackUserId === input.slackUserId);
-    if (claims.done && savedRecipient) {
-      await this.replyInThread(
-        saved,
-        doneReplyText(savedRecipient, result.created.length, result.updated.length),
-      );
-    }
-    if (claims.allDone) await this.replyInThread(saved, allDoneReplyText(saved));
+    await this.refreshParentPost(request.requestId);
+    result.doneNotified = await this.notifyDone(
+      request.requestId,
+      input.slackUserId,
+      result.created.length,
+      result.updated.length,
+    );
+    result.allDoneNotified = await this.notifyAllDone(request.requestId);
   }
 
   private async createTaskForRow(input: {
@@ -524,8 +542,15 @@ export class ReqaddService {
       result.failures.push(`${row.title}（親は未完了のWork・Businessから選んでください）`);
       return;
     }
-    const key = taskKey(input.request.requestId, input.slackUserId, input.round, row.row);
-    const claim: ReqaddTaskRecord = {
+    const key = taskKey(
+      input.request.requestId,
+      input.slackUserId,
+      input.round,
+      row.row,
+      row.title,
+    );
+    const claimedAt = new Date(this.now()).toISOString();
+    const claim = await this.claimTask(key, {
       schemaVersion: 1,
       revision: 1,
       status: "creating",
@@ -535,13 +560,15 @@ export class ReqaddService {
       row: row.row,
       title: row.title,
       repository: parent.repository,
-      claimedAt: new Date(this.now()).toISOString(),
+      claimedAt,
       issue: null,
-    };
-    if (!(await this.claimTask(key, claim))) {
+    });
+    if (!claim) {
       const existing = await this.store.get<ReqaddTaskRecord>(REQADD_TASK_NAMESPACE, key);
       if (existing?.status === "created") {
         result.alreadyCreated.push(existing.issue?.title ?? existing.title);
+      } else if (existing?.status === "sending") {
+        result.uncertain.push(row.title);
       } else {
         result.failures.push(
           `${row.title}（同じ行を別の送信で作成中です。少し待ってDMの結果を確かめてください）`,
@@ -549,6 +576,7 @@ export class ReqaddService {
       }
       return;
     }
+    let resolved: CreateIssueCommand;
     try {
       const templates = await this.github.listIssueTemplatesForViewer(
         input.githubLogin,
@@ -569,52 +597,113 @@ export class ReqaddService {
         projectFields: { status: "Ready", targetDate: row.targetDate },
         schema,
       });
-      const resolved = await this.identity.resolveCommand(command, input.teamId);
-      const issue = await this.github.createIssue(resolved);
-      const created: ReqaddTaskRecord = {
-        ...claim,
-        revision: 2,
-        status: "created",
-        issue: { number: issue.number, title: issue.title, url: issue.url },
-      };
-      await this.store.set(REQADD_TASK_NAMESPACE, key, created, this.expiry(input.request));
-      result.created.push({ title: issue.title, url: issue.url });
+      resolved = await this.identity.resolveCommand(command, input.teamId);
+    } catch (error) {
+      // 作成要求を送る前の失敗。記録を消し、直してから送り直せば作れるようにする。
+      await this.releaseTaskClaim(key);
+      result.failures.push(`${row.title}（${errorMessage(error)}）`);
+      return;
+    }
+    // 作成要求を送る前に「送った」ことを記録する。止まった処理の記録を奪い直してよいのは、この記録より前だけ。
+    const sending: ReqaddTaskRecord = { ...claim, revision: claim.revision + 1, status: "sending" };
+    let marked = false;
+    try {
+      marked = await this.store.compareAndSet(REQADD_TASK_NAMESPACE, key, claim.revision, sending, {
+        expireAt: this.taskExpiry(),
+      });
+    } catch (error) {
+      await this.releaseTaskClaim(key);
+      result.failures.push(
+        `${row.title}（作成の準備を記録できませんでした: ${errorMessage(error)}）`,
+      );
+      return;
+    }
+    if (!marked) {
+      result.failures.push(
+        `${row.title}（同じ行を別の送信で作成中です。少し待ってDMの結果を確かめてください）`,
+      );
+      return;
+    }
+    let issue: CreatedIssue;
+    try {
+      issue = await this.github.createIssue(resolved);
+    } catch (error) {
+      if (isIssueNotCreated(error)) {
+        // GitHubが作っていないと確定できる失敗だけ、記録を消して送り直せるようにする。
+        await this.releaseTaskClaim(key);
+        result.failures.push(`${row.title}（${errorMessage(error)}）`);
+        return;
+      }
+      // timeoutなど、GitHub側で作られた可能性が残る失敗。記録はsendingのまま残し、再送で作らない。
+      console.error(`reqaddのTaskが作られたか確認できません（${key}）: ${errorMessage(error)}`);
+      result.uncertain.push(row.title);
+      return;
+    }
+    const created: ReqaddTaskRecord = {
+      ...sending,
+      revision: sending.revision + 1,
+      status: "created",
+      issue: { number: issue.number, title: issue.title, url: issue.url },
+    };
+    try {
       if (
-        issue.relationshipStatus ||
-        (issue.projectFieldStatus && issue.projectFieldStatus.status !== "synced")
+        !(await this.store.compareAndSet(
+          REQADD_TASK_NAMESPACE,
+          key,
+          sending.revision,
+          created,
+          this.expiry(input.request),
+        ))
       ) {
-        result.warnings.push(
-          `${issue.title}は作成済みですが、親の付与かProjectへの反映の一部が済んでいません。GitHubで確かめてください。`,
-        );
+        console.error(`reqaddのTask作成の記録が先に書き換えられていました（${key}）`);
       }
     } catch (error) {
-      // 作成に失敗した行は記録を消し、直してから送り直せば作れるようにする。
-      await this.store.remove(REQADD_TASK_NAMESPACE, key);
-      result.failures.push(`${row.title}（${errorMessage(error)}）`);
+      // 作成は済んでいる。記録はsendingのまま残るため、再送しても作り直さない。
+      console.error(`reqaddのTask作成を記録できませんでした（${key}）: ${errorMessage(error)}`);
+    }
+    result.created.push({ title: issue.title, url: issue.url });
+    if (
+      issue.relationshipStatus ||
+      (issue.projectFieldStatus && issue.projectFieldStatus.status !== "synced")
+    ) {
+      result.warnings.push(
+        `${issue.title}は作成済みですが、親の付与かProjectへの反映の一部が済んでいません。GitHubで確かめてください。`,
+      );
     }
   }
 
-  /** 行ごとのTask作成の権利を原子的に取る。止まった作成中の記録は奪い直す。 */
-  private async claimTask(key: string, claim: ReqaddTaskRecord): Promise<boolean> {
+  /** 行ごとのTask作成の権利を原子的に取り、取れた記録を返す。作成要求を送る前に止まった記録は奪い直す。 */
+  private async claimTask(key: string, claim: ReqaddTaskRecord): Promise<ReqaddTaskRecord | null> {
     if (
       await this.store.create(REQADD_TASK_NAMESPACE, key, claim, { expireAt: this.taskExpiry() })
     ) {
-      return true;
+      return claim;
     }
     const existing = await this.store.get<ReqaddTaskRecord>(REQADD_TASK_NAMESPACE, key);
     if (
       existing?.status === "creating" &&
       this.now() - Date.parse(existing.claimedAt) > STALE_TASK_CLAIM_MS
     ) {
-      return this.store.compareAndSet(
+      const reclaimed = { ...claim, revision: existing.revision + 1 };
+      return (await this.store.compareAndSet(
         REQADD_TASK_NAMESPACE,
         key,
         existing.revision,
-        { ...claim, revision: existing.revision + 1 },
+        reclaimed,
         { expireAt: this.taskExpiry() },
-      );
+      ))
+        ? reclaimed
+        : null;
     }
-    return false;
+    return null;
+  }
+
+  private async releaseTaskClaim(key: string): Promise<void> {
+    try {
+      await this.store.remove(REQADD_TASK_NAMESPACE, key);
+    } catch (error) {
+      console.error(`reqaddのTask作成の記録を消せませんでした（${key}）: ${errorMessage(error)}`);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -629,6 +718,14 @@ export class ReqaddService {
     for (const request of requests) {
       if (request.schemaVersion !== 1 || !request.messageTs) continue;
       try {
+        if (
+          request.dueDate >= oldest &&
+          request.allDoneNotifiedAt === null &&
+          request.recipients.every((recipient) => recipient.status === "done")
+        ) {
+          // 入力の送信時に全員完了の知らせを送れなかった依頼は、ここで送り直す。
+          await this.notifyAllDone(request.requestId);
+        }
         if (request.dueDate === tomorrow) {
           result.reminded += await this.remindRecipients(request.requestId);
         } else if (request.dueDate < today && request.dueDate >= oldest) {
@@ -648,44 +745,176 @@ export class ReqaddService {
     const request = await this.getRequest(requestId);
     for (const recipient of request?.recipients ?? []) {
       if (recipient.status === "done" || recipient.reminderSentAt !== null) continue;
-      const now = new Date(this.now()).toISOString();
-      const claim = { claimed: false };
-      const saved = await this.mutate(requestId, (draft) => {
-        const target = draft.recipients.find((item) => item.slackUserId === recipient.slackUserId);
-        claim.claimed = false;
-        if (!target || target.status === "done" || target.reminderSentAt !== null) return false;
-        target.reminderSentAt = now;
-        claim.claimed = true;
-        return true;
+      const delivered = await this.sendOnce({
+        requestId,
+        label: "再依頼DM",
+        claim: (draft, now) => {
+          const target = draft.recipients.find(
+            (item) => item.slackUserId === recipient.slackUserId,
+          );
+          if (
+            !target ||
+            target.status === "done" ||
+            !this.claimable(target.reminderSentAt, target.reminderClaimedAt)
+          ) {
+            return false;
+          }
+          target.reminderClaimedAt = now;
+          return true;
+        },
+        send: async (saved) => {
+          const current = saved.recipients.find(
+            (item) => item.slackUserId === recipient.slackUserId,
+          );
+          if (!current) return false;
+          await this.sendDirect(current.slackUserId, reqaddRequestDm(saved, current, "reminder"));
+          return true;
+        },
+        settle: (draft, sentAt) => {
+          const target = draft.recipients.find(
+            (item) => item.slackUserId === recipient.slackUserId,
+          );
+          if (!target) return false;
+          target.reminderClaimedAt = null;
+          if (sentAt) target.reminderSentAt = sentAt;
+          return true;
+        },
       });
-      if (!claim.claimed || !saved) continue;
-      const current = saved.recipients.find((item) => item.slackUserId === recipient.slackUserId);
-      if (!current) continue;
-      try {
-        await this.sendDirect(current.slackUserId, reqaddRequestDm(saved, current, "reminder"));
-        sent += 1;
-      } catch (error) {
-        console.error(`reqaddの再依頼DMを送れませんでした: ${errorMessage(error)}`);
-      }
+      if (delivered) sent += 1;
     }
     return sent;
   }
 
   private async notifyOverdue(requestId: string): Promise<boolean> {
-    const claim = { claimed: false };
-    const now = new Date(this.now()).toISOString();
-    const saved = await this.mutate(requestId, (draft) => {
-      claim.claimed = false;
-      if (draft.overdueNotifiedAt !== null) return false;
-      draft.overdueNotifiedAt = now;
-      claim.claimed = true;
-      return true;
+    return this.sendOnce({
+      requestId,
+      label: "期限後の一覧",
+      claim: (draft, now) => {
+        if (!this.claimable(draft.overdueNotifiedAt, draft.overdueClaimedAt)) return false;
+        draft.overdueClaimedAt = now;
+        return true;
+      },
+      send: async (saved) => {
+        const text = overdueReplyText(saved);
+        return text ? this.postThread(saved, text) : false;
+      },
+      settle: (draft, sentAt) => {
+        draft.overdueClaimedAt = null;
+        if (sentAt) draft.overdueNotifiedAt = sentAt;
+        return true;
+      },
     });
-    if (!claim.claimed || !saved) return false;
-    const text = overdueReplyText(saved);
-    if (!text) return false;
-    await this.replyInThread(saved, text);
-    return true;
+  }
+
+  /** 「〇〇さんが入力しました」をthreadへ1回だけ出す。 */
+  private async notifyDone(
+    requestId: string,
+    slackUserId: string,
+    created: number,
+    updated: number,
+  ): Promise<boolean> {
+    return this.sendOnce({
+      requestId,
+      label: "入力の知らせ",
+      claim: (draft, now) => {
+        const target = draft.recipients.find((item) => item.slackUserId === slackUserId);
+        if (
+          target?.status !== "done" ||
+          !this.claimable(target.doneNotifiedAt, target.doneNotifyClaimedAt)
+        ) {
+          return false;
+        }
+        target.doneNotifyClaimedAt = now;
+        return true;
+      },
+      send: async (saved) => {
+        const target = saved.recipients.find((item) => item.slackUserId === slackUserId);
+        return target ? this.postThread(saved, doneReplyText(target, created, updated)) : false;
+      },
+      settle: (draft, sentAt) => {
+        const target = draft.recipients.find((item) => item.slackUserId === slackUserId);
+        if (!target) return false;
+        target.doneNotifyClaimedAt = null;
+        if (sentAt) target.doneNotifiedAt = sentAt;
+        return true;
+      },
+    });
+  }
+
+  /** 全員が入力したら、threadで依頼者を1回だけmentionする。 */
+  private async notifyAllDone(requestId: string): Promise<boolean> {
+    return this.sendOnce({
+      requestId,
+      label: "全員完了の知らせ",
+      claim: (draft, now) => {
+        if (
+          !draft.recipients.every((item) => item.status === "done") ||
+          !this.claimable(draft.allDoneNotifiedAt, draft.allDoneNotifyClaimedAt)
+        ) {
+          return false;
+        }
+        draft.allDoneNotifyClaimedAt = now;
+        return true;
+      },
+      send: async (saved) => this.postThread(saved, allDoneReplyText(saved)),
+      settle: (draft, sentAt) => {
+        draft.allDoneNotifyClaimedAt = null;
+        if (sentAt) draft.allDoneNotifiedAt = sentAt;
+        return true;
+      },
+    });
+  }
+
+  /**
+   * 1回だけ出す知らせを送る。送信中の印を記録してから送り、送れたら送信済みに、
+   * 送れなければ印を戻して次の機会に送り直せるようにする。印は同時の二重送信を防ぐ。
+   * `send`がfalseを返したら、送るものが無いとみなして送信済みにする。送れた時だけtrueを返す。
+   */
+  private async sendOnce(input: {
+    requestId: string;
+    label: string;
+    claim: (draft: ReqaddRequest, now: string) => boolean;
+    send: (saved: ReqaddRequest) => Promise<boolean>;
+    settle: (draft: ReqaddRequest, sentAt: string | null) => boolean;
+  }): Promise<boolean> {
+    const now = new Date(this.now()).toISOString();
+    let claimed = false;
+    let saved: ReqaddRequest | null;
+    try {
+      saved = await this.mutate(input.requestId, (draft) => {
+        claimed = input.claim(draft, now);
+        return claimed;
+      });
+    } catch (error) {
+      console.error(`reqaddの${input.label}の送信を始められませんでした: ${errorMessage(error)}`);
+      return false;
+    }
+    if (!claimed || !saved) return false;
+    let delivered = false;
+    let settled = false;
+    try {
+      delivered = await input.send(saved);
+      settled = true;
+    } catch (error) {
+      console.error(`reqaddの${input.label}を送れませんでした: ${errorMessage(error)}`);
+    }
+    const sentAt = settled ? new Date(this.now()).toISOString() : null;
+    try {
+      await this.mutate(input.requestId, (draft) => input.settle(draft, sentAt));
+    } catch (error) {
+      // 印が残っても、STALE_NOTIFY_CLAIM_MSを過ぎれば次の機会に扱い直す。
+      console.error(
+        `reqaddの${input.label}の送信結果を記録できませんでした: ${errorMessage(error)}`,
+      );
+    }
+    return delivered;
+  }
+
+  /** まだ送っておらず、送信中の印も無い（または止まった処理の古い印だけがある）か。 */
+  private claimable(sentAt: string | null, claimedAt: string | null | undefined): boolean {
+    if (sentAt !== null) return false;
+    if (!claimedAt) return true;
+    return this.now() - Date.parse(claimedAt) > STALE_NOTIFY_CLAIM_MS;
   }
 
   // -------------------------------------------------------------------------
@@ -716,35 +945,49 @@ export class ReqaddService {
     throw new Error("依頼の記録が同時に更新され、保存できませんでした。もう一度送ってください。");
   }
 
-  private async refreshParentPost(request: ReqaddRequest): Promise<void> {
-    if (!request.messageTs) return;
-    const message = reqaddParentMessage(request);
-    try {
-      await this.slack.chat.update({
-        channel: request.channelId,
-        ts: request.messageTs,
-        text: message.text,
-        blocks: message.blocks,
-      });
-    } catch (error) {
-      console.error(`reqaddの親投稿を更新できませんでした: ${errorMessage(error)}`);
+  /**
+   * 親投稿を最新の記録で描き直す。chat.updateは送信ごとに別々に呼ぶため、描く直前に記録を読み直し、
+   * 描いている間に記録が進んでいたら描き直す。古い状態が後から上書きして残らないようにする。
+   */
+  private async refreshParentPost(requestId: string): Promise<void> {
+    let drawnRevision: number | null = null;
+    for (let attempt = 0; attempt < MAX_PARENT_REFRESHES; attempt += 1) {
+      let latest: ReqaddRequest | null;
+      try {
+        latest = await this.getRequest(requestId);
+      } catch (error) {
+        console.error(`reqaddの親投稿を描くための記録を読めませんでした: ${errorMessage(error)}`);
+        return;
+      }
+      if (!latest?.messageTs || latest.revision === drawnRevision) return;
+      const message = reqaddParentMessage(latest);
+      try {
+        await this.slack.chat.update({
+          channel: latest.channelId,
+          ts: latest.messageTs,
+          text: message.text,
+          blocks: message.blocks,
+        });
+      } catch (error) {
+        console.error(`reqaddの親投稿を更新できませんでした: ${errorMessage(error)}`);
+        return;
+      }
+      drawnRevision = latest.revision;
     }
   }
 
-  private async replyInThread(request: ReqaddRequest, text: string): Promise<void> {
-    if (!request.messageTs) return;
-    try {
-      await this.slack.chat.postMessage({
-        channel: request.channelId,
-        thread_ts: request.messageTs,
-        reply_broadcast: false,
-        text,
-        unfurl_links: false,
-        unfurl_media: false,
-      });
-    } catch (error) {
-      console.error(`reqaddのthread返信に失敗しました: ${errorMessage(error)}`);
-    }
+  /** threadへ返信する。失敗は投げる。親投稿が無ければ送らずfalseを返す。 */
+  private async postThread(request: ReqaddRequest, text: string): Promise<boolean> {
+    if (!request.messageTs) return false;
+    await this.slack.chat.postMessage({
+      channel: request.channelId,
+      thread_ts: request.messageTs,
+      reply_broadcast: false,
+      text,
+      unfurl_links: false,
+      unfurl_media: false,
+    });
+    return true;
   }
 
   private async sendDirect(
@@ -799,13 +1042,23 @@ export class ReqaddService {
   }
 }
 
+/**
+ * Task作成の重複防止key。仕事名の正規化したhashを含め、同じ行番号に別の仕事を書いた
+ * 別の画面の送信を「作成済み」として捨てないようにする。同じ仕事名の再送は同じkeyになる。
+ */
 export function taskKey(
   requestId: string,
   slackUserId: string,
   round: number,
   row: number,
+  title: string,
 ): string {
-  return `${requestId}:${slackUserId}:${round}:${row}`;
+  return `${requestId}:${slackUserId}:${round}:${row}:${titleHash(title)}`;
+}
+
+function titleHash(title: string): string {
+  const normalized = title.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
 
 /** Task templateの必須欄を、仕事名と依頼から埋める。 */

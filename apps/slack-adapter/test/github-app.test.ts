@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { createAppJwt, GitHubAppDependencies, type GitHubFetch } from "../src/github-app.ts";
+import { isIssueNotCreated } from "../src/issue-not-created.ts";
 import type { CreateIssueCommand } from "../src/types.ts";
 
 const NOW = Date.parse("2026-08-01T00:00:00Z");
@@ -468,6 +469,53 @@ describe("GitHub App adapter", () => {
       labels: ["type/intake", "status/triage"],
     });
     expect((createdBody as { body: string }).body).toContain("テンプレート導入前の相談");
+  });
+
+  test("Issue作成の失敗のうち、作っていないと確定できるものにだけ印を付ける", async () => {
+    const attempt = async (post: () => Response, template = "generic") => {
+      const client = dependencies(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/app/installations/99/access_tokens")) {
+          return json({
+            token: "installation-token",
+            expires_at: "2026-08-01T01:00:00Z",
+            permissions: { issues: "write", contents: "read" },
+          });
+        }
+        if (url.endsWith("/contents/.github/ISSUE_TEMPLATE")) {
+          return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+        }
+        if (url.endsWith("/repos/art-tra2021/no-template/issues")) return post();
+        throw new Error(`予期しないrequest: ${url}`);
+      });
+      try {
+        await client.createIssue({
+          schemaVersion: 1,
+          kind: "issue.create",
+          repository: "art-tra2021/no-template",
+          template,
+          title: "相談",
+          fields: { summary: "相談", done: "" },
+          actor: "U123",
+        });
+      } catch (error) {
+        return error;
+      }
+      throw new Error("失敗しませんでした");
+    };
+    const rejected = await attempt(
+      () => new Response(JSON.stringify({ message: "Validation Failed" }), { status: 422 }),
+    );
+    expect(isIssueNotCreated(rejected)).toBe(true);
+    expect((rejected as Error).message).toContain("HTTP 422");
+    const missingTemplate = await attempt(() => json({}), "task");
+    expect(isIssueNotCreated(missingTemplate)).toBe(true);
+    const serverError = await attempt(() => new Response("{}", { status: 502 }));
+    expect(isIssueNotCreated(serverError)).toBe(false);
+    const network = await attempt(() => {
+      throw new Error("socket hang up");
+    });
+    expect(isIssueNotCreated(network)).toBe(false);
   });
 
   test("Issue作成後にProject fieldを書き込みGraphQL read-backを返す", async () => {

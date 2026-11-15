@@ -3,6 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildIssueCreateInput } from "../src/github-shared.ts";
+import { markIssueNotCreated } from "../src/issue-not-created.ts";
 import { issueTemplate } from "../src/issue-schema.ts";
 import type { ProjectFieldInput, ProjectFieldSyncResult } from "../src/project-field-sync.ts";
 import {
@@ -13,6 +14,7 @@ import {
 } from "../src/reqadd.ts";
 import {
   REQADD_REQUEST_NAMESPACE,
+  REQADD_TASK_NAMESPACE,
   type ReqaddGitHub,
   type ReqaddIdentity,
   ReqaddService,
@@ -36,6 +38,8 @@ class FakeSlack implements ReqaddSlackClient {
   readonly updates: Array<{ channel: string; ts: string; text: string; blocks?: unknown[] }> = [];
   readonly ephemerals: Array<{ channel: string; user: string; text: string }> = [];
   readonly names: Record<string, string>;
+  /** trueを返した投稿は送らずに失敗させる。 */
+  failWhen: ((message: PostedMessage) => boolean) | null = null;
   private sequence = 0;
 
   constructor(names: Record<string, string>) {
@@ -44,6 +48,7 @@ class FakeSlack implements ReqaddSlackClient {
 
   chat = {
     postMessage: async (message: PostedMessage) => {
+      if (this.failWhen?.(message)) throw new Error("Slackが一時的に失敗しました");
       this.posts.push(message);
       this.sequence += 1;
       return { ts: `100.${this.sequence}`, channel: message.channel };
@@ -432,13 +437,13 @@ describe("ReqaddService: 入力の送信", () => {
     ).toHaveLength(1);
   });
 
-  test("Task作成に失敗した行は、直して送り直せば作れる", async () => {
+  test("作っていないと確定できる失敗の行は、直して送り直せば作れる", async () => {
     const context = await setup();
     await createRequest(context);
     const original = context.github.createIssue.bind(context.github);
     let fail = true;
     context.github.createIssue = async (command) => {
-      if (fail) throw new Error("GitHubが一時的に失敗しました");
+      if (fail) throw markIssueNotCreated(new Error("GitHubが一時的に失敗しました"));
       return original(command);
     };
     const input = {
@@ -455,6 +460,146 @@ describe("ReqaddService: 入力の送信", () => {
     const retried = await context.service.submitInput(input);
     expect(retried.created).toHaveLength(1);
     expect(context.github.created).toHaveLength(1);
+  });
+
+  test("作成要求の後にtimeoutした行は、記録を残して再送で作らず、確かめるよう伝える", async () => {
+    const context = await setup();
+    await createRequest(context);
+    const original = context.github.createIssue.bind(context.github);
+    let timeout = true;
+    context.github.createIssue = async (command) => {
+      // GitHub側では作られたが、応答が届かなかった場合。
+      const issue = await original(command);
+      if (timeout) throw new Error("The operation timed out.");
+      return issue;
+    };
+    const input = {
+      slackUserId: "U0A1",
+      metadata: { requestId: "req-1", slackTeamId: "T1", round: 0 },
+      submission: submission({
+        newRows: [{ row: 1, title: "見積もりを出す", targetDate: "2026-11-21", parent: WORK_URL }],
+      }),
+    };
+    const first = await context.service.submitInput(input);
+    expect(first.uncertain).toEqual(["見積もりを出す"]);
+    expect(first.markedDone).toBe(false);
+    expect(context.slack.dms("U0A1").at(-1)?.text).toContain(
+      "作成されたか確認できませんでした。GitHubで確かめてください: 見積もりを出す",
+    );
+    timeout = false;
+    const resent = await context.service.submitInput(input);
+    expect(context.github.created).toHaveLength(1);
+    expect(resent.created).toHaveLength(0);
+    expect(resent.uncertain).toEqual(["見積もりを出す"]);
+    // 時間が経っても、作成要求を送った後の記録は奪い直さない。
+    context.clock.set("2026-11-16T03:00:00Z");
+    await context.service.submitInput(input);
+    expect(context.github.created).toHaveLength(1);
+  });
+
+  test("Task作成の後に記録の保存が失敗しても、再送で同じ行を作り直さない", async () => {
+    const context = await setup();
+    await createRequest(context);
+    const originalSet = context.store.compareAndSet.bind(context.store);
+    let failSave = true;
+    context.store.compareAndSet = (async (namespace, key, revision, value, options) => {
+      if (
+        failSave &&
+        namespace === REQADD_TASK_NAMESPACE &&
+        (value as { status?: string }).status === "created"
+      ) {
+        throw new Error("Firestoreが一時的に失敗しました");
+      }
+      return originalSet(namespace, key, revision, value, options);
+    }) as typeof context.store.compareAndSet;
+    const input = {
+      slackUserId: "U0A1",
+      metadata: { requestId: "req-1", slackTeamId: "T1", round: 0 },
+      submission: submission({
+        newRows: [{ row: 1, title: "見積もりを出す", targetDate: "2026-11-21", parent: WORK_URL }],
+      }),
+    };
+    const first = await context.service.submitInput(input);
+    expect(first.created).toHaveLength(1);
+    failSave = false;
+    const resent = await context.service.submitInput(input);
+    expect(context.github.created).toHaveLength(1);
+    expect(resent.created).toHaveLength(0);
+    expect(resent.uncertain).toEqual(["見積もりを出す"]);
+  });
+
+  test("2つの画面で同じ行番号に別の仕事を書いても、両方作る", async () => {
+    const context = await setup();
+    await createRequest(context);
+    const screen = (title: string) => ({
+      slackUserId: "U0A1",
+      metadata: { requestId: "req-1", slackTeamId: "T1", round: 0 },
+      submission: submission({
+        newRows: [{ row: 1, title, targetDate: "2026-11-21", parent: WORK_URL }],
+      }),
+    });
+    const [left, right] = await Promise.all([
+      context.service.submitInput(screen("見積もりを出す")),
+      context.service.submitInput(screen("請求書を送る")),
+    ]);
+    expect(left.created).toHaveLength(1);
+    expect(right.created).toHaveLength(1);
+    expect(context.github.created.map((command) => command.title).sort()).toEqual([
+      "見積もりを出す",
+      "請求書を送る",
+    ]);
+    // 同じ仕事名の再送（空白の違いを含む）は作らない。
+    const resent = await context.service.submitInput(screen(" 見積もりを出す"));
+    expect(resent.alreadyCreated).toEqual(["[Task] 見積もりを出す"]);
+    expect(context.github.created).toHaveLength(2);
+  });
+
+  test("一部が失敗したらdoneにせず、見出しを変え、成功した分は再送で二重にしない", async () => {
+    const context = await setup();
+    await createRequest(context);
+    const input = (secondParent: string) => ({
+      slackUserId: "U0A1",
+      metadata: { requestId: "req-1", slackTeamId: "T1", round: 0 },
+      submission: submission({
+        changes: [
+          {
+            key: { issueNodeId: "node-2", status: "Ready", targetDate: null },
+            status: "In progress",
+          },
+        ],
+        newRows: [
+          { row: 1, title: "見積もりを出す", targetDate: "2026-11-21", parent: WORK_URL },
+          // Taskは親にできないため失敗する。
+          { row: 2, title: "請求書を送る", targetDate: "2026-11-22", parent: secondParent },
+        ],
+      }),
+    });
+    const partial = await context.service.submitInput(
+      input("https://github.com/art-tra2021/repo/issues/3"),
+    );
+    expect(partial.updated).toHaveLength(1);
+    expect(partial.created).toHaveLength(1);
+    expect(partial.failures).toHaveLength(1);
+    expect(partial.markedDone).toBe(false);
+    expect(partial.doneNotified).toBe(false);
+    expect(context.slack.dms("U0A1").at(-1)?.text).toStartWith("⚠️ 一部を受け付けました（失敗 1 件");
+    const stored = await context.store.get<ReqaddRequest>(REQADD_REQUEST_NAMESPACE, "req-1");
+    expect(stored?.recipients[0]).toMatchObject({
+      status: "pending",
+      round: 0,
+      createdCount: 1,
+      updatedCount: 1,
+    });
+    expect(context.slack.threadReplies()).toHaveLength(0);
+    expect(JSON.stringify(context.slack.updates)).not.toContain("1/3 人完了");
+
+    const fixed = await context.service.submitInput(input(WORK_URL));
+    expect(fixed.alreadyCreated).toEqual(["[Task] 見積もりを出す"]);
+    expect(fixed.created.map((issue) => issue.title)).toEqual(["[Task] 請求書を送る"]);
+    expect(fixed.markedDone).toBe(true);
+    expect(context.github.created).toHaveLength(2);
+    expect(context.slack.dms("U0A1").at(-1)?.text).toStartWith("✅ 入力を受け付けました");
+    expect(JSON.stringify(context.slack.updates.at(-1))).toContain("1/3 人完了");
   });
 
   test("入力し直しは許し、上段は最新の値で開き、下段は追加分だけ作り、done通知は最初の1回だけ", async () => {
@@ -539,6 +684,140 @@ describe("ReqaddService: 入力の送信", () => {
       "✅ 鈴木 &lt;@UX&gt;さんが入力しました（新規 0 件・更新 0 件）",
     ]);
     expect(JSON.stringify(context.slack.updates.at(-1))).toContain("2/2 人完了");
+  });
+});
+
+describe("ReqaddService: 送信の失敗と順序", () => {
+  test("親投稿の更新順が逆転しても、最新の進み具合が残る", async () => {
+    const context = await setup();
+    await createRequest(context, ["U0A1", "U0B1"]);
+    const originalUpdate = context.slack.chat.update;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reached = () => {};
+    const firstReached = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let calls = 0;
+    context.slack.chat.update = async (message) => {
+      calls += 1;
+      if (calls === 1) {
+        // 最初の更新だけ、後の送信の更新が済むまでSlackへ届かないようにする。
+        reached();
+        await gate;
+      }
+      return originalUpdate(message);
+    };
+    const first = context.service.submitInput({
+      slackUserId: "U0A1",
+      metadata: { requestId: "req-1", slackTeamId: "T1", round: 0 },
+      submission: submission(),
+    });
+    await firstReached;
+    await context.service.submitInput({
+      slackUserId: "U0B1",
+      metadata: { requestId: "req-1", slackTeamId: "T1", round: 0 },
+      submission: submission(),
+    });
+    release();
+    await first;
+    expect(JSON.stringify(context.slack.updates.at(-1))).toContain("2/2 人完了");
+  });
+
+  test("全員完了のmentionを送れなければ、次の機会に1回だけ送る", async () => {
+    const context = await setup();
+    await createRequest(context, ["U0A1", "U0B1"]);
+    await context.service.submitInput({
+      slackUserId: "U0A1",
+      metadata: { requestId: "req-1", slackTeamId: "T1", round: 0 },
+      submission: submission(),
+    });
+    context.slack.failWhen = (message) => message.text.includes("<@UBOSS>");
+    const done = await context.service.submitInput({
+      slackUserId: "U0B1",
+      metadata: { requestId: "req-1", slackTeamId: "T1", round: 0 },
+      submission: submission(),
+    });
+    expect(done.markedDone).toBe(true);
+    expect(done.allDoneNotified).toBe(false);
+    context.slack.failWhen = null;
+    const mentions = () =>
+      context.slack.threadReplies().filter((post) => post.text.includes("<@UBOSS>"));
+    expect(mentions()).toHaveLength(0);
+    await context.service.sendReminders();
+    expect(mentions()).toHaveLength(1);
+    await context.service.sendReminders();
+    await context.service.submitInput({
+      slackUserId: "U0B1",
+      metadata: { requestId: "req-1", slackTeamId: "T1", round: 1 },
+      submission: submission(),
+    });
+    expect(mentions()).toHaveLength(1);
+  });
+
+  test("「入力しました」を送れなければ、次の入力で1回だけ送る", async () => {
+    const context = await setup();
+    await createRequest(context, ["U0A1", "U0B1"]);
+    const input = (round: number) => ({
+      slackUserId: "U0A1",
+      metadata: { requestId: "req-1", slackTeamId: "T1", round },
+      submission: submission(),
+    });
+    context.slack.failWhen = (message) => message.text.includes("さんが入力しました");
+    expect((await context.service.submitInput(input(0))).doneNotified).toBe(false);
+    context.slack.failWhen = null;
+    expect((await context.service.submitInput(input(1))).doneNotified).toBe(true);
+    await context.service.submitInput(input(2));
+    expect(
+      context.slack.threadReplies().filter((post) => post.text.includes("佐藤さんが入力しました")),
+    ).toHaveLength(1);
+  });
+
+  test("再依頼DMを送れなければ、次の定期処理で1回だけ送る", async () => {
+    const context = await setup();
+    await createRequest(context, ["U0A1", "U0B1"], "2026-11-20");
+    context.clock.set("2026-11-19T00:10:00Z");
+    context.slack.failWhen = (message) =>
+      message.channel === "DU0A1" && message.text.includes("期限は明日");
+    expect(await context.service.sendReminders()).toEqual({ reminded: 1, overdueNotified: 0 });
+    context.slack.failWhen = null;
+    expect(await context.service.sendReminders()).toEqual({ reminded: 1, overdueNotified: 0 });
+    expect(await context.service.sendReminders()).toEqual({ reminded: 0, overdueNotified: 0 });
+    for (const user of ["U0A1", "U0B1"]) {
+      expect(
+        context.slack.dms(user).filter((post) => post.text.includes("期限は明日")),
+      ).toHaveLength(1);
+    }
+  });
+
+  test("期限後の一覧を送れなければ、次の定期処理で1回だけ送る", async () => {
+    const context = await setup();
+    await createRequest(context, ["U0A1", "U0B1"], "2026-11-20");
+    context.clock.set("2026-11-21T00:10:00Z");
+    context.slack.failWhen = (message) => message.text.includes("期限");
+    expect((await context.service.sendReminders()).overdueNotified).toBe(0);
+    context.slack.failWhen = null;
+    expect((await context.service.sendReminders()).overdueNotified).toBe(1);
+    expect((await context.service.sendReminders()).overdueNotified).toBe(0);
+    expect(context.slack.threadReplies().filter((post) => post.text.includes("期限"))).toHaveLength(
+      1,
+    );
+  });
+
+  test("親投稿のtsを記録できなくても、相手へのDMは送る", async () => {
+    const context = await setup();
+    const originalSet = context.store.compareAndSet.bind(context.store);
+    context.store.compareAndSet = (async (namespace, key, revision, value, options) => {
+      if (namespace === REQADD_REQUEST_NAMESPACE) return false;
+      return originalSet(namespace, key, revision, value, options);
+    }) as typeof context.store.compareAndSet;
+    const record = await createRequest(context, ["U0A1", "U0B1"]);
+    expect(record.messageTs).toBeNull();
+    expect(context.slack.dms("U0A1")).toHaveLength(1);
+    expect(context.slack.dms("U0B1")).toHaveLength(1);
+    expect(context.slack.ephemerals.at(-1)?.text).toContain("進み具合の投稿を記録できませんでした");
   });
 });
 

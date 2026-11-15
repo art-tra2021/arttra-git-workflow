@@ -6,6 +6,7 @@ import {
   encodeItemKey,
   escapeSlack,
   formatDueDate,
+  inputResultText,
   jstToday,
   myOpenItems,
   overdueReplyText,
@@ -273,6 +274,85 @@ describe("reqaddの入力画面", () => {
         ],
       },
     });
+  });
+
+  test("Statusが未設定の項目は初期値なしで出し、触らずに送っても更新しない", () => {
+    const items = [
+      item(1, { assignees: ["alice"], status: null }),
+      item(2, { assignees: ["alice"], status: "In progress" }),
+    ];
+    const modal = reqaddInputModal({
+      metadata: { requestId: "req-1", slackTeamId: "T1", round: 0 },
+      request: request(),
+      items,
+      parents: [],
+    });
+    const statusBlocks = modal.blocks.filter(
+      (block) => "block_id" in block && String(block.block_id).startsWith("rs|"),
+    ) as Array<{
+      block_id: string;
+      optional?: boolean;
+      element: { initial_option?: { value: string } };
+    }>;
+    const [unset, set] = statusBlocks;
+    expect(unset?.element.initial_option).toBeUndefined();
+    expect(unset?.optional).toBe(true);
+    expect(set?.element.initial_option?.value).toBe("In progress");
+    expect(set?.optional).toBeUndefined();
+    expect(JSON.stringify(modal.blocks)).toContain("目途日の削除はGitHubで行ってください");
+    // Slackは触っていない選択欄の初期値をそのまま送る。初期値の無い欄は何も送らない。
+    const untouched = Object.fromEntries(
+      statusBlocks.map((block) => [
+        block.block_id,
+        { status: { selected_option: block.element.initial_option ?? null } },
+      ]),
+    );
+    expect(validateInputSubmission(untouched)).toEqual({
+      ok: true,
+      value: { changes: [], newRows: [] },
+    });
+    const chosen = validateInputSubmission({
+      [unset?.block_id ?? ""]: { status: { selected_option: { value: "Ready" } } },
+    });
+    expect(chosen.ok && chosen.value.changes).toEqual([
+      { key: { issueNodeId: "node-1", status: null, targetDate: null }, status: "Ready" },
+    ]);
+  });
+
+  test("仕事名が空で目途日か親だけを入れた行は、仕事名を求める", () => {
+    expect(
+      validateInputSubmission({
+        "new-title:1": { value: { value: "  " } },
+        "new-date:1": { value: { selected_date: "2026-11-21" } },
+        "new-parent:2": { value: { selected_option: { value: "fallback" } } },
+        "new-title:3": { value: { value: "" } },
+      }),
+    ).toEqual({
+      ok: false,
+      errors: {
+        "new-title:1": "仕事名を入れてください。",
+        "new-title:2": "仕事名を入れてください。",
+      },
+    });
+  });
+
+  test("入力結果の見出しは、すべて済んだ時だけ「受け付けました」にする", () => {
+    const base = { updated: [], created: [], alreadyCreated: [], warnings: [], failures: [] };
+    expect(inputResultText({ ...base, updated: ["repo#1 A"] })).toStartWith(
+      "✅ 入力を受け付けました（新規 0 件・更新 1 件）。",
+    );
+    const partial = inputResultText({
+      ...base,
+      updated: ["repo#1 A"],
+      failures: ["B（親を選び直してください）"],
+      uncertain: ["C"],
+    });
+    expect(partial).toStartWith("⚠️ 一部を受け付けました（失敗 2 件");
+    expect(partial).not.toContain("入力を受け付けました");
+    expect(partial).toContain("作成されたか確認できませんでした。GitHubで確かめてください: C");
+    expect(inputResultText({ ...base, failures: ["B"] })).toStartWith(
+      "🚨 入力を反映できませんでした（失敗 1 件）",
+    );
   });
 
   test("仕事名だけの行は目途日と親を求める", () => {
