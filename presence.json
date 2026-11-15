@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "repository": "art-tra2021/arttra-git-workflow",
+  "actor": "roz",
+  "device": "device-1794722075108-36028",
+  "branch": "feature/199-reqadd-roz",
+  "head": "40b4cad1681acffdf3e915a8933c9ca9e98b42c0",
+  "observed_at_unix_ms": 1794723680151,
+  "files": [
+    {
+      "path": "apps/slack-adapter/README.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/slack-app-manifest.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/app.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/github-app.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/issue-not-created.ts",
+      "committed": false,
+      "staged": false,
+      "unstaged": false,
+      "untracked": true
+    },
+    {
+      "path": "apps/slack-adapter/src/job-scheduler.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/project-field-sync.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/reqadd-project.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/reqadd-service.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/reqadd.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/start.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/github-app.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/job-scheduler.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/project-field-sync.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/reqadd-service.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/reqadd.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "docs/slack-socket-vm-runbook.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    }
+  ]
+}
