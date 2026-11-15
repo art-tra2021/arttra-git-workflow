@@ -13,6 +13,18 @@ GitHub の生イベントを Slack へ転送せず、GitHub と Projects から�
 - `/ar new` のmodalとAIは、同じversion付きIssue作成commandを使う。
 - `AR-PR-004`だけの承認待ちはレビュー依頼通知へ一本化し、実CI失敗や混在失敗は抑止しない。
 
+## Slackのコマンド
+
+| 種別 | コマンド | すること |
+| --- | --- | --- |
+| 仕事を見る | `/ar task` | 自分が次にやる仕事を、本人だけに表示する |
+| Issueを作る | `/ar new` | Issue作成のmodalを開く |
+| 一覧を作る・更新する | `/ar project`、`/ar canvas` | 自分用のSlack List、Canvasを作り直す。`all`か`repo owner/name`で範囲を変える |
+| アカウントの連携 | `/ar connect github`、`/ar disconnect github` | GitHubとSlackのアカウントを本人確認して結び付ける |
+| 承認の確認 | `/ar approval <ID>` | 承認待ちの状態を見る |
+
+`/ar`単体や解釈できない語を付けた場合は、この一覧を本人だけに表示する。自分の仕事は表示しない。
+
 ## 開発
 
 ```sh

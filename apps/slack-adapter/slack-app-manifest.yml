@@ -8,8 +8,8 @@ features:
     always_online: false
   slash_commands:
     - command: /ar
-      description: 自分が次に行う仕事を表示する
-      usage_hint: "new | project [repo owner/name|all] | canvas [repo owner/name|all] | connect github"
+      description: 仕事の表示、Issueの作成、一覧の同期を行う（/ar 単体で使い方を表示）
+      usage_hint: "task | new | project [repo owner/name|all] | canvas [repo owner/name|all] | connect github"
       should_escape: false
 oauth_config:
   scopes:
