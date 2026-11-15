@@ -24,6 +24,7 @@ export function parseSchedulerMode(value: string | undefined): SchedulerMode {
 export const SCHEDULED_JOB_NAMES = [
   "work-digest",
   "deadline-reminders",
+  "reqadd-reminders",
   "issue-metadata-sync",
   "project-list-sync",
   "project-canvas-sync",
@@ -43,6 +44,7 @@ export type JobCadence = { kind: "hourly" } | { kind: "dailyJst"; hour: number; 
 export const DEFAULT_JOB_CADENCES: Readonly<Record<ScheduledJobName, JobCadence>> = {
   "work-digest": { kind: "dailyJst", hour: 9, minute: 0 },
   "deadline-reminders": { kind: "dailyJst", hour: 9, minute: 5 },
+  "reqadd-reminders": { kind: "dailyJst", hour: 9, minute: 10 },
   "issue-metadata-sync": { kind: "hourly" },
   "project-list-sync": { kind: "hourly" },
   "project-canvas-sync": { kind: "hourly" },

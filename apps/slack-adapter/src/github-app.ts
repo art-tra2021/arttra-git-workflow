@@ -11,7 +11,12 @@ import {
   parseIssueRelationships,
 } from "./issue-relationships.ts";
 import { type IssueTemplateSchema, resolveIssueTemplate } from "./issue-schema.ts";
-import { projectFieldSyncFailure, syncProjectFields } from "./project-field-sync.ts";
+import {
+  type ProjectFieldInput,
+  type ProjectFieldSyncResult,
+  projectFieldSyncFailure,
+  syncProjectFields,
+} from "./project-field-sync.ts";
 import {
   ORGANIZATION_PROJECT_ITEMS_QUERY,
   type OrganizationProjectItemsResponse,
@@ -24,6 +29,12 @@ import {
   projectIssueSnapshot,
 } from "./project-read-model.ts";
 import { toHumanWorkItem } from "./read-model.ts";
+import type { ReqaddProjectItem } from "./reqadd.ts";
+import {
+  REQADD_PROJECT_ITEMS_QUERY,
+  type ReqaddProjectItemsResponse,
+  reqaddProjectItemsPage,
+} from "./reqadd-project.ts";
 import type {
   GitHubCheckFailure,
   GitHubCheckFailureDiagnostics,
@@ -375,6 +386,65 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     return (await this.workIssues(100, null, { includeClosed: true })).map((issue) =>
       projectDigestWorkItem(issue, this.config.githubLogin),
     );
+  }
+
+  /** `/ar reqadd`の入力画面用。Project #8のopenなIssueを、更新に要るnode ID付きで返す。 */
+  async listReqaddProjectItems(): Promise<ReqaddProjectItem[]> {
+    if (!this.project) {
+      throw new Error(
+        "/ar reqaddにはGitHub Project（AR_GITHUB_PROJECT_OWNER/NUMBER）の設定が必要です。",
+      );
+    }
+    const items: ReqaddProjectItem[] = [];
+    let cursor: string | null = null;
+    do {
+      const response: ReqaddProjectItemsResponse = await this.api<ReqaddProjectItemsResponse>(
+        "/graphql",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            query: REQADD_PROJECT_ITEMS_QUERY,
+            variables: { owner: this.project.owner, number: this.project.number, cursor },
+          }),
+        },
+      );
+      const page = reqaddProjectItemsPage(response, this.project.number);
+      items.push(...page.items);
+      if (page.hasNextPage && !page.endCursor) {
+        throw new Error("GitHub Projectの次ページ位置を読み取れませんでした。");
+      }
+      cursor = page.hasNextPage ? page.endCursor : null;
+    } while (cursor);
+    return items;
+  }
+
+  /**
+   * 既存IssueのProject field（StatusとTarget date）だけを書き換え、read-backで確かめる。
+   * Issueのopen/closeと担当者は変えない。
+   */
+  async updateProjectItemFields(input: {
+    issueNodeId: string;
+    issueUrl: string;
+    values: ProjectFieldInput;
+  }): Promise<ProjectFieldSyncResult> {
+    if (!this.project) {
+      return projectFieldSyncFailure({
+        project: { owner: "(未設定)", number: 0 },
+        issue: { id: input.issueNodeId, url: input.issueUrl },
+        values: input.values,
+        assignees: [],
+        message: "AR_GITHUB_PROJECT_OWNER / AR_GITHUB_PROJECT_NUMBERが未設定です。",
+      });
+    }
+    return syncProjectFields({
+      request: <T>(query: string, variables: Record<string, unknown>) =>
+        this.api<T>("/graphql", { method: "POST", body: JSON.stringify({ query, variables }) }),
+      project: this.project,
+      issue: { id: input.issueNodeId, url: input.issueUrl },
+      values: input.values,
+      assignees: [],
+      verifyAssignees: false,
+    });
   }
 
   async claimIssue(

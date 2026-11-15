@@ -64,6 +64,83 @@ describe("GitHub App adapter", () => {
     expect(calls.filter((url) => url.includes("access_tokens"))).toHaveLength(1);
   });
 
+  test("/ar reqadd用にProjectのopenなIssueを全ページ読み、StatusとTarget dateだけを更新する", async () => {
+    const bodies: Array<{ query: string; variables: Record<string, unknown> }> = [];
+    let status = "Ready";
+    const client = new GitHubAppDependencies({
+      ...baseConfig(),
+      project: { owner: "art-tra2021", number: 8 },
+      fetch: async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/app/installations/99/access_tokens")) {
+          return json({ token: "installation-token", expires_at: "2026-08-01T01:00:00Z" });
+        }
+        if (url.endsWith("/graphql")) {
+          const body = JSON.parse(String(init?.body)) as {
+            query: string;
+            variables: Record<string, unknown>;
+          };
+          bodies.push(body);
+          if (body.query.includes("ArttraReqaddProjectItems")) {
+            const second = body.variables.cursor === "c2";
+            return json({
+              data: {
+                organization: {
+                  projectV2: {
+                    items: {
+                      pageInfo: { hasNextPage: !second, endCursor: second ? null : "c2" },
+                      nodes: [
+                        {
+                          fieldValues: { nodes: [{ name: "Ready", field: { name: "Status" } }] },
+                          content: {
+                            id: second ? "I_2" : "I_1",
+                            number: second ? 2 : 1,
+                            title: "仕事",
+                            url: `https://github.com/art-tra2021/repo/issues/${second ? 2 : 1}`,
+                            state: "OPEN",
+                            repository: { nameWithOwner: "art-tra2021/repo" },
+                            labels: { nodes: [{ name: "type/work" }] },
+                            assignees: { nodes: [{ login: "alice" }] },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            });
+          }
+          if (body.query.includes("query ArttraProjectFieldState")) {
+            return json({ data: projectFieldState("PVTI_item", null, status) });
+          }
+          if (body.query.includes("mutation ArttraUpdateProjectField")) {
+            status = "Intake";
+            return json({
+              data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: "PVTI_item" } } },
+            });
+          }
+        }
+        throw new Error(`予期しないrequest: ${url}`);
+      },
+    });
+
+    const items = await client.listReqaddProjectItems();
+    expect(items.map((item) => [item.issueNodeId, item.type, item.status])).toEqual([
+      ["I_1", "work", "Ready"],
+      ["I_2", "work", "Ready"],
+    ]);
+    const result = await client.updateProjectItemFields({
+      issueNodeId: "I_1",
+      issueUrl: "https://github.com/art-tra2021/repo/issues/1",
+      values: { status: "Intake" },
+    });
+    expect(result.status).toBe("synced");
+    expect(result.fields.some((field) => field.field === "Assignees")).toBe(false);
+    expect(
+      bodies.filter((body) => body.query.includes("mutation ArttraUpdateProjectField")),
+    ).toHaveLength(1);
+  });
+
   test("Issue template directoryの404は未導入として空一覧へ変換する", async () => {
     const client = dependencies(async (input) => {
       const url = String(input);

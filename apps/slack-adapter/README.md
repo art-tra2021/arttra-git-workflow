@@ -38,6 +38,55 @@ Issue modalでは実在するSlackメンバーを担当者と予定レビュワ�
 mise run slack:dev
 ```
 
+## 仕事の入力を依頼する（/ar reqadd）
+
+`/ar reqadd`は、依頼者が相手と期限を選び、相手それぞれに自分の仕事の更新と新しい仕事の追加を頼むコマンドである。
+入力はGitHub Project #8のカードへ反映し、誰が済んだかは`/ar reqadd`を実行したチャンネルの投稿1件で分かる。
+
+流れは次のとおり。
+
+1. 依頼者が`/ar reqadd`を実行し、依頼画面で相手（複数）、期限（初期値はその週の金曜、JST。過去日は不可）、ひとことを入れる。
+2. adapterはチャンネルへ親投稿を1件出し、相手ごとにDMで「入力する」ボタンを送る。GitHub未連携の相手には、`/ar connect github`の案内と「連携したので入力する」ボタンを送る。
+3. 相手がボタンを押すと、入力画面が開く。上段は本人が担当する未完了の項目（最大20件）の状態と目途日、下段は新しい仕事5行（仕事名、目途日、親のWork・Business）である。
+4. 送信すると画面はすぐ閉じ、上段で値を変えた項目だけProjectのStatusとTarget dateを更新する。DoneにしてもIssueは閉じない。下段の仕事名がある行から、親と同じrepositoryにTaskを作る（担当は本人、マージ方針は通常レビュー`merge/review`、Statusは`Ready`）。結果は本人へDMで返す。
+5. 親投稿を書き換え（入力済みと件数、`n/m 人完了`）、最初の入力のときだけthreadへ「〇〇さんが入力しました（新規 x 件・更新 y 件）」を返信する。全員が済んだら、threadで依頼者を1回だけmentionする。
+6. 毎日9:10（JST）の`reqadd-reminders`が、期限が翌日の依頼で未入力の相手へ1回だけDMで再依頼する。期限を過ぎた依頼は、threadへ未入力者の一覧を1回だけ出す。
+
+親投稿、threadの返信、期限後の一覧では、人名をSlackの表示名で書き、mentionしない。通知を鳴らすのは、全員完了の時の依頼者へのmentionだけである。
+入力し直し（同じ人がもう一度ボタンを押す）はできる。上段は最新の値で開き、下段は新しく書いた分だけTaskを作る。
+
+### 設定
+
+| 環境変数 | 意味 |
+| --- | --- |
+| `AR_SLACK_REQADD_REQUESTER_IDS` | `/ar reqadd`を使えるSlack user ID（カンマ区切り）。未設定なら`AR_SLACK_APPROVER_IDS`と同じ人 |
+| `AR_REQADD_FALLBACK_PARENT_URL` | 親の選択肢の先頭に置く「その他の仕事」の親Issue URL。未設定ならこの選択肢を出さない |
+
+`/ar reqadd`は`AR_GITHUB_BACKEND=app`と`AR_GITHUB_PROJECT_OWNER`・`AR_GITHUB_PROJECT_NUMBER`があるときだけ有効になる。無いときは、実行した本人にだけ設定が無いことを返す。
+Slack Appには既存の`users:read`（表示名の取得）、`im:write`（DM）、`chat:write`が要る。親投稿を出すチャンネルにAppを追加しておく。
+
+### Firestoreの記録
+
+| collection（本番は`arttra_prod_`を前に付ける） | key（document IDはこれをbase64urlにした文字列） | 中身 |
+| --- | --- | --- |
+| `reqadd_request` | 依頼のID（requestId） | 依頼者、期限、チャンネル、親投稿の`messageTs`、相手ごとの状態（`pending`・`done`・`unlinked`）と件数、`revision` |
+| `reqadd_task` | `requestId:相手のSlack user ID:入力の回数:行番号` | その行から作ったTaskのIssue番号とURL。同じkeyは1回しか作らない |
+
+依頼の記録は、`revision`を条件にした書き換え（compareAndSet）で更新する。
+Taskの記録はFirestoreの新規作成で先に取り、取れた送信だけがIssueを作る。このため、ボタンの二重押しや送信の再送でも、同じ行のTaskは1枚しかできない。
+入力の回数は送信を処理するたびに1増えるので、入力し直した時の下段は別のkeyになる。
+相手ごとの`doneNotifiedAt`（入力の知らせ）、`reminderSentAt`（再依頼）と、依頼の`allDoneNotifiedAt`（全員完了）、`overdueNotifiedAt`（期限後の一覧）は、送る前に記録して1回だけにする。
+記録には期限から60日後の`expireAt`を付ける。TTL policyを`expireAt`に設定しておくと消える。
+
+### 困った時の見方
+
+- 依頼画面を送っても親投稿が出ない: 依頼者へDMで理由が届く。`not_in_channel`ならAppをチャンネルへ追加してから実行し直す。
+- 相手にDMが届かない: 依頼者に、DMを送れなかった相手が本人だけに見える形で返る。Botや無効なアカウントを選んでいないか確かめる。
+- 入力画面が「GitHubとの連携を確認できません」と出る: 相手が`/ar connect github`を済ませてから、DMのボタンを押し直す。押した時点で連携を確かめ、親投稿の表示も「未入力」へ戻る。
+- 入力の結果に失敗が出る: 本人へのDMに、項目ごとの理由が出る。Taskの作成に失敗した行は記録を消すので、直して送り直せば作れる。全部が失敗した送信は「入力済み」にしない。
+- 進み具合を確かめたい: `reqadd_request`の該当documentの`value.recipients`を見る。Taskの重複を疑う時は、`reqadd_task`の`value.issue`を見る。
+- 再依頼が出ない: `scheduled_job_run`の`reqadd-reminders`の記録を見る。HTTPで実行するときは固定JSON `{"schemaVersion":1,"kind":"reqadd.remind"}`を`/internal/reqadd-reminders`へ送り、本文に対する`X-Ar-Job-Signature`を設定する。
+
 ## Project Listを同期する
 
 `AR_GITHUB_PROJECT_OWNER`と`AR_GITHUB_PROJECT_NUMBER`を設定すると、単一repositoryのIssue一覧ではなくOrganization Projectを正本として複数repositoryの項目を取得する。
@@ -209,7 +258,7 @@ Cloud Runのinstanceが切り替わっても同じcacheを利用し、操作の�
 ## Cloud Run runtime
 
 本番のCloud Runでは`AR_SLACK_TRANSPORT=http`を指定し、GitHub webhookとOAuth callbackを受信する。
-定期処理（日次まとめ、期限通知、各種の定期同期、レビュー再通知）は、環境変数`AR_SCHEDULER=inprocess`を指定した常駐VMのprocessが、process内のtimerで実行する。
+定期処理（日次まとめ、期限通知、各種の定期同期、レビュー再通知、reqaddの再依頼）は、環境変数`AR_SCHEDULER=inprocess`を指定した常駐VMのprocessが、process内のtimerで実行する。
 `AR_SCHEDULER`は`off`（既定）か`inprocess`だけを受け付け、Cloud Runには設定しない。
 ジョブ名と時間枠ごとにFirestoreで実行権を取るため、再起動や二重起動でも同じ枠は一度しか実行しない。
 `/internal/*`の各endpointは、手動実行や切り戻し用に従来どおり残す。

@@ -144,6 +144,7 @@ mise run slack:socket:deploy -- --env AR_SCHEDULER=off --yes
 | --- | --- | --- | --- |
 | `work-digest` | 毎日9:00（JST） | JSTの日付 | `AR_SLACK_WORK_CHANNEL_ID`または`AR_SLACK_PROJECT_LIST_CHANNEL_ID` |
 | `deadline-reminders` | 毎日9:05（JST） | JSTの日付 | 同上 |
+| `reqadd-reminders` | 毎日9:10（JST） | JSTの日付 | `AR_GITHUB_BACKEND=app`と`AR_GITHUB_PROJECT_OWNER`・`AR_GITHUB_PROJECT_NUMBER` |
 | `issue-metadata-sync` | 1時間ごと（毎時0分） | UTCの時刻 | なし |
 | `project-list-sync` | 1時間ごと | UTCの時刻 | `AR_SLACK_PROJECT_LIST_CHANNEL_ID`と`AR_SLACK_SHARED_REPOSITORY` |
 | `project-canvas-sync` | 1時間ごと | UTCの時刻 | なし |
@@ -338,7 +339,7 @@ HTTPの`/internal/*`は明示の要求として毎回実行するので、両方
    ```
 
 3. ログと実行記録で各ジョブの実行を確かめる。
-   起動時の`定期処理をprocess内で開始しました`に7つのジョブ名が並ぶこと、毎時0分過ぎに5つの毎時ジョブの`を実行しました`が出ることを確かめる。
+   起動時の`定期処理をprocess内で開始しました`に8つのジョブ名（`/ar reqadd`の前提が無ければ`reqadd-reminders`を除く7つ）が並ぶこと、毎時0分過ぎに5つの毎時ジョブの`を実行しました`が出ることを確かめる。
    翌朝9:00と9:05（JST）に`work-digest`と`deadline-reminders`が出ること、Slackに日次まとめが1件だけ届くことを確かめる。
    Firestoreの`arttra_prod_scheduled_job_run`で、各枠の記録が1件ずつ`success`になり、`source`が`inprocess`であることも見る。
    問題があれば[定期処理の切り戻し](#定期処理の切り戻し)に従う。
