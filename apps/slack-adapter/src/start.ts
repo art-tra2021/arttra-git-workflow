@@ -60,6 +60,7 @@ import type { ProjectListClient } from "./project-list.ts";
 import { ProjectListSyncService, parseProjectListSyncCommand } from "./project-list-service.ts";
 import { filterItemsByAccessibleRepositories, normalizeRepositoryScope } from "./project-scope.ts";
 import { buildHealthResponse } from "./release-info.ts";
+import { ReqaddService, type ReqaddSlackClient } from "./reqadd-service.ts";
 import {
   LifecycleNotifierWithRequiredActionDm,
   RequiredActionDmService,
@@ -100,6 +101,17 @@ const project = projectConfig();
 // diffはProject経由の取得を前提にするため、Project未設定のfallback経路では差分を作らず起動を止める。
 assertDiffDigestProject(digestMode, project);
 const approverUserIds = csv("AR_SLACK_APPROVER_IDS");
+// /ar reqaddを使える人。未設定なら承認者と同じ人にする。
+const reqaddRequesterIds = csv("AR_SLACK_REQADD_REQUESTER_IDS");
+const reqaddFallbackParentUrl = optional("AR_REQADD_FALLBACK_PARENT_URL");
+if (
+  reqaddFallbackParentUrl &&
+  !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/[1-9][0-9]*$/.test(
+    reqaddFallbackParentUrl,
+  )
+) {
+  throw new Error("AR_REQADD_FALLBACK_PARENT_URLにはGitHub IssueのURLを指定してください。");
+}
 const selfApproverUserIds = csv("AR_SLACK_SELF_APPROVER_IDS");
 const notificationReplayOperatorIds = csv("AR_NOTIFICATION_REPLAY_OPERATOR_IDS");
 const githubCapabilities = GitHubCapabilityGrants.fromJson(
@@ -295,6 +307,24 @@ const workNotificationService = workNotificationChannelId
       { mode: notificationMode, digestMode },
     )
   : null;
+// /ar reqaddはProject #8のnode IDとfield更新を使うため、GitHub App backendとProject設定がある時だけ有効にする。
+const reqaddService =
+  dependencies instanceof GitHubAppDependencies && project
+    ? new ReqaddService({
+        store,
+        slack: slackClient as unknown as ReqaddSlackClient,
+        github: {
+          listReqaddProjectItems: () => dependencies.listReqaddProjectItems(),
+          updateProjectItemFields: (input) => dependencies.updateProjectItemFields(input),
+          createIssue: (command) => dependencies.createIssue(command),
+          listIssueTemplatesForViewer: (login, repositoryName) =>
+            issueMetadata.listIssueTemplatesForViewer(login, repositoryName),
+        },
+        identity: identityService,
+        requesterIds: reqaddRequesterIds.length > 0 ? reqaddRequesterIds : approverUserIds,
+        fallbackParentUrl: reqaddFallbackParentUrl,
+      })
+    : null;
 const receiver =
   transport === "http"
     ? new ExpressReceiver({
@@ -466,6 +496,7 @@ const runDeadlineReminders = workNotificationService
 // 日次digestの中身はWorkNotificationService.sendDigest()に任せ、ここでは呼ぶだけにする。
 const runWorkDigest = workNotificationService ? () => workNotificationService.sendDigest() : null;
 const runReviewReminders = reviewService ? () => reviewService.remindPending() : null;
+const runReqaddReminders = reqaddService ? () => reqaddService.sendReminders() : null;
 const jobRunLedger = new JobRunLedger(store, `http:${process.pid}`);
 const runJobFromHttp = <T>(
   name: ScheduledJobName,
@@ -783,6 +814,34 @@ receiver?.router.post(
 );
 
 receiver?.router.post(
+  "/internal/reqadd-reminders",
+  raw({ type: "application/json", limit: "1kb" }),
+  async (request, response) => {
+    if (!runReqaddReminders) {
+      response.status(503).json({ ok: false, error: "github_app_project_required" });
+      return;
+    }
+    const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
+    if (!verifyJobSignature(body, request.header("x-ar-job-signature") ?? "", jobSecret)) {
+      response.status(401).json({ ok: false, error: "invalid_job_signature" });
+      return;
+    }
+    try {
+      const command = JSON.parse(body) as { schemaVersion?: number; kind?: string };
+      if (command.schemaVersion !== 1 || command.kind !== "reqadd.remind") {
+        response.status(400).json({ ok: false, error: "invalid_reqadd_reminder_command" });
+        return;
+      }
+      const result = await runJobFromHttp("reqadd-reminders", runReqaddReminders);
+      response.status(200).json({ ok: true, schemaVersion: 1, ...result });
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "reqaddの再依頼に失敗しました。");
+      response.status(500).json({ ok: false, error: "reqadd_reminder_failed" });
+    }
+  },
+);
+
+receiver?.router.post(
   "/internal/github-events",
   raw({ type: "application/json", limit: "2mb" }),
   async (request, response) => {
@@ -831,6 +890,7 @@ const app = createSlackApp(dependencies, {
   syncProjectList: (channelId, requesterUserId) =>
     projectListService.sync(channelId, requesterUserId),
   syncProjectProjection,
+  ...(reqaddService ? { reqadd: reqaddService } : {}),
   tokenVerificationEnabled: process.env.AR_SLACK_TOKEN_VERIFICATION !== "off",
 });
 
@@ -860,6 +920,7 @@ if (schedulerMode === "inprocess") {
       "work-digest": runWorkDigest && withOutcome(runWorkDigest, successOutcome),
       "deadline-reminders":
         runDeadlineReminders && withOutcome(runDeadlineReminders, successOutcome),
+      "reqadd-reminders": runReqaddReminders && withOutcome(runReqaddReminders, successOutcome),
       "issue-metadata-sync": withOutcome(runIssueMetadataSync, successOutcome),
       "project-list-sync": runProjectListSync && withOutcome(runProjectListSync, successOutcome),
       "project-canvas-sync": withOutcome(runProjectCanvasSync, projectCanvasSyncOutcome),

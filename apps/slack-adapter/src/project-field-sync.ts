@@ -164,6 +164,11 @@ interface SyncProjectFieldsInput {
   issue: { id: string; url: string };
   values: ProjectFieldInput;
   assignees: string[];
+  /**
+   * Assigneesのread-back照合を行うか。既定はtrue（Issue作成直後の確認）。
+   * 既存Issueの状態・目途日だけを直す経路（/ar reqadd）は担当者を変えないためfalseにする。
+   */
+  verifyAssignees?: boolean;
 }
 
 export function normalizeProjectFieldInput(input: ProjectFieldInput): ProjectFieldInput {
@@ -228,7 +233,9 @@ export async function syncProjectFields(
 ): Promise<ProjectFieldSyncResult> {
   const values = normalizeProjectFieldInput(input.values);
   const requested = projectFieldEntries(values);
+  const verifyAssignees = input.verifyAssignees ?? true;
   const assignees = uniqueLogins(input.assignees);
+  const checkedAssignees = verifyAssignees ? assignees : null;
   const base = {
     schemaVersion: 1 as const,
     project: { ...input.project, id: null, itemId: null },
@@ -243,7 +250,7 @@ export async function syncProjectFields(
     return {
       ...base,
       status: "failed",
-      fields: failedFields(requested, assignees, message(error)),
+      fields: failedFields(requested, checkedAssignees, message(error)),
     };
   }
   const project = initial.organization?.projectV2;
@@ -252,17 +259,25 @@ export async function syncProjectFields(
     const reason = !project
       ? `Organization Project ${input.project.owner}#${input.project.number}を読み取れませんでした。Projects read権限と設定を確認してください。`
       : "作成したIssueをGraphQLで読み取れませんでした。";
-    return { ...base, status: "failed", fields: failedFields(requested, assignees, reason) };
+    return { ...base, status: "failed", fields: failedFields(requested, checkedAssignees, reason) };
   }
   const projectBase = { ...base, project: { ...input.project, id: project.id, itemId: null } };
   if (project.fields.totalCount > project.fields.nodes.length) {
     const reason = "Project fieldが100件を超えており、安全にfieldを特定できませんでした。";
-    return { ...projectBase, status: "failed", fields: failedFields(requested, assignees, reason) };
+    return {
+      ...projectBase,
+      status: "failed",
+      fields: failedFields(requested, checkedAssignees, reason),
+    };
   }
   if (issue.projectItems.totalCount > issue.projectItems.nodes.length) {
     const reason =
       "IssueのProject itemが100件を超えており、重複なく対象itemを特定できませんでした。";
-    return { ...projectBase, status: "failed", fields: failedFields(requested, assignees, reason) };
+    return {
+      ...projectBase,
+      status: "failed",
+      fields: failedFields(requested, checkedAssignees, reason),
+    };
   }
   let item =
     issue.projectItems.nodes.find((candidate) => candidate?.project.id === project.id) ?? null;
@@ -282,7 +297,7 @@ export async function syncProjectFields(
       return {
         ...projectBase,
         status: "failed",
-        fields: failedFields(requested, assignees, message(error)),
+        fields: failedFields(requested, checkedAssignees, message(error)),
       };
     }
   }
@@ -356,18 +371,19 @@ export async function syncProjectFields(
   const initialAssignees = sortedLogins(
     issue.assignees.nodes.flatMap((value) => (value?.login ? [value.login] : [])),
   );
-  results.push({
-    field: "Assignees",
-    requested: expectedAssignees,
-    actual: initialAssignees,
-    status: sameValues(expectedAssignees, initialAssignees) ? "unchanged" : "failed",
-    ...(!sameValues(expectedAssignees, initialAssignees)
-      ? {
-          message:
-            "Issue Assigneeのwrite後read-backが一致しませんでした。Issue権限と入力を確認してください。",
-        }
-      : {}),
-  });
+  if (verifyAssignees)
+    results.push({
+      field: "Assignees",
+      requested: expectedAssignees,
+      actual: initialAssignees,
+      status: sameValues(expectedAssignees, initialAssignees) ? "unchanged" : "failed",
+      ...(!sameValues(expectedAssignees, initialAssignees)
+        ? {
+            message:
+              "Issue Assigneeのwrite後read-backが一致しませんでした。Issue権限と入力を確認してください。",
+          }
+        : {}),
+    });
 
   let verified: ProjectSchemaResponse | null = null;
   try {
@@ -398,7 +414,9 @@ export async function syncProjectFields(
         verified.node.assignees.nodes.flatMap((value) => (value?.login ? [value.login] : [])),
       )
     : null;
-  const assigneeResult = results.find((result) => result.field === "Assignees");
+  const assigneeResult = verifyAssignees
+    ? results.find((result) => result.field === "Assignees")
+    : undefined;
   if (assigneeResult && verifiedAssignees) {
     assigneeResult.actual = verifiedAssignees;
     if (!sameValues(expectedAssignees, verifiedAssignees)) {
@@ -472,7 +490,7 @@ function itemValues(
 
 function failedFields(
   requested: ReturnType<typeof projectFieldEntries>,
-  assignees: string[],
+  assignees: string[] | null,
   reason: string,
 ): ProjectFieldResult[] {
   return [
@@ -483,13 +501,17 @@ function failedFields(
       status: "failed" as const,
       message: reason,
     })),
-    {
-      field: "Assignees" as const,
-      requested: sortedLogins(assignees),
-      actual: null,
-      status: "failed" as const,
-      message: reason,
-    },
+    ...(assignees
+      ? [
+          {
+            field: "Assignees" as const,
+            requested: sortedLogins(assignees),
+            actual: null,
+            status: "failed" as const,
+            message: reason,
+          },
+        ]
+      : []),
   ];
 }
 

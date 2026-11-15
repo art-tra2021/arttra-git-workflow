@@ -101,6 +101,46 @@ describe("GitHub Project field sync", () => {
     expect(result.recovery.instructions.join(" ")).toContain("新しいIssueを作らない");
   });
 
+  test("担当者を照合しない指定では、StatusとTarget dateだけを書いて確かめる", async () => {
+    const values = new Map<string, string>([["Status", "In progress"]]);
+    const request: GraphqlRequest = async <T>(
+      query: string,
+      variables: Record<string, unknown>,
+    ) => {
+      if (query.includes("query ArttraProjectFieldState")) {
+        return envelope(state("PVTI_item", values, ["bob"])) as T;
+      }
+      if (query.includes("mutation ArttraUpdateProjectField")) {
+        const field = fields.find((candidate) => candidate.id === variables.fieldId);
+        const value = variables.value as { singleSelectOptionId?: string; date?: string };
+        const selected =
+          field && "options" in field
+            ? field.options.find((option) => option.id === value.singleSelectOptionId)
+            : undefined;
+        if (!field) throw new Error("invalid fake mutation");
+        values.set(field.name, selected?.name ?? value.date ?? "");
+        return envelope({
+          updateProjectV2ItemFieldValue: { projectV2Item: { id: "PVTI_item" } },
+        }) as T;
+      }
+      throw new Error("unexpected GraphQL operation");
+    };
+    const result = await syncProjectFields({
+      request,
+      project: { owner: "art-tra2021", number: 8 },
+      issue: { id: "I_issue", url: "https://github.example/issues/42" },
+      values: { status: "Done", targetDate: "2026-11-27" },
+      assignees: [],
+      verifyAssignees: false,
+    });
+    expect(result.status).toBe("synced");
+    expect(result.fields.map((field) => [field.field, field.status])).toEqual([
+      ["Target date", "updated"],
+      ["Status", "updated"],
+    ]);
+    expect(values.get("Status")).toBe("Done");
+  });
+
   test("Project #8の列挙値と実在日だけを受け付ける", () => {
     expect(
       normalizeProjectFieldInput({

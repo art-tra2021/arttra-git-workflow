@@ -1,6 +1,7 @@
 import { createPrivateKey, sign } from "node:crypto";
 import type { SlackAdapterDependencies } from "./app.ts";
 import { buildIssueCreateInput, parseIssueForm } from "./github-shared.ts";
+import { markIssueNotCreated } from "./issue-not-created.ts";
 import {
   hasIssueRelationships,
   type IssueReference,
@@ -11,7 +12,12 @@ import {
   parseIssueRelationships,
 } from "./issue-relationships.ts";
 import { type IssueTemplateSchema, resolveIssueTemplate } from "./issue-schema.ts";
-import { projectFieldSyncFailure, syncProjectFields } from "./project-field-sync.ts";
+import {
+  type ProjectFieldInput,
+  type ProjectFieldSyncResult,
+  projectFieldSyncFailure,
+  syncProjectFields,
+} from "./project-field-sync.ts";
 import {
   ORGANIZATION_PROJECT_ITEMS_QUERY,
   type OrganizationProjectItemsResponse,
@@ -24,6 +30,12 @@ import {
   projectIssueSnapshot,
 } from "./project-read-model.ts";
 import { toHumanWorkItem } from "./read-model.ts";
+import type { ReqaddProjectItem } from "./reqadd.ts";
+import {
+  REQADD_PROJECT_ITEMS_QUERY,
+  type ReqaddProjectItemsResponse,
+  reqaddProjectItemsPage,
+} from "./reqadd-project.ts";
 import type {
   GitHubCheckFailure,
   GitHubCheckFailureDiagnostics,
@@ -377,6 +389,65 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     );
   }
 
+  /** `/ar reqadd`の入力画面用。Project #8のopenなIssueを、更新に要るnode ID付きで返す。 */
+  async listReqaddProjectItems(): Promise<ReqaddProjectItem[]> {
+    if (!this.project) {
+      throw new Error(
+        "/ar reqaddにはGitHub Project（AR_GITHUB_PROJECT_OWNER/NUMBER）の設定が必要です。",
+      );
+    }
+    const items: ReqaddProjectItem[] = [];
+    let cursor: string | null = null;
+    do {
+      const response: ReqaddProjectItemsResponse = await this.api<ReqaddProjectItemsResponse>(
+        "/graphql",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            query: REQADD_PROJECT_ITEMS_QUERY,
+            variables: { owner: this.project.owner, number: this.project.number, cursor },
+          }),
+        },
+      );
+      const page = reqaddProjectItemsPage(response, this.project.number);
+      items.push(...page.items);
+      if (page.hasNextPage && !page.endCursor) {
+        throw new Error("GitHub Projectの次ページ位置を読み取れませんでした。");
+      }
+      cursor = page.hasNextPage ? page.endCursor : null;
+    } while (cursor);
+    return items;
+  }
+
+  /**
+   * 既存IssueのProject field（StatusとTarget date）だけを書き換え、read-backで確かめる。
+   * Issueのopen/closeと担当者は変えない。
+   */
+  async updateProjectItemFields(input: {
+    issueNodeId: string;
+    issueUrl: string;
+    values: ProjectFieldInput;
+  }): Promise<ProjectFieldSyncResult> {
+    if (!this.project) {
+      return projectFieldSyncFailure({
+        project: { owner: "(未設定)", number: 0 },
+        issue: { id: input.issueNodeId, url: input.issueUrl },
+        values: input.values,
+        assignees: [],
+        message: "AR_GITHUB_PROJECT_OWNER / AR_GITHUB_PROJECT_NUMBERが未設定です。",
+      });
+    }
+    return syncProjectFields({
+      request: <T>(query: string, variables: Record<string, unknown>) =>
+        this.api<T>("/graphql", { method: "POST", body: JSON.stringify({ query, variables }) }),
+      project: this.project,
+      issue: { id: input.issueNodeId, url: input.issueUrl },
+      values: input.values,
+      assignees: [],
+      verifyAssignees: false,
+    });
+  }
+
   async claimIssue(
     repository: string,
     issueNumber: number,
@@ -397,27 +468,51 @@ export class GitHubAppDependencies implements SlackAdapterDependencies, GitHubRe
     command: CreateIssueCommand,
     viewerGitHubLogin?: string,
   ): Promise<CreatedIssue> {
-    const viewer = await this.resolveIssueViewer(command, viewerGitHubLogin);
-    if (viewer) {
-      await this.assertRepositoryAccess(command.repository, viewer);
+    // 作成要求を送る前の失敗と、GitHubが4xxで拒んだ失敗には「作っていない」印を付ける。
+    // 呼び出し側は、印の無い失敗をGitHub側で作られた可能性があるものとして扱える。
+    let schema: IssueTemplateSchema;
+    let relationships: ReturnType<typeof normalizeIssueRelationships>;
+    let relationTargets: Map<string, ApiIssue>;
+    let input: ReturnType<typeof buildIssueCreateInput>;
+    try {
+      const viewer = await this.resolveIssueViewer(command, viewerGitHubLogin);
+      if (viewer) {
+        await this.assertRepositoryAccess(command.repository, viewer);
+      }
+      const templates = await this.listIssueTemplates(command.repository);
+      const resolved = resolveIssueTemplate(templates, command.template);
+      if (!resolved) {
+        throw new Error(`Issue templateが見つかりません: ${command.template}`);
+      }
+      schema = resolved;
+      relationships = command.relationships
+        ? normalizeIssueRelationships(command.relationships, command.repository)
+        : parseIssueRelationships(undefined, command.fields, command.repository);
+      relationTargets = hasIssueRelationships(relationships)
+        ? await this.validateIssueRelationships(command.repository, relationships, viewer)
+        : new Map<string, ApiIssue>();
+      this.assertIssueHierarchy(command.template, relationships, relationTargets);
+      input = buildIssueCreateInput(command, schema);
+    } catch (error) {
+      throw markIssueNotCreated(error);
     }
-    const templates = await this.listIssueTemplates(command.repository);
-    const schema = resolveIssueTemplate(templates, command.template);
-    if (!schema) {
-      throw new Error(`Issue templateが見つかりません: ${command.template}`);
+    let issue: ApiIssue;
+    try {
+      issue = await this.api<ApiIssue>(`/repos/${command.repository}/issues`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+    } catch (error) {
+      if (
+        error instanceof GitHubApiError &&
+        error.status >= 400 &&
+        error.status < 500 &&
+        error.status !== 408
+      ) {
+        throw markIssueNotCreated(error);
+      }
+      throw error;
     }
-    const relationships = command.relationships
-      ? normalizeIssueRelationships(command.relationships, command.repository)
-      : parseIssueRelationships(undefined, command.fields, command.repository);
-    const relationTargets = hasIssueRelationships(relationships)
-      ? await this.validateIssueRelationships(command.repository, relationships, viewer)
-      : new Map<string, ApiIssue>();
-    this.assertIssueHierarchy(command.template, relationships, relationTargets);
-    const input = buildIssueCreateInput(command, schema);
-    const issue = await this.api<ApiIssue>(`/repos/${command.repository}/issues`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
     let created: CreatedIssue = { number: issue.number, title: issue.title, url: issue.html_url };
     if (hasIssueRelationships(relationships)) {
       if (!Number.isSafeInteger(issue.id)) {

@@ -228,12 +228,17 @@ describe("時間枠", () => {
     ).toBe(Date.parse("2026-11-14T00:05:00Z"));
   });
 
-  test("既定の周期は毎時5件と、9:00と9:05の日次2件である", () => {
+  test("既定の周期は毎時5件と、9:00、9:05、9:10の日次3件である", () => {
     expect(DEFAULT_JOB_CADENCES["work-digest"]).toEqual({ kind: "dailyJst", hour: 9, minute: 0 });
     expect(DEFAULT_JOB_CADENCES["deadline-reminders"]).toEqual({
       kind: "dailyJst",
       hour: 9,
       minute: 5,
+    });
+    expect(DEFAULT_JOB_CADENCES["reqadd-reminders"]).toEqual({
+      kind: "dailyJst",
+      hour: 9,
+      minute: 10,
     });
     for (const name of [
       "project-list-sync",

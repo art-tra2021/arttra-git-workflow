@@ -24,6 +24,17 @@ import { workItemBlocks } from "./presentation.ts";
 import type { ProjectFieldInput, ProjectStatus } from "./project-field-sync.ts";
 import { allAccessibleScope, type RepositoryScope, repositoryScope } from "./project-scope.ts";
 import {
+  parseInputMetadata,
+  parseRequestMetadata,
+  REQADD_INPUT_CALLBACK_ID,
+  REQADD_OPEN_ACTION_ID,
+  REQADD_REQUEST_CALLBACK_ID,
+  reqaddMessageModal,
+  type SlackStateValues,
+  validateInputSubmission,
+} from "./reqadd.ts";
+import type { ReqaddService } from "./reqadd-service.ts";
+import {
   approvalDecisionMessage,
   approvalRequestMessage,
   selfMergeStoppedMessage,
@@ -86,6 +97,8 @@ export interface SlackAppOptions {
   receiver?: Receiver;
   tokenVerificationEnabled?: boolean;
   resolveSlackUserId?: (githubLogin: string) => Promise<string | null>;
+  /** `/ar reqadd`。GitHub AppとProjectの設定がある時だけ渡す。 */
+  reqadd?: ReqaddService;
 }
 
 export interface ProjectProjectionRequest {
@@ -173,6 +186,31 @@ export function createSlackApp(
       return;
     }
     await ack();
+    if (normalized === "reqadd") {
+      if (!options.reqadd) {
+        await respond({
+          response_type: "ephemeral",
+          text: slackPlain(
+            "warning",
+            "/ar reqaddは設定されていません。GitHub App backendとGitHub Projectの設定が必要です。",
+          ),
+        });
+        return;
+      }
+      const denial = options.reqadd.requesterDenialReason(command.user_id);
+      if (denial) {
+        await respond({ response_type: "ephemeral", text: slackPlain("warning", denial) });
+        return;
+      }
+      await client.views.open({
+        trigger_id: command.trigger_id,
+        view: options.reqadd.requestModal({
+          channelId: command.channel_id,
+          slackTeamId: command.team_id,
+        }),
+      });
+      return;
+    }
     if (normalized === "connect github") {
       const url = await options.identityService.connectUrl(command.team_id, command.user_id);
       await respond({
@@ -773,6 +811,92 @@ export function createSlackApp(
     }
   });
 
+  app.view(REQADD_REQUEST_CALLBACK_ID, async ({ ack, body, view }) => {
+    const reqadd = options.reqadd;
+    if (!reqadd) {
+      await ack();
+      return;
+    }
+    const metadata = parseRequestMetadata(view.private_metadata);
+    const validation = reqadd.validateRequest(view.state.values as unknown as SlackStateValues);
+    if (!validation.ok) {
+      await ack({ response_action: "errors", errors: validation.errors });
+      return;
+    }
+    await ack();
+    if (!metadata) {
+      await reqadd.notifyUser(
+        body.user.id,
+        slackPlain(
+          "error",
+          "依頼先のチャンネルを読み取れませんでした。もう一度 /ar reqadd を実行してください。",
+        ),
+      );
+      return;
+    }
+    try {
+      await reqadd.createRequest({
+        slackTeamId: metadata.slackTeamId || body.team?.id || "",
+        requesterSlackUserId: body.user.id,
+        channelId: metadata.channelId,
+        request: validation.value,
+      });
+    } catch (error) {
+      await reqadd.notifyUser(
+        body.user.id,
+        slackPlain("error", error instanceof Error ? error.message : "依頼を作れませんでした。"),
+      );
+    }
+  });
+
+  app.action(REQADD_OPEN_ACTION_ID, async ({ ack, action, body, client }) => {
+    await ack();
+    const reqadd = options.reqadd;
+    if (!reqadd || action.type !== "button" || !action.value || !("trigger_id" in body)) return;
+    const requestId = action.value;
+    await openReqaddInputFlow({
+      views: client.views as unknown as IssueModalViews,
+      triggerId: body.trigger_id,
+      loadView: () =>
+        reqadd.buildInputView({
+          slackTeamId: body.team?.id ?? "",
+          slackUserId: body.user.id,
+          requestId,
+        }),
+    });
+  });
+
+  app.view(REQADD_INPUT_CALLBACK_ID, async ({ ack, body, view }) => {
+    const reqadd = options.reqadd;
+    if (!reqadd) {
+      await ack();
+      return;
+    }
+    const validation = validateInputSubmission(view.state.values as unknown as SlackStateValues);
+    if (!validation.ok) {
+      await ack({ response_action: "errors", errors: validation.errors });
+      return;
+    }
+    // 結果はDMで返す。GitHubの待ちで画面を開いたままにしない。
+    await ack();
+    const metadata = parseInputMetadata(view.private_metadata);
+    if (!metadata) {
+      await reqadd.notifyUser(
+        body.user.id,
+        slackPlain(
+          "error",
+          "入力画面の情報を読み取れませんでした。DMのボタンからもう一度開いてください。",
+        ),
+      );
+      return;
+    }
+    await reqadd.submitInput({
+      slackUserId: body.user.id,
+      metadata,
+      submission: validation.value,
+    });
+  });
+
   app.action("ar.claim", async ({ ack, action, body, respond }) => {
     await ack();
     if (action.type !== "button" || !action.value) {
@@ -998,6 +1122,36 @@ export async function openIssueRepositoryFlow(options: IssueRepositoryFlowOption
   } catch (error) {
     nextView = issueErrorModal(
       error instanceof Error ? error.message : "repository一覧を取得できませんでした。",
+    );
+  }
+  await options.views.update({ view_id: viewId, view: nextView });
+}
+
+interface ReqaddInputFlowOptions {
+  views: IssueModalViews;
+  triggerId: string;
+  loadView(): Promise<unknown>;
+}
+
+/**
+ * Slackは3秒以内のviews.openを求めるため、先に読み込み中の画面を開き、
+ * GitHubから読んだ入力画面へviews.updateで差し替える。
+ */
+export async function openReqaddInputFlow(options: ReqaddInputFlowOptions): Promise<void> {
+  const opened = await options.views.open({
+    trigger_id: options.triggerId,
+    view: reqaddMessageModal("自分の仕事を読み込んでいます…"),
+  });
+  const viewId = opened.view?.id;
+  if (!viewId) {
+    throw new Error("入力画面のIDをSlackから取得できませんでした。");
+  }
+  let nextView: unknown;
+  try {
+    nextView = await options.loadView();
+  } catch (error) {
+    nextView = reqaddMessageModal(
+      `${error instanceof Error ? error.message : "入力画面を作れませんでした。"}\n\n少し待ってから、DMのボタンをもう一度押してください。`,
     );
   }
   await options.views.update({ view_id: viewId, view: nextView });
