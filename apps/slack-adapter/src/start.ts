@@ -28,6 +28,19 @@ import {
   LocalGitHubJobQueue,
   verifyJobSignature,
 } from "./job-queue.ts";
+import {
+  DEFAULT_JOB_CADENCES,
+  defineScheduledJobs,
+  JobRunLedger,
+  JobScheduler,
+  parseSchedulerMode,
+  projectCanvasSyncOutcome,
+  SCHEDULER_ENV,
+  type ScheduledJobName,
+  type ScheduledJobOutcome,
+  stopSchedulerOnSigterm,
+  successOutcome,
+} from "./job-scheduler.ts";
 import { LifecycleNotificationService } from "./lifecycle-notification-service.ts";
 import { NOTIFICATION_MODE_ENV, parseNotificationMode } from "./notification-mode.ts";
 import {
@@ -71,6 +84,7 @@ const transport = (process.env.AR_SLACK_TRANSPORT ?? "socket").trim().toLowerCas
 // 不正値は他の設定より先に拒否し、意図しない方式でSlackへ投稿し始めないようにする。
 const notificationMode = parseNotificationMode(process.env[NOTIFICATION_MODE_ENV]);
 const digestMode = parseDigestMode(process.env[DIGEST_MODE_ENV]);
+const schedulerMode = parseSchedulerMode(process.env[SCHEDULER_ENV]);
 if (transport !== "socket" && transport !== "http") {
   throw new Error("AR_SLACK_TRANSPORTはsocketまたはhttpを指定してください。");
 }
@@ -424,6 +438,41 @@ const syncProjectProjection = async (
   };
 };
 
+// 定期処理の本体。HTTPの/internal/*とin-process schedulerの両方から同じ関数を呼ぶ。
+// 前提条件が無いジョブはnullにし、HTTPでは503を返し、schedulerには登録しない。
+const runIssueMetadataSync = () => issueMetadata.refresh([repository]);
+const runProjectListSync =
+  projectListChannelId && sharedRepository
+    ? () =>
+        sharedProjectListService.sync(projectListChannelId, undefined, {
+          teamId: slackTeamId,
+          scope: { kind: "repo", repository: sharedRepository },
+          target: { kind: "channel", id: projectListChannelId },
+          accessibleRepositories: [sharedRepository],
+        })
+    : null;
+const runProjectCanvasSync = async () =>
+  syncExistingPersonalCanvases(
+    await canvasProjectionService.listExistingStates(),
+    slackTeamId,
+    syncProjectProjection,
+  );
+const runCalendarSync = googleCalendarService
+  ? () => googleCalendarService.syncAll(slackTeamId)
+  : null;
+const runDeadlineReminders = workNotificationService
+  ? () => workNotificationService.notifyDeadlines()
+  : null;
+// 日次digestの中身はWorkNotificationService.sendDigest()に任せ、ここでは呼ぶだけにする。
+const runWorkDigest = workNotificationService ? () => workNotificationService.sendDigest() : null;
+const runReviewReminders = reviewService ? () => reviewService.remindPending() : null;
+const jobRunLedger = new JobRunLedger(store, `http:${process.pid}`);
+const runJobFromHttp = <T>(
+  name: ScheduledJobName,
+  run: () => Promise<T>,
+  outcome: (result: T) => ScheduledJobOutcome = successOutcome,
+): Promise<T> => jobRunLedger.runFromHttp(name, DEFAULT_JOB_CADENCES[name], run, outcome);
+
 receiver?.router.get("/health", (_request, response) => {
   response.status(200).json(buildHealthResponse());
 });
@@ -538,7 +587,7 @@ receiver?.router.post(
         response.status(400).json({ ok: false, error: "invalid_issue_metadata_command" });
         return;
       }
-      const result = await issueMetadata.refresh([repository]);
+      const result = await runJobFromHttp("issue-metadata-sync", runIssueMetadataSync);
       response.status(200).json({ ok: true, schemaVersion: 1, ...result });
     } catch (error) {
       console.error(error instanceof Error ? error.message : "Issue metadata同期に失敗しました。");
@@ -551,7 +600,7 @@ receiver?.router.post(
   "/internal/project-list-sync",
   raw({ type: "application/json", limit: "1kb" }),
   async (request, response) => {
-    if (!projectListChannelId || !sharedRepository) {
+    if (!runProjectListSync) {
       response.status(503).json({ ok: false, error: "project_list_channel_required" });
       return;
     }
@@ -562,12 +611,7 @@ receiver?.router.post(
     }
     try {
       parseProjectListSyncCommand(body);
-      const result = await sharedProjectListService.sync(projectListChannelId, undefined, {
-        teamId: slackTeamId,
-        scope: { kind: "repo", repository: sharedRepository },
-        target: { kind: "channel", id: projectListChannelId },
-        accessibleRepositories: [sharedRepository],
-      });
+      const result = await runJobFromHttp("project-list-sync", runProjectListSync);
       response.status(200).json({ ok: true, schemaVersion: 1, ...result });
     } catch (error) {
       if (isRetryableWorkError(error)) {
@@ -600,10 +644,10 @@ receiver?.router.post(
       return;
     }
     try {
-      const result = await syncExistingPersonalCanvases(
-        await canvasProjectionService.listExistingStates(),
-        slackTeamId,
-        syncProjectProjection,
+      const result = await runJobFromHttp(
+        "project-canvas-sync",
+        runProjectCanvasSync,
+        projectCanvasSyncOutcome,
       );
       if (result.totals.error > 0) {
         const retryable = result.results.some((item) => item.status === "error" && item.retryable);
@@ -630,7 +674,7 @@ receiver?.router.post(
   "/internal/calendar-sync",
   raw({ type: "application/json", limit: "1kb" }),
   async (request, response) => {
-    if (!googleCalendarService) {
+    if (!runCalendarSync) {
       response.status(503).json({ ok: false, error: "google_calendar_required" });
       return;
     }
@@ -645,7 +689,7 @@ receiver?.router.post(
         response.status(400).json({ ok: false, error: "invalid_calendar_command" });
         return;
       }
-      const results = await googleCalendarService.syncAll(slackTeamId);
+      const results = await runJobFromHttp("calendar-sync", runCalendarSync);
       response.status(200).json({ ok: true, schemaVersion: 1, results });
     } catch (error) {
       console.error(error instanceof Error ? error.message : "Calendar同期に失敗しました。");
@@ -658,7 +702,7 @@ receiver?.router.post(
   "/internal/deadline-reminders",
   raw({ type: "application/json", limit: "1kb" }),
   async (request, response) => {
-    if (!workNotificationService) {
+    if (!runDeadlineReminders) {
       response.status(503).json({ ok: false, error: "work_notification_channel_required" });
       return;
     }
@@ -673,7 +717,7 @@ receiver?.router.post(
         response.status(400).json({ ok: false, error: "invalid_deadline_command" });
         return;
       }
-      const notified = await workNotificationService.notifyDeadlines();
+      const notified = await runJobFromHttp("deadline-reminders", runDeadlineReminders);
       response.status(200).json({ ok: true, notified, schemaVersion: 1 });
     } catch (error) {
       console.error(error instanceof Error ? error.message : "期限通知処理に失敗しました。");
@@ -686,7 +730,7 @@ receiver?.router.post(
   "/internal/work-digest",
   raw({ type: "application/json", limit: "1kb" }),
   async (request, response) => {
-    if (!workNotificationService) {
+    if (!runWorkDigest) {
       response.status(503).json({ ok: false, error: "work_notification_channel_required" });
       return;
     }
@@ -701,7 +745,7 @@ receiver?.router.post(
         response.status(400).json({ ok: false, error: "invalid_digest_command" });
         return;
       }
-      const itemCount = await workNotificationService.sendDigest();
+      const itemCount = await runJobFromHttp("work-digest", runWorkDigest);
       response.status(200).json({ ok: true, itemCount, schemaVersion: 1 });
     } catch (error) {
       console.error(error instanceof Error ? error.message : "作業ダイジェストに失敗しました。");
@@ -714,7 +758,7 @@ receiver?.router.post(
   "/internal/review-reminders",
   raw({ type: "application/json", limit: "1kb" }),
   async (request, response) => {
-    if (!reviewService) {
+    if (!runReviewReminders) {
       response.status(503).json({ ok: false, error: "github_app_required" });
       return;
     }
@@ -729,7 +773,7 @@ receiver?.router.post(
         response.status(400).json({ ok: false, error: "invalid_reminder_command" });
         return;
       }
-      const processed = await reviewService.remindPending();
+      const processed = await runJobFromHttp("review-reminders", runReviewReminders);
       response.status(200).json({ ok: true, processed, schemaVersion: 1 });
     } catch (error) {
       console.error(error instanceof Error ? error.message : "Review再通知処理に失敗しました。");
@@ -803,6 +847,29 @@ if (transport === "http") {
 } else {
   await app.start();
   console.log(`⚡ Slack adapter Socket Modeを起動しました: ${repository}`);
+}
+
+if (schedulerMode === "inprocess") {
+  const withOutcome =
+    <T>(run: () => Promise<T>, outcome: (result: T) => ScheduledJobOutcome) =>
+    async () =>
+      outcome(await run());
+  const scheduler = new JobScheduler({
+    store,
+    jobs: defineScheduledJobs({
+      "work-digest": runWorkDigest && withOutcome(runWorkDigest, successOutcome),
+      "deadline-reminders":
+        runDeadlineReminders && withOutcome(runDeadlineReminders, successOutcome),
+      "issue-metadata-sync": withOutcome(runIssueMetadataSync, successOutcome),
+      "project-list-sync": runProjectListSync && withOutcome(runProjectListSync, successOutcome),
+      "project-canvas-sync": withOutcome(runProjectCanvasSync, projectCanvasSyncOutcome),
+      "calendar-sync": runCalendarSync && withOutcome(runCalendarSync, successOutcome),
+      "review-reminders": runReviewReminders && withOutcome(runReviewReminders, successOutcome),
+    }),
+  });
+  stopSchedulerOnSigterm(scheduler);
+  scheduler.start();
+  console.log(`定期処理をprocess内で開始しました: ${scheduler.jobNames.join(", ")}`);
 }
 
 function required(name: string): string {

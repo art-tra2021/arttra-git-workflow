@@ -2,7 +2,8 @@
 
 ## 対象と境界
 
-GitHub Projectsを正本とし、利用者が`/ar canvas`で既に作成した本人専用Slack Canvasだけを15分ごとに更新する。
+GitHub Projectsを正本とし、利用者が`/ar canvas`で既に作成した本人専用Slack Canvasだけを1時間ごとに更新する。
+定期実行は常駐VMのprocess内で行う（[Socket Mode常駐VM runbookの定期処理](slack-socket-vm-runbook.md#定期処理)）。
 
 - endpointは`POST /internal/project-canvas-sync`である。
 - command本文は固定JSON `{"schemaVersion":1,"kind":"project-canvas.sync"}`である。
@@ -32,17 +33,16 @@ lease競合など明示的に再試行可能な失敗がある場合は、`Retry
 
 ## deploy後の設定と確認
 
-Cloud Scheduler jobはmainへのmergeとCloud Run deployが完了してから作成する。
-scheduleは`*/15 * * * *`、timezoneは`Asia/Tokyo`とし、固定本文と署名headerを設定する。
-Job secretをrotationした場合は固定本文の署名headerも更新する。
+定期実行は`AR_SCHEDULER=inprocess`の常駐VMが毎時0分に行い、Cloud Schedulerは使わない。
+HTTPで手動実行するときは、固定本文と、本文に対する署名headerを付けて送る。
 
-作成前に対象をread-backし、既存の本人専用Canvas binding以外が含まれないことを確認する。
-作成後は次を順に確認する。
+配備の後に対象をread-backし、既存の本人専用Canvas binding以外が含まれないことを確認する。
+続けて次を順に確認する。
 
 1. 手動実行のHTTP応答が署名付きcommandを受理し、対象Canvasを`success`または`unchanged`として返す。
 2. Firestoreの`project-canvas` stateにある`contentHash`と更新時刻が実行結果に一致する。
 3. 同じProject状態でもう一度実行すると`unchanged`になり、Slack Canvasの内容とACLが書き換わらない。
 4. channel bindingや別team bindingがあれば`skipped`になり、新しいCanvasや共有先が作られない。
-5. Cloud Schedulerの直近実行が成功し、Cloud Run logにsecretや署名前本文が出ていない。
+5. VMのログに`定期処理 project-canvas-sync (<枠>) を実行しました`が出ており、ログにsecretや署名前本文が出ていない。
 
-失敗時はSchedulerのHTTP status、Cloud Run log、bindingの`reasonCode`、GitHub identity、repository access、Canvas stateの順に確認する。
+失敗時はVMのログ（`定期処理 project-canvas-sync`の行）、Firestoreの実行記録、bindingの`reasonCode`、GitHub identity、repository access、Canvas stateの順に確認する。

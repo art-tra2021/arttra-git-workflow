@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Slack操作だけを受けるSocket Modeの常駐VMを、Cloud Runと同じimage・設定で配備する。
-# GitHub webhookと定期jobはCloud Runに残す。秘密の値はこのscriptでは読まない。
+# Slack操作を受けるSocket Modeの常駐VMを、Cloud Runと同じimage・設定で配備する。
+# GitHub webhookはCloud Runに残す。秘密の値はこのscriptでは読まない。
+# VMだけに足す環境変数（定期処理のAR_SCHEDULERなど）は、vm-overrides.confと--envで渡す。
 
 ar_project="bmarumado"
 ar_run_region="asia-northeast1"
@@ -15,26 +16,63 @@ ar_app_token_secret="arttra-work-slack-app-token"
 ar_image_repository="asia-northeast1-docker.pkg.dev/bmarumado/arttra-work/slack-adapter"
 ar_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ar_cloud_init="${ar_script_dir}/../apps/slack-adapter/deploy/socket-vm/cloud-init.yaml"
+ar_vm_env_file="${AR_SOCKET_VM_OVERRIDES_FILE:-${ar_script_dir}/../apps/slack-adapter/deploy/socket-vm/vm-overrides.conf}"
 ar_image=""
 ar_confirmed=false
+ar_vm_env_flags=()
+ar_vm_env_json="{}"
 
 usage() {
 	cat <<'EOF'
 Usage:
-  scripts/slack-socket-vm.sh preview [--image <repository@sha256:digest>]
+  scripts/slack-socket-vm.sh preview [--image <repository@sha256:digest>] [--env NAME=VALUE]...
   scripts/slack-socket-vm.sh status
-  scripts/slack-socket-vm.sh deploy [--image <repository@sha256:digest>] --yes
+  scripts/slack-socket-vm.sh deploy [--image <repository@sha256:digest>] [--env NAME=VALUE]... --yes
   scripts/slack-socket-vm.sh stop --yes
 
 preview and status print deterministic JSON without mutating resources.
 deploy creates or updates the Socket Mode VM from the Cloud Run template.
 Without --image, deploy uses the digest pinned in the Cloud Run template.
+VM-only plain environment variables come from apps/slack-adapter/deploy/socket-vm/vm-overrides.conf,
+then from --env, which overrides the file for this deploy only. They replace the same
+names inherited from Cloud Run and are never applied to Cloud Run.
 EOF
 }
 
 fail() {
 	printf 'slack-socket-vm: %s\n' "$*" >&2
 	exit 64
+}
+
+# VMだけに渡す非secretの環境変数を1件足す。transport、PORT、secretは上書きさせない。
+add_vm_env() {
+	local ar_entry="$1" ar_origin="$2" ar_name ar_value
+	if [[ ! "${ar_entry}" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]]; then
+		fail "${ar_origin}: VM env must be NAME=VALUE with an upper-case name"
+	fi
+	ar_name="${BASH_REMATCH[1]}"
+	ar_value="${BASH_REMATCH[2]}"
+	case "${ar_name}" in
+	PORT | AR_SLACK_TRANSPORT | SLACK_APP_TOKEN | SLACK_SIGNING_SECRET)
+		fail "${ar_origin}: ${ar_name} cannot be overridden for the VM"
+		;;
+	esac
+	ar_vm_env_json="$(jq -c --arg name "${ar_name}" --arg value "${ar_value}" \
+		'. + {($name): $value}' <<<"${ar_vm_env_json}")"
+}
+
+# vm-overrides.confを読み、その後に--envを重ねる。空行と#で始まる行は読み飛ばす。
+load_vm_env() {
+	local ar_line ar_entry
+	if [[ -f "${ar_vm_env_file}" ]]; then
+		while IFS= read -r ar_line || [[ -n "${ar_line}" ]]; do
+			[[ "${ar_line}" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+			add_vm_env "${ar_line}" "vm-overrides.conf"
+		done <"${ar_vm_env_file}"
+	fi
+	for ar_entry in "${ar_vm_env_flags[@]+"${ar_vm_env_flags[@]}"}"; do
+		add_vm_env "${ar_entry}" "--env"
+	done
 }
 
 validate_image() {
@@ -54,18 +92,25 @@ describe_service() {
 # Cloud Runのtemplateから、Socket Mode用の非secret環境変数とsecret参照を作る。
 socket_config() {
 	local ar_service_json="$1"
-	jq -ec --arg appTokenSecret "${ar_app_token_secret}" '
+	jq -ec --arg appTokenSecret "${ar_app_token_secret}" --argjson vmEnv "${ar_vm_env_json}" '
     (.spec.template.spec.containers[0] // error("Cloud Run container is missing")) as $container
     | ($container.env // []) as $env
+    | ([$env[] | select(.valueFrom.secretKeyRef != null) | .name]) as $secretNames
+    | if ([$vmEnv | keys[] | select(. as $name | $secretNames | index($name))] | length) > 0 then
+        error("VM env must not override secret references")
+      else . end
     | {
         image: ($container.image // ""),
         env: (
           [ $env[]
             | select(has("valueFrom") | not)
             | select(.name != "PORT" and .name != "AR_SLACK_TRANSPORT")
+            | select(.name as $name | $vmEnv | has($name) | not)
             | {name, value: (.value // "")} ]
+          + ($vmEnv | to_entries | map({name: .key, value: .value}))
           + [{name: "AR_SLACK_TRANSPORT", value: "socket"}]
         ),
+        vmEnv: $vmEnv,
         secrets: (
           [ $env[]
             | select(.valueFrom.secretKeyRef != null)
@@ -139,6 +184,7 @@ plan_json() {
         target: {
           image: $image,
           envNames: [$config.env[].name] | sort,
+          vmEnv: $config.vmEnv,
           secrets: ($config.secrets | map({key: .name, value: .secret}) | from_entries)
         },
         appToken: {secret: $appTokenSecret, ready: $appTokenReady},
@@ -286,6 +332,11 @@ while [[ $# -gt 0 ]]; do
 		ar_image="$2"
 		shift 2
 		;;
+	--env)
+		[[ $# -ge 2 ]] || fail "--env requires NAME=VALUE"
+		ar_vm_env_flags+=("$2")
+		shift 2
+		;;
 	--yes)
 		ar_confirmed=true
 		shift
@@ -303,10 +354,18 @@ done
 command -v gcloud >/dev/null || fail "gcloud is required"
 command -v jq >/dev/null || fail "jq is required"
 
+# VM専用の上書きは、それを使うpreviewとdeployだけで読む。
+# 設定ファイルが壊れていても、statusでの確認とstopでの停止はできるようにする。
 case "${ar_action}" in
-preview) preview_release ;;
+preview)
+	load_vm_env
+	preview_release
+	;;
 status) status_release ;;
-deploy) deploy_release ;;
+deploy)
+	load_vm_env
+	deploy_release
+	;;
 stop) stop_release ;;
 -h | --help)
 	usage
