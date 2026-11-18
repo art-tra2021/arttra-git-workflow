@@ -1,0 +1,1026 @@
+{
+  "schema_version": 1,
+  "repository": "art-tra2021/arttra-git-workflow",
+  "actor": "roz",
+  "device": "device-1785565509413-24698",
+  "branch": "feature/201-rules-v3-roz",
+  "head": "31b8ef6ae74825453f832218cd0f02aab42e4916",
+  "observed_at_unix_ms": 1795014624532,
+  "files": [
+    {
+      "path": ".github/ISSUE_TEMPLATE/business.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/intake.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/task.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/work.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": ".github/pull_request_template.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": ".github/workflows/emergency-review.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": ".github/workflows/policy.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": ".github/workflows/post-review-required.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": ".github/workflows/pr-policy-recheck.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": ".github/workflows/project-status-audit.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": ".mise.toml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "README.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/README.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/dev-env.template",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/package.json",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/slack-app-manifest.dev.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/slack-app-manifest.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/app.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/approval-status.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/approval.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/bulk-add.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/canvas-service.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/channel-health.ts",
+      "committed": false,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/github-app.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/github-cli.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/github-shared.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/github-webhook-processor.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/google-calendar-service.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/home-view.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/identity-service.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/index.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/issue-command.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/issue-form.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/issue-hierarchy.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/issue-not-created.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/issue-requester.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/issue-schema.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/job-scheduler.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/lifecycle-notification-service.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/notification-mode.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/notification-outbox-cli.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/notification-outbox.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/open-items-cache.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/origin-thread.ts",
+      "committed": false,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/project-canvas-schedule.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/project-catalog.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/project-field-sync.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/project-list-service.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/project-list.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/project-read-model.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/reqadd-project.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/reqadd-service.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/reqadd.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/review-types.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-action-message.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-command.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-direct-notifier.ts",
+      "committed": false,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-lifecycle-notifier.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-notification-reconciler.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-requirement-notifier.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/slack-work-handlers.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/start.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/status-engine.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/status-notifier.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/status-reconciler.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/status-snapshot.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/sync-project-canvas.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/sync-project-list.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/types.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/work-actions.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/work-buttons.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/work-github.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/src/work-rows.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/approval.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/ar-command.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/canvas-service.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/direct-notification-mode.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/e2e-findings.test.ts",
+      "committed": false,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/github-app.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/github-webhook.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/home-view.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/issue-command.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/issue-modal-flow.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/issue-submit.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/job-scheduler.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/lifecycle-notification-service.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/mrkdwn-check.ts",
+      "committed": false,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/open-items-cache.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/project-canvas-schedule.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/project-catalog.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/project-field-sync.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/project-list-service.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/project-list.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/project-read-model.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/reqadd-service.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/reqadd.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/slack-action-message.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/slack-direct-notifier.test.ts",
+      "committed": false,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/slack-lifecycle-notifier.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/slack-mrkdwn.test.ts",
+      "committed": false,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/slack-work-handlers.test.ts",
+      "committed": false,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/status-engine.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/status-notifier.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/status-reconciler.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": true,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/work-actions.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/work-diff-digest.test.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "apps/slack-adapter/test/work-fixtures.ts",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "docs/slack-cost-redesign-report.md",
+      "committed": false,
+      "staged": false,
+      "unstaged": false,
+      "untracked": true
+    },
+    {
+      "path": "docs/slack-notification-routing-draft.md",
+      "committed": false,
+      "staged": false,
+      "unstaged": false,
+      "untracked": true
+    },
+    {
+      "path": "docs/slack-reqadd-draft.md",
+      "committed": false,
+      "staged": false,
+      "unstaged": false,
+      "untracked": true
+    },
+    {
+      "path": "docs/slack-socket-vm-runbook.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "docs/v3-implementation-plan.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "docs/workflow-v2.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "governance/merge-authority.json",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "governance/merge-authority.schema.json",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "governance/ruleset.json",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/emergency-review-test.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/emergency-review.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/issue-policy-lib.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/issue-policy-test.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/issue-policy.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/merge-authority-policy-lib.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/merge-authority-policy-test.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/post-review-required-test.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/post-review-required.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/pr-policy-annotation-lib.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/pr-policy-link-lib.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/pr-policy-recheck-test.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/pr-policy-recheck.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/pr-policy-test.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/pr-policy.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/project-status-audit-test.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "scripts/project-status-audit.sh",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "src/branch.rs",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "src/delivery.rs",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "src/issue_audit.rs",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "src/main.rs",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "src/tui.rs",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "templates/ai/arttra-git-workflow/SKILL.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "templates/repository/base/.github/ISSUE_TEMPLATE/intake.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "templates/repository/base/.github/ISSUE_TEMPLATE/task.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "templates/repository/base/.github/ISSUE_TEMPLATE/work.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "templates/repository/base/.github/pull_request_template.md",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "templates/repository/wrappers/business/.github/ISSUE_TEMPLATE/business.yml",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    },
+    {
+      "path": "templates/repository/wrappers/business/template.json",
+      "committed": true,
+      "staged": false,
+      "unstaged": false,
+      "untracked": false
+    }
+  ]
+}
